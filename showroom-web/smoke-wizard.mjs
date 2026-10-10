@@ -32,6 +32,12 @@
 //      镜像清单每行删除（confirm 含镜像名与回滚失效语义 → image-rm 提交体 → alert 回收量 →
 //      清单+空间条刷新；confirm 取消不提交；失败走顶部条）、
 //      磁盘 E_QUOTA 顶部条追加删除引导并刷新空间条（内存类 E_QUOTA 不追加）
+//  13) §15 主机编排：期望状态渲染（中间件开关+「已启用」徽标 / host.env 其余键通用键值渲染
+//      含 FRP 不特判 / 四参数当前值回填 / 漂移黄条 warn-err 两档）、两段式（无 confirm 仅预演
+//      返回 actions+impact 人读行不落盘；confirm=true 才 POST 执行并渲染报告；禁用中间件
+//      impact 含受影响项目 → 红色警示 + 二次 confirm 取消不提交）、Redis 池黄条两态
+//      （常态数字行 / <20% 余量黄条+「扩容」按钮）、扩容对话框流（非法值字段内联拒绝 →
+//      confirm:false 取服务端提示原文逐字节展示 → 「我已了解，执行扩容」→ 结果回报+自动重取）
 import { readFileSync, writeFileSync, mkdtempSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -83,7 +89,10 @@ const clickTab = (name) => fire($s('tabs'), 'click', { target: tabBtn(name) });
 /** tabs 方向键支持：querySelectorAll 桩返回按钮序列（与页面 #tabs 初始顺序一致）。 */
 const armTabs = () => { $s('tabs').querySelectorAll = () => ['proj', 'db', 'status', 'help'].map(tabBtn); };
 /** 模拟浏览器渲染 HTML：给关键按钮桩设置初始文案（busy 恢复断言按真实文字比对）。 */
-const BTN_TEXT = { 'pub-submit': '一键部署', 'btn-upload-only': '仅上传', 'dep-submit': '发布', 'ad-na-submit': '发放' };
+const BTN_TEXT = {
+  'pub-submit': '一键部署', 'btn-upload-only': '仅上传', 'dep-submit': '发布', 'ad-na-submit': '发放',
+  'hs-apply': '查看变更', 'hs-confirm': '确认执行', 'hs-rx-preview': '获取确认提示', 'hs-rx-run': '我已了解，执行扩容',
+};
 const armBtnText = () => { for (const [id, t] of Object.entries(BTN_TEXT)) $s(id).textContent = t; };
 globalThis.document = {
   getElementById: $s,
@@ -216,6 +225,26 @@ const imagesRemoved = new Set();          // 模拟服务端删除后清单收�
 const imageRmBodies = [];
 let imageRmFail = null;                   // 一次性 image-rm 失败响应（{error,msg}）
 let publishQuota = null;                  // 一次性 publish E_QUOTA（{msg}：磁盘/内存两态文案）
+// 场景 §15 捕获：主机编排（/_api/admin/host GET 期望状态 / POST 两段式 + Redis 扩容流）
+let hostGetN = 0;
+const hostPostBodies = [];                // 全部 POST 体（断言 confirm 两态与形状）
+const REDIS_PROMPT = [
+  'Redis 逻辑库池将 256 → 256：需重启 Redis 实例（约 3 秒）。',
+  '- 数据已开 AOF 持久化（appendonly yes），重启不丢已确认写入；',
+  '- 使用 REDIS_* 的应用连接会闪断一次并自动重连（客户端重试期间个别请求可能报错）；',
+  '- 数据卷 _middleware/redis 为 bind 挂载，容器重建不触碰数据。',
+  '确认执行请加 --confirm。',
+].join('\n');
+const HOST_STATE = { // 方案 §4 契约形状 + 协调者补充的 FRP 键（前端通用键值渲染）
+  host_env: { MIDDLEWARE: ['postgres', 'redis', 'registry'], CADDY: true, LAN_HOST: '10.0.0.8', PUBLIC_HOST: '', TUNING: 'sysctl', DEDUP: 'weekly', FRP: 'running' },
+  policy: { MAX_SLOTS: 30, REDIS_DBS: 256, RESERVE_MEM_MB: 1536, DISK_RESERVE_GB: 20, UPLOAD_SPACE_FACTOR: 4 },
+  drift: [
+    { item: 'sr-redis', expected: '--databases 256', actual: '--databases 16', severity: 'warn', advice: 'showroomctl middleware set redis databases=256' },
+  ],
+  redis_pool: { used: 27, total: 256, headroom: 229, suggest_expand: false },
+  suggestions: [],
+};
+let hostResp = HOST_STATE; // 可替换（池两态/扩容后收敛）
 const ADM_USERS = { users: [
   { user: 'alice', projects: 2, keys: [
     { kid: 'kid-a1', admin: true, created: '2026-09-01T10:00:00' },
@@ -360,6 +389,40 @@ globalThis.fetch = async (url, init = {}) => {
   if (u.includes('/_api/admin/key-rm')) { keyRmBodies.push(JSON.parse(dec2.decode(init.body))); return resp(200, { ok: true }); }
   if (u.includes('/_api/admin/users')) { adminUsersN++; if (adminFail404) return resp(404, { error: 'E_AUTH' }); return resp(200, ADM_USERS); }
   if (u.includes('/_api/admin/status')) { adminStatusN++; if (adminFail404) return resp(404, { error: 'E_AUTH' }); return resp(200, ADM_STATUS); }
+  if (u.includes('/_api/admin/host')) { // §15：GET 期望状态 / POST 两段式（host_env+policy）与扩容第二形态（redis_databases）
+    if ((init?.method || 'GET') === 'POST') {
+      const body = JSON.parse(dec2.decode(init.body));
+      hostPostBodies.push(body);
+      if (body.redis_databases !== undefined) { // 扩容流：无 confirm 返回提示原文；confirm=true 走状态机回报
+        if (!body.confirm) return resp(200, { prompt: REDIS_PROMPT, confirm_required: true });
+        hostResp = { ...HOST_STATE, redis_pool: { used: 27, total: body.redis_databases, headroom: body.redis_databases - 27, suggest_expand: false } };
+        return resp(200, { ok: true, databases: body.redis_databases, restart_secs: 3 });
+      }
+      const keep = String(body.host_env?.MIDDLEWARE ?? '').split(/\s+/).filter(Boolean);
+      const removed = ['postgres', 'redis', 'registry'].filter((m) => !keep.includes(m));
+      const affected = removed.includes('redis') ? ['demo', 'demo2'] : []; // 禁 redis ⇒ 有项目引用
+      if (!body.confirm) return resp(200, { // 写盘前预演：actions（needed 两态）+ impact + confirm_required
+        actions: [
+          { kind: 'ContainerRm', target: 'sr-redis', needed: true, detail: 'docker rm -f -v sr-redis（bind 卷除外）' },
+          { kind: 'UnitDisableRm', target: 'showroom-dedup.timer', needed: true, detail: 'systemctl disable --now + rm' },
+          { kind: 'ContainerUp', target: 'sr-postgres', needed: false, detail: 'postgres:16-alpine（已就绪，参数一致）' },
+        ],
+        impact: { removed_middleware: removed, affected_projects: affected },
+        confirm_required: true,
+      });
+      hostResp = { // confirm=true：host_env/policy 按提交体收敛
+        ...HOST_STATE,
+        host_env: { ...HOST_STATE.host_env, MIDDLEWARE: keep },
+        policy: { ...HOST_STATE.policy, ...(body.policy || {}) },
+      };
+      return resp(200, { ok: true, report: { changed: 2, warnings: [], actions: [
+        { kind: 'ContainerRm', target: 'sr-redis', needed: true, ok: true, result: 'removed' },
+        { kind: 'UnitDisableRm', target: 'showroom-dedup.timer', needed: true, ok: true, result: 'disabled' },
+      ] } });
+    }
+    hostGetN++;
+    return resp(200, hostResp);
+  }
   if (u.includes('/_api/db-restore')) {
     restoreLens.push(init.body?.length ?? 0);
     return resp(200, { ok: true });
@@ -824,6 +887,122 @@ await sleep(60);
 ok(($s('msg').textContent || '').includes('E_AUTH'), 'admin 接口 404 E_AUTH：顶部条报错');
 adminFail404 = false;
 
+// —— §15.1/§15.2 主机编排：期望状态渲染 + 两段式（无 confirm 不执行 / confirm 才 POST）——
+ok(hostGetN >= 1, '进入管理页：/_api/admin/host 自动拉取（期望状态）');
+ok($s('hs-mw-postgres').checked && $s('hs-mw-redis').checked && $s('hs-mw-registry').checked,
+  '中间件集合：三开关按 host_env.MIDDLEWARE 勾选');
+ok(!hidden('hs-mw-redis-badge') && ($s('hs-mw-redis-badge').textContent || '') === '已启用', '启用的中间件带「已启用」徽标');
+const hsKv = $s('hs-kv-tbl:q').innerHTML || '';
+ok(hsKv.includes('FRP') && hsKv.includes('running'), 'host.env 其余键通用键值渲染（FRP 项原样显示，不特判）');
+ok(hsKv.includes('CADDY') && hsKv.includes('LAN_HOST') && hsKv.includes('sysctl'), 'host.env 键值表含 CADDY/LAN_HOST/TUNING');
+ok($s('hs-p-redisdbs').value === '256' && $s('hs-p-disk').value === '20'
+  && $s('hs-p-mem').value === '1536' && $s('hs-p-factor').value === '4',
+  '参数当前值回填（REDIS_DBS/DISK_RESERVE_GB/RESERVE_MEM_MB/UPLOAD_SPACE_FACTOR）');
+const hsDrift = $s('hs-drift').innerHTML || '';
+ok(hsDrift.includes('sr-redis') && hsDrift.includes('warnbar') && hsDrift.includes('--databases 16') && hsDrift.includes('建议'),
+  '漂移清单黄条：条目 + 期望/实际 + 建议命令渲染');
+ok(!hidden('hs-pool-ok') && hidden('hs-pool-warn'), '池状态一（余量充足）：常态数字行、无黄条');
+ok(($s('hs-pool-ok').innerHTML || '').includes('27') && ($s('hs-pool-ok').innerHTML || '').includes('256')
+  && ($s('hs-pool-ok').innerHTML || '').includes('229'), '池状态一：已用/共/余 数字展示（tabular-nums 容器）');
+
+// 两段式 A：仅改参数（impact 无受影响项目）——预演不落盘、确认后才 POST confirm=true
+$s('hs-p-mem').value = '2048';
+hostPostBodies.length = 0;
+confirmMsgs.length = 0;
+click('hs-apply');
+await sleep(60);
+const hsPv = hostPostBodies.find((b) => b.confirm === false);
+ok(hsPv && hsPv.host_env && hsPv.host_env.MIDDLEWARE === 'postgres redis registry',
+  '查看变更：POST confirm=false（开关合成空格集合）');
+ok(hsPv && hsPv.host_env.FRP === 'running' && hsPv.host_env.CADDY === true, '查看变更：host_env 其余键全量透传（含 FRP）');
+ok(hsPv && hsPv.policy && hsPv.policy.RESERVE_MEM_MB === 2048 && hsPv.policy.REDIS_DBS === 256,
+  '查看变更：policy 全量回传（改值覆写、REDIS_DBS 原样——它只走扩容流）');
+ok(!hostPostBodies.some((b) => b.confirm === true), '两段式：无 confirm 不执行（无 confirm=true 请求）');
+ok(!hidden('hs-review') && hidden('hs-report') && !hidden('hs-confirm'), '预演后：变更清单与「确认执行」出现、报告隐藏');
+const hsAtbl = $s('hs-actions-tbl:q').innerHTML || '';
+ok(hsAtbl.includes('删容器') && hsAtbl.includes('sr-redis') && hsAtbl.includes('起容器') && hsAtbl.includes('sr-postgres'),
+  'actions 人读行：kind 中文化 + 目标渲染（needed=false 行亦列出）');
+ok(($s('hs-review-sum').textContent || '').includes('3 项动作') && ($s('hs-review-sum').textContent || '').includes('2 项需执行'),
+  '预演摘要：N 项动作 / M 项需执行');
+ok(!($s('hs-impact').innerHTML || '').includes('warnbar err'), '无受影响项目：不出现红色警示');
+click('hs-confirm');
+await sleep(100);
+ok(confirmMsgs.length === 0, '无受影响项目：确认执行不弹二次 confirm');
+const hsRunA = hostPostBodies.find((b) => b.confirm === true);
+ok(hsRunA && hsRunA.policy && hsRunA.policy.RESERVE_MEM_MB === 2048, '确认执行：POST confirm=true（同一期望状态体）');
+const hsRep = $s('hs-report').innerHTML || '';
+ok(!hidden('hs-report') && hsRep.includes('执行报告') && hsRep.includes('完成 2 项'), '执行报告渲染（完成 N 项）');
+ok(hsRep.includes('成功') && hsRep.includes('sr-redis'), '报告行含成功标记与目标');
+ok(await waitFor(() => hostGetN >= 2, 3000), '执行后自动重取期望状态（面板收敛）');
+ok(!$s('hs-confirm').disabled && $s('hs-confirm').textContent === '确认执行', '确认执行按钮恢复原文与可用');
+
+// 两段式 B：禁用 redis（impact 含受影响项目）→ 红色警示 + 二次 confirm
+$s('hs-mw-redis').checked = false;
+hostPostBodies.length = 0;
+confirmMsgs.length = 0;
+click('hs-apply');
+await sleep(60);
+const hsImp = $s('hs-impact').innerHTML || '';
+ok(hsImp.includes('warnbar err') && hsImp.includes('demo') && hsImp.includes('demo2'),
+  '禁用中间件且 impact 含受影响项目：红色警示渲染（列项目名）');
+ok(hsImp.includes('redis'), 'impact 标注将禁用的中间件');
+ok(hidden('hs-report'), '新一轮预演：上一轮报告收起');
+confirmRet = false; // 二次 confirm 取消：不得提交
+click('hs-confirm');
+await sleep(60);
+ok(!hostPostBodies.some((b) => b.confirm === true), '二次 confirm 取消：不执行（无 confirm=true 请求）');
+const hsAsk = confirmMsgs.at(-1) || '';
+ok(hsAsk.includes('demo') && hsAsk.includes('demo2') && hsAsk.includes('确认'), '二次 confirm 文案列受影响项目并请求确认');
+confirmRet = true;
+click('hs-confirm');
+await sleep(100);
+ok(hostPostBodies.some((b) => b.confirm === true && b.host_env.MIDDLEWARE === 'postgres registry'),
+  '二次 confirm 通过：confirm=true 执行（redis 已从集合移除）');
+
+// 池两态之二：余量 <20% → 黄条 + 「扩容」按钮
+hostResp = { ...HOST_STATE, redis_pool: { used: 250, total: 256, headroom: 6, suggest_expand: true } };
+click('hs-refresh');
+await sleep(60);
+ok(!hidden('hs-pool-warn') && hidden('hs-pool-ok'), '池状态二（<20% 余量）：黄条出现、常态行隐藏');
+ok(($s('hs-pool-warn-txt').textContent || '').includes('余量不足') && ($s('hs-pool-warn-txt').textContent || '').includes('6/256'),
+  '黄条文案：「剩 X/Y」建议扩容');
+ok(!hidden('hs-pool-expand'), '黄条带「扩容」按钮');
+
+// §15.3 扩容对话框流：非法值内联拒绝 → 提示原文逐字节 → 「我已了解，执行扩容」→ 结果回报
+hostPostBodies.length = 0;
+click('hs-pool-expand');
+ok($s('dlg-redis-x').open === true, '扩容对话框打开');
+ok(hidden('hs-rx-run') && hidden('hs-rx-prompt'), '对话框初始：提示原文与执行按钮隐藏');
+$s('hs-rx-n').value = '8';
+click('hs-rx-preview');
+ok(hostPostBodies.length === 0 && ($s('hs-rx-n-err').textContent || '').includes('16–256'),
+  '非法值（<16）：字段内联错误，不发请求');
+$s('hs-rx-n').value = '512';
+click('hs-rx-preview');
+ok(hostPostBodies.length === 0 && ($s('hs-rx-n-err').textContent || '').includes('16–256'),
+  '非法值（>256）：字段内联错误，不发请求');
+$s('hs-rx-n').value = '256';
+click('hs-rx-preview');
+await sleep(60);
+const hsRxPre = hostPostBodies.find((b) => b.redis_databases !== undefined && b.confirm === false);
+ok(hsRxPre && hsRxPre.redis_databases === 256 && !('host_env' in hsRxPre),
+  '扩容预演：POST {redis_databases,confirm:false}（第二形态，不带 host_env）');
+ok(($s('hs-rx-prompt').textContent || '') === REDIS_PROMPT, '服务端确认提示原文逐字节展示');
+ok(($s('hs-rx-prompt').textContent || '').includes('约 3 秒') && ($s('hs-rx-prompt').textContent || '').includes('AOF')
+  && ($s('hs-rx-prompt').textContent || '').includes('自动重连'), '提示原文含：重启约 3 秒 / AOF 持久 / 自动重连');
+ok(!hidden('hs-rx-run'), '提示展示后：「我已了解，执行扩容」按钮出现');
+click('hs-rx-run');
+await sleep(100);
+const hsRxRun = hostPostBodies.find((b) => b.redis_databases !== undefined && b.confirm === true);
+ok(hsRxRun && hsRxRun.redis_databases === 256, '执行扩容：POST {redis_databases,confirm:true}');
+const hsRxFb = $s('hs-rx-fb').textContent || '';
+ok(hsRxFb.includes('扩容完成') && hsRxFb.includes('256') && hsRxFb.includes('3 秒'), '结果回报：databases → N + 重启耗时');
+ok(await waitFor(() => hostGetN >= 3, 3000), '扩容后自动重取期望状态（池数字收敛）');
+ok(hidden('hs-rx-run'), '执行后：扩容按钮收起（防重复点击）');
+ok(!$s('hs-rx-run').disabled && $s('hs-rx-run').textContent === '我已了解，执行扩容', '扩容按钮恢复原文与可用');
+click('hs-rx-close');
+ok($s('dlg-redis-x').open === false, '扩容对话框关闭');
+
 // —— §13.2 Redis 浏览管理员视图（服务端 admin_view 标注路径） ——
 clickTab('status');
 await sleep(80);
@@ -920,6 +1099,23 @@ ok(html.includes('可用空间（已扣预留）') && html.includes('空间信�
 ok(html.includes('id="img-list"') && html.includes('/_api/image-rm'), '§14.3：镜像清单渲染容器 img-list + image-rm 接线');
 ok(html.includes('回滚/重建将失效') && html.includes('已回收约'), '§14.3：删除 confirm 影响文案 + alert 回收量文案');
 ok(html.includes('可到部署区删除旧镜像后重试'), '§14.2：磁盘 E_QUOTA 顶部条删除引导文案');
+// —— §15 主机编排（期望状态 / 两段式 / Redis 扩容流） ——
+ok(html.includes('/_api/admin/host'), '§15.2：/_api/admin/host 已接线（GET 期望状态 + POST 两段式）');
+for (const s of ['主机编排', '中间件集合', '已启用', '查看变更', '确认执行', '两段式', '漂移', 'Redis 逻辑库余量不足',
+  '扩容', '获取确认提示', '我已了解，执行扩容', '执行报告', '红色警示']) {
+  ok(html.includes(s), `§15 新增文案全中文：${s}`);
+}
+ok(html.includes('id="hs-mw-redis"') && html.includes('id="hs-mw-postgres"') && html.includes('id="hs-mw-registry"'),
+  '§15：中间件三开关（postgres/redis/registry）');
+ok(html.includes('id="hs-p-redisdbs"') && html.includes('id="hs-p-disk"') && html.includes('id="hs-p-mem"') && html.includes('id="hs-p-factor"'),
+  '§15：四参数控件（REDIS_DBS 只读 + 三可编辑值）');
+ok(html.includes('id="hs-pool-expand"') && html.includes('id="dlg-redis-x"') && html.includes('id="hs-apply"') && html.includes('id="hs-confirm"'),
+  '§15：扩容按钮/扩容对话框/查看变更/确认执行容器齐备');
+for (const id of ['hs-mw-postgres', 'hs-mw-redis', 'hs-mw-registry', 'hs-p-redisdbs', 'hs-p-disk', 'hs-p-mem', 'hs-p-factor', 'hs-rx-n']) {
+  ok(html.includes(`for="${id}"`), `§15 规范：控件 label for="${id}"`);
+}
+ok(html.includes('warnbar') && html.includes('.warnbar.err'), '§15：黄条/红条样式（漂移、池余量、受影响项目警示）');
+ok(html.includes('redis_databases') && html.includes('confirm_required'), '§15.3：扩容第二形态提交体 redis_databases 与 confirm_required 语义已接线');
 // —— 界面规范静态断言（B 部分逐条） ——
 ok(!/<div[^>]+onclick|onclick=/.test(html), '规范：无内联事件（含 div onclick）');
 ok(!/transition\s*:\s*all/.test(html), '规范：无 transition: all（过渡列明属性）');

@@ -105,6 +105,9 @@
   .ferr { color: #ff9aa5; font-size: 12px; margin: .1rem 0 0; min-height: 0; }
   /* §13.1 三入口并存提示徽记 */
   .badge { color: #8fa0b5; font-size: 12px; border: 1px dashed #2a2f39; border-radius: 999px; padding: 0 .5rem; }
+  /* §15 主机编排：黄条（漂移/池余量提示）与红条（error 级漂移/受影响项目警示） */
+  .warnbar { background: #3a3222; border: 1px solid #6b5f3a; color: #e8c37f; border-radius: 6px; padding: .4rem .6rem; font-size: 13px; }
+  .warnbar.err { background: #3a2226; border-color: #6b3a42; color: #ffb3bd; }
   @media (prefers-reduced-motion: reduce) {
     *, *::before, *::after { transition: none !important; animation: none !important; scroll-behavior: auto !important; }
   }
@@ -517,6 +520,66 @@
         <span class="note" id="ad-st-fb" aria-live="polite" style="margin:0"></span>
       </div>
       <div id="ad-status" class="note" aria-live="polite">（未加载）</div>
+
+      <div class="sep"></div>
+      <!-- §15 主机编排：期望状态展示（host.env/policy/漂移/Redis 池）+ 两段式变更 + 扩容流入口 -->
+      <h2>主机编排（期望状态 · 两段式变更）</h2>
+      <div class="row" style="margin-bottom:.4rem">
+        <button id="hs-refresh">刷新期望状态</button>
+        <span class="fb" id="hs-fb" aria-live="polite" style="margin:0"></span>
+      </div>
+
+      <h3>中间件集合（host.env MIDDLEWARE）</h3>
+      <div class="row" style="gap:1rem">
+        <label class="row" for="hs-mw-postgres" style="gap:.35rem"><input type="checkbox" id="hs-mw-postgres"><span>postgres <span class="badge hidden" id="hs-mw-postgres-badge">已启用</span></span></label>
+        <label class="row" for="hs-mw-redis" style="gap:.35rem"><input type="checkbox" id="hs-mw-redis"><span>redis <span class="badge hidden" id="hs-mw-redis-badge">已启用</span></span></label>
+        <label class="row" for="hs-mw-registry" style="gap:.35rem"><input type="checkbox" id="hs-mw-registry"><span>registry <span class="badge hidden" id="hs-mw-registry-badge">已启用</span></span></label>
+      </div>
+      <p class="note">取消勾选即「禁用该中间件」：查看变更会列出受影响项目（有项目在用时红色警示 + 二次确认）；禁用后对应环境变量组（如 REDIS_*）不再注入新发布。重新勾选即启用。</p>
+
+      <h3>主机开关与 FRP（host.env 其余键 · 通用键值展示）</h3>
+      <div class="tbl-wrap" style="max-height:22vh"><table id="hs-kv-tbl">
+        <thead><tr><th>键</th><th>当前值</th></tr></thead>
+        <tbody><tr><td colspan="2" class="note">未加载</td></tr></tbody>
+      </table></div>
+
+      <h3>参数值（policy.env）</h3>
+      <div class="grid">
+        <label class="field" for="hs-p-redisdbs"><span>REDIS_DBS（Redis 逻辑库池上限 · 只读，修改走「扩容」流：需重启实例）</span>
+          <input type="number" id="hs-p-redisdbs" readonly class="mono"></label>
+        <label class="field" for="hs-p-disk"><span>DISK_RESERVE_GB（磁盘预留）</span>
+          <input type="number" id="hs-p-disk" min="0" step="1" class="mono"></label>
+        <label class="field" for="hs-p-mem"><span>RESERVE_MEM_MB（内存预留）</span>
+          <input type="number" id="hs-p-mem" min="0" step="1" class="mono"></label>
+        <label class="field" for="hs-p-factor"><span>UPLOAD_SPACE_FACTOR（上传空间估算膨胀因子）</span>
+          <input type="number" id="hs-p-factor" min="1" step="0.1" class="mono"></label>
+      </div>
+
+      <h3>漂移清单与 Redis 池</h3>
+      <div id="hs-drift" aria-live="polite"><p class="note" style="margin:0">（未加载）</p></div>
+      <div id="hs-pool" style="margin-top:.6rem" aria-live="polite">
+        <div id="hs-pool-warn" class="warnbar hidden">
+          <span id="hs-pool-warn-txt"></span>
+          <button type="button" id="hs-pool-expand">扩容</button>
+        </div>
+        <p class="note hidden" id="hs-pool-ok" style="margin:0"></p>
+      </div>
+
+      <div class="sep"></div>
+      <h3>两段式变更（修改 → 查看变更 → 确认执行）</h3>
+      <div class="row">
+        <button id="hs-apply">查看变更</button>
+        <button id="hs-confirm" class="danger hidden">确认执行</button>
+      </div>
+      <div id="hs-review" class="hidden" style="margin-top:.5rem">
+        <div id="hs-review-sum" class="note" aria-live="polite"></div>
+        <div class="tbl-wrap" style="max-height:26vh"><table id="hs-actions-tbl">
+          <thead><tr><th>动作</th><th>目标</th><th>说明</th></tr></thead>
+          <tbody><tr><td colspan="3" class="note">（空）</td></tr></tbody>
+        </table></div>
+        <div id="hs-impact"></div>
+      </div>
+      <div id="hs-report" class="hidden" style="margin-top:.5rem" aria-live="polite"></div>
     </section>
 
     <!-- 发放新账号（远程发卡）：账号名 + 公钥粘贴 + 管理员勾选 → registry 密码仅显示一次 -->
@@ -541,6 +604,21 @@
           <button type="button" id="ad-na-copy">复制密码</button>
         </div>
       </div>
+    </dialog>
+
+    <!-- §15.3 Redis 逻辑库扩容对话框：输入新 databases 值 → 服务端提示原文（重启约 3 秒/AOF 持久/自动重连）→ 我已了解，执行扩容 → 结果回报 -->
+    <dialog id="dlg-redis-x" aria-labelledby="dlg-redis-x-title">
+      <h2 style="display:inline" id="dlg-redis-x-title">Redis 逻辑库扩容</h2>
+      <button type="button" id="hs-rx-close" style="float:right">关闭</button>
+      <label class="field" for="hs-rx-n"><span>新的 databases 值（16–256 的整数，且需大于当前已分配的最大库编号，否则会截断在用库）</span>
+        <input type="number" id="hs-rx-n" min="16" max="256" step="1" class="mono" placeholder="如 256…" aria-describedby="hs-rx-n-err"></label>
+      <p class="ferr" id="hs-rx-n-err" aria-live="polite"></p>
+      <div class="row" style="margin-top:.5rem">
+        <button type="button" id="hs-rx-preview">获取确认提示</button>
+        <button type="button" id="hs-rx-run" class="danger hidden">我已了解，执行扩容</button>
+      </div>
+      <pre id="hs-rx-prompt" class="hidden" aria-live="polite" style="margin-top:.5rem"></pre>
+      <p class="fb" id="hs-rx-fb" aria-live="polite"></p>
     </dialog>
   </div>
 </template>
@@ -882,6 +960,7 @@ function logout() {
   if (adminBuilt) { // 管理页定时器与发卡对话框随登录态收尾
     clearInterval(adTimer); adTimer = null; $('ad-st-auto').checked = false;
     if ($('dlg-user-add').open) $('dlg-user-add').close();
+    if ($('dlg-redis-x')?.open) $('dlg-redis-x').close(); // §15 扩容对话框同收尾
   }
   stopLogsStream('已退出登录');      // 日志实时流随登录态终止
   logsLive.project = null; logsLive.lines = [];
@@ -941,7 +1020,7 @@ function activateTab(name) {
     ensureRedisDbs(); // Redis 浏览区：首次进入状态页时拉取库编号（§13.2 按用户过滤）
   } else stopEventsStream();         // 离开即断开（服务端随之收尸 docker events 子进程）
   if (name === 'db') fillDbTargets();
-  if (name === 'admin') { loadAdminUsers(); refreshAdminStatus(); } // 管理页：进入即拉取
+  if (name === 'admin') { loadAdminUsers(); refreshAdminStatus(); refreshHost(); } // 管理页：进入即拉取（§15 期望状态同源）
 }
 function wireTabs() {
   $('tabs').addEventListener('click', (ev) => {
@@ -1019,6 +1098,15 @@ function wireAdminTab() {
   $('ad-na-pub').addEventListener('input', () => fieldErr('ad-na-pub', ''));
   $('ad-na-copy').addEventListener('click', () => copyText($('ad-na-pw').textContent, 'registry 密码'));
   $('ad-users-tbl').addEventListener('click', onAdminKeyAction);
+  // §15 主机编排：期望状态刷新 / 两段式（预演→确认）/ Redis 扩容对话框
+  $('hs-refresh').addEventListener('click', () => refreshHost());
+  $('hs-apply').addEventListener('click', onHostApply);
+  $('hs-confirm').addEventListener('click', onHostConfirmRun);
+  $('hs-pool-expand').addEventListener('click', openRedisX);
+  $('hs-rx-close').addEventListener('click', () => $('dlg-redis-x').close());
+  $('hs-rx-preview').addEventListener('click', onRedisXPreview);
+  $('hs-rx-run').addEventListener('click', onRedisXRun);
+  $('hs-rx-n').addEventListener('input', () => fieldErr('hs-rx-n', ''));
 }
 async function loadAdminUsers() { // 账号与钥匙表（§12.2：账号/钥匙 kid/管理员/登记时间/项目数）
   const tb = $('ad-users-tbl').querySelector('tbody');
@@ -1123,6 +1211,179 @@ async function refreshAdminStatus() { // 平台状态面板：服务状态灯 / 
           : '<tr><td colspan="2" class="note">（无定时器）</td></tr>'}</tbody></table></div>`;
     $('ad-st-fb').textContent = `已刷新（${new Date().toLocaleTimeString()}）`;
   } catch (e) { el.textContent = ''; apiFail('平台状态加载', e); }
+}
+
+// ================ §15 主机编排（期望状态 / 两段式变更 / Redis 扩容流；仅管理员） ================
+const MW_NAMES = ['postgres', 'redis', 'registry'];
+// setup::Action kind → 人读动作名（未知 kind 原样回显，前向兼容）
+const KIND_CN = {
+  CreateDir: '建目录', WriteFile: '写文件', BtrfsSubvol: 'btrfs 子卷', NetworkCreate: '建网络',
+  ContainerUp: '起容器', ContainerRm: '删容器', PackageInstall: '装软件包',
+  UnitInstall: '装单元', UnitEnable: '启用单元', UnitDisableRm: '停用单元', Cmd: '执行命令',
+};
+const kindCn = (k) => KIND_CN[k] || k || '动作';
+let hostState = null, hostImpact = null; // 最近一次 GET /_api/admin/host 与预演 impact
+/** 拉取期望状态并渲染（进入管理页 / 手动刷新 / 执行后收敛核对共用）。 */
+async function refreshHost() {
+  // 新一轮加载先收起上一轮预演/报告（避免陈旧清单误导编辑）
+  $('hs-review').classList.add('hidden');
+  $('hs-report').classList.add('hidden');
+  $('hs-confirm').classList.add('hidden');
+  $('hs-fb').textContent = '加载期望状态中…';
+  try {
+    const j = await api('GET', '/_api/admin/host');
+    hostState = j;
+    hostImpact = null;
+    renderHostState(j);
+    $('hs-fb').textContent = `已刷新（${new Date().toLocaleTimeString()}）`;
+  } catch (e) { $('hs-fb').textContent = ''; apiFail('主机期望状态加载', e); }
+}
+/** 期望状态渲染：中间件开关/徽标、host.env 其余键通用键值（含 FRP，不特判）、参数当前值、漂移黄条、池两态。 */
+function renderHostState(j) {
+  const he = j.host_env || {};
+  const mw = new Set(Array.isArray(he.MIDDLEWARE) ? he.MIDDLEWARE : String(he.MIDDLEWARE ?? '').split(/\s+/).filter(Boolean));
+  for (const n of MW_NAMES) { // 中间件集合：开关 + 启用徽标（仅启用的显示徽标）
+    const on = mw.has(n);
+    $(`hs-mw-${n}`).checked = on;
+    const badge = $(`hs-mw-${n}-badge`);
+    badge.textContent = '已启用';
+    badge.classList.toggle('hidden', !on);
+  }
+  const kv = Object.entries(he).filter(([k]) => k !== 'MIDDLEWARE');
+  $('hs-kv-tbl').querySelector('tbody').innerHTML = kv.length ? kv.map(([k, v]) =>
+    `<tr><td class="mono">${esc(k)}</td><td class="mono wrap">${esc(typeof v === 'object' && v !== null ? JSON.stringify(v) : String(v))}</td></tr>`).join('')
+    : '<tr><td colspan="2" class="note">（无其他键）</td></tr>';
+  const p = j.policy || {};
+  $('hs-p-redisdbs').value = p.REDIS_DBS != null ? String(p.REDIS_DBS) : '';
+  $('hs-p-disk').value = p.DISK_RESERVE_GB != null ? String(p.DISK_RESERVE_GB) : '';
+  $('hs-p-mem').value = p.RESERVE_MEM_MB != null ? String(p.RESERVE_MEM_MB) : '';
+  $('hs-p-factor').value = p.UPLOAD_SPACE_FACTOR != null ? String(p.UPLOAD_SPACE_FACTOR) : '';
+  const drift = j.drift || []; // 漂移清单：warn 黄条 / error 红条，附建议命令
+  $('hs-drift').innerHTML = drift.length ? drift.map((d) => `<div class="warnbar${d.severity === 'error' ? ' err' : ''}">` +
+    `${d.severity === 'error' ? '缺失/停摆' : '漂移'} · <span class="mono">${esc(d.item)}</span>：期望 <span class="mono">${esc(String(d.expected))}</span>，实际 <span class="mono">${esc(String(d.actual))}</span>` +
+    `${d.advice ? ` —— 建议：<span class="mono">${esc(d.advice)}</span>` : ''}</div>`).join('')
+    : '<p class="note" style="margin:0">（无漂移：期望状态与实际一致）</p>';
+  const pool = j.redis_pool, total = Number(pool?.total) || 0;
+  const expandOn = !!(pool && total > 0 && pool.suggest_expand);
+  if (pool && total > 0 && !expandOn) {
+    const used = Number(pool.used) || 0;
+    const head = pool.headroom != null ? Number(pool.headroom) : Math.max(0, total - used);
+    $('hs-pool-ok').innerHTML = `Redis 逻辑库池：已用 <span class="mono">${used}</span> / 共 <span class="mono">${total}</span>（余 <span class="mono">${head}</span>）。`;
+  }
+  $('hs-pool-warn').classList.toggle('hidden', !expandOn); // 池黄条两态：<20% 余量才提示扩容
+  $('hs-pool-ok').classList.toggle('hidden', expandOn || !pool || total <= 0);
+  $('hs-pool-expand').classList.toggle('hidden', !expandOn);
+  if (expandOn) $('hs-pool-warn-txt').textContent =
+    `Redis 逻辑库余量不足（剩 ${pool.headroom != null ? Number(pool.headroom) : Math.max(0, total - (Number(pool.used) || 0))}/${total}）：建议扩容`;
+}
+/** 组装 POST /_api/admin/host 提交体：host_env 全量回传（MIDDLEWARE 由开关合成空格集合，其余键含 FRP 原样透传）+ policy 全量回传（三个可编辑参数覆写；REDIS_DBS 只读不走此处）。 */
+function hostPostBody(confirm) {
+  const he = { ...(hostState?.host_env || {}) };
+  he.MIDDLEWARE = MW_NAMES.filter((n) => $(`hs-mw-${n}`).checked).join(' ');
+  const policy = { ...(hostState?.policy || {}) };
+  for (const [id, key] of [['hs-p-disk', 'DISK_RESERVE_GB'], ['hs-p-mem', 'RESERVE_MEM_MB'], ['hs-p-factor', 'UPLOAD_SPACE_FACTOR']]) {
+    const v = $(id).value.trim();
+    if (v !== '' && Number.isFinite(Number(v))) policy[key] = Number(v); // 空值保留原值
+  }
+  return { host_env: he, policy, confirm };
+}
+/** 两段式第一步「查看变更」：confirm=false 写盘前预演，服务端返回 actions+impact（人读行）；不落盘。 */
+async function onHostApply() {
+  if (!hostState) return showMsg('期望状态尚未加载，请先点「刷新期望状态」');
+  busy($('hs-apply'), true, '预演中…');
+  $('hs-fb').textContent = '正在生成变更清单（写盘前预演，未执行）…';
+  try {
+    const j = await api('POST', '/_api/admin/host', hostPostBody(false));
+    hostImpact = j.impact || {};
+    const actions = j.actions || [];
+    const needed = actions.filter((a) => a.needed !== false);
+    $('hs-review-sum').textContent = `预演：共 ${actions.length} 项动作，其中 ${needed.length} 项需执行；尚未写盘，点「确认执行」才会应用。`;
+    $('hs-actions-tbl').querySelector('tbody').innerHTML = actions.length ? actions.map((a) =>
+      `<tr${a.needed === false ? ' style="opacity:.55"' : ''}><td>${a.needed === false ? '＝' : '＋'} ${esc(kindCn(a.kind))}</td>` +
+      `<td class="mono">${esc(a.target ?? '')}</td><td class="wrap">${esc(a.detail ?? '')}</td></tr>`).join('')
+      : '<tr><td colspan="3" class="note">（无动作：期望状态已就绪）</td></tr>';
+    const rm = hostImpact.removed_middleware || [], aff = hostImpact.affected_projects || [];
+    $('hs-impact').innerHTML = (rm.length || aff.length) ? `
+      ${rm.length ? `<p class="note" style="margin:.2rem 0 0">将禁用的中间件：<span class="mono">${rm.map(esc).join(' ')}</span>（后续发布不再注入对应变量组）</p>` : ''}
+      ${aff.length ? `<div class="warnbar err" style="margin-top:.4rem">红色警示：此变更影响 ${aff.length} 个在用项目 —— ${aff.map((x) => `<span class="mono">${esc(x)}</span>`).join('、')}；这些项目的重启/回滚/新发布将失去该中间件支持，确认执行前需再次确认。</div>` : ''}`
+      : '';
+    $('hs-report').classList.add('hidden');
+    $('hs-review').classList.remove('hidden');
+    $('hs-confirm').classList.toggle('hidden', j.confirm_required === false);
+    $('hs-fb').textContent = '已列出变更清单：请核对后点「确认执行」';
+  } catch (e) { $('hs-fb').textContent = ''; apiFail('查看变更（预演）', e); }
+  busy($('hs-apply'), false);
+}
+/** 两段式第二步「确认执行」：confirm=true 落盘并 apply；impact 含受影响项目时先经二次 confirm。 */
+async function onHostConfirmRun() {
+  if (!hostState) return;
+  const aff = hostImpact?.affected_projects || [];
+  if (aff.length && !confirm(`此变更将影响 ${aff.length} 个在用项目（${aff.join('、')}）：相关项目的重启/回滚/新发布将失去该中间件支持。确认继续执行？`)) return;
+  busy($('hs-confirm'), true, '执行中…');
+  try {
+    const j = await api('POST', '/_api/admin/host', hostPostBody(true));
+    await refreshHost(); // 重取期望状态：面板数字/漂移/池随之收敛
+    const rep = j.report || {};
+    const items = rep.actions || rep.items || [];
+    const rows = items.map((a) => `<tr><td class="${a.ok === false ? 'status-bad' : 'status-ok'}">${a.ok === false ? '● 失败' : '● 成功'}</td>` +
+      `<td>${esc(kindCn(a.kind))}</td><td class="mono">${esc(a.target ?? '')}</td><td class="wrap">${esc(a.result || a.detail || '')}</td></tr>`).join('');
+    $('hs-report').innerHTML = `
+      <h3 style="margin-top:.2rem">执行报告${j.ok === false ? '（有失败项）' : ''}</h3>
+      <p class="note" style="margin:.2rem 0 0">完成 ${Number(rep.changed ?? items.length)} 项变更。</p>
+      ${items.length ? `<div class="tbl-wrap" style="max-height:26vh"><table><thead><tr><th>结果</th><th>动作</th><th>目标</th><th>输出</th></tr></thead><tbody>${rows}</tbody></table></div>` : '<p class="note">（无动作）</p>'}
+      ${(rep.warnings || []).map((w) => `<div class="warnbar">${esc(w)}</div>`).join('')}`;
+    $('hs-report').classList.remove('hidden');
+    $('hs-fb').textContent = j.ok === false ? '执行完成（含失败项，详见报告与警告）' : '执行完成';
+    showMsg('主机变更已执行。', 'ok');
+  } catch (e) { $('hs-fb').textContent = ''; apiFail('确认执行', e); }
+  busy($('hs-confirm'), false);
+}
+// —— §15.3 Redis 扩容对话框：输入新值 → confirm=false 取服务端提示原文 → 「我已了解，执行扩容」→ 结果回报 ——
+function openRedisX() {
+  $('hs-rx-n').value = '';
+  clearErrs('hs-rx-n');
+  $('hs-rx-prompt').textContent = '';
+  $('hs-rx-prompt').classList.add('hidden');
+  $('hs-rx-run').classList.add('hidden');
+  $('hs-rx-fb').textContent = '';
+  $('dlg-redis-x').showModal();
+  $('hs-rx-n').focus();
+}
+/** 读取并校验新 databases 值（16–256 整数；上界受库编号类型承载限制）；非法 → 字段内联错误并返回 null。 */
+function redisXVal() {
+  const n = Number($('hs-rx-n').value);
+  if (!Number.isInteger(n) || n < 16 || n > 256) {
+    fieldErr('hs-rx-n', 'databases 须为 16–256 的整数（上限受库编号类型承载限制，且需大于当前已分配的最大库编号），请修正后重试');
+    return null;
+  }
+  return n;
+}
+async function onRedisXPreview() { // 不动容器：仅取回服务端确认提示原文
+  const n = redisXVal();
+  if (n == null) return;
+  busy($('hs-rx-preview'), true, '获取中…');
+  try {
+    const j = await api('POST', '/_api/admin/host', { redis_databases: n, confirm: false });
+    $('hs-rx-prompt').textContent = j.prompt || '（服务端未返回提示文案）';
+    $('hs-rx-prompt').classList.remove('hidden');
+    $('hs-rx-run').classList.remove('hidden');
+    $('hs-rx-fb').textContent = '请阅读服务端提示原文后，再点「我已了解，执行扩容」。';
+  } catch (e) { apiFail('获取扩容确认提示', e); }
+  busy($('hs-rx-preview'), false);
+}
+async function onRedisXRun() { // confirm=true：停旧容器 → 新容器带 --databases N 起来 → 验证 → 回报
+  const n = redisXVal();
+  if (n == null) return;
+  busy($('hs-rx-run'), true, '扩容中…');
+  try {
+    const j = await api('POST', '/_api/admin/host', { redis_databases: n, confirm: true });
+    const secs = j.restart_secs != null ? `（实例重启约 ${j.restart_secs} 秒）` : '';
+    $('hs-rx-fb').textContent = `扩容完成：databases → ${j.databases ?? n}${secs}，服务端已自动验证（PING + 库数）。`;
+    $('hs-rx-run').classList.add('hidden');
+    showMsg(`Redis 逻辑库池已扩容到 ${j.databases ?? n}。`, 'ok');
+    refreshHost(); // 池数字与漂移黄条随之收敛（不阻塞对话框回报）
+  } catch (e) { apiFail('执行扩容', e); }
+  busy($('hs-rx-run'), false);
 }
 
 // ================ 标签页 1：展项管理（§13.1 三入口并存） ================
