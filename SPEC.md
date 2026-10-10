@@ -187,3 +187,19 @@ CLI 对应：`showroom db sql|tables|preview|dump|restore|reset`。公网全可�
 - 分配池：state 的 redisdb 分配从硬编码 0-15 改为 policy `REDIS_DBS`（默认 256）；池耗尽返回 E_QUOTA（消息含 已用/总量）；policy 与 MAX_SLOTS 一致性由文档说明（默认 30≤256）。
 - 分配单位维持**每项目一库**（客户端 URL 零配合、项目间不串键）；用户级隔离只作用于浏览视图（§13.2）。
 - 存量兼容：已分配的 0..N 库号不变；容器重建保数据卷。
+
+## 14. v1.7：镜像删除 + 上传磁盘准入
+### 14.1 空间口径（显示与判定统一）
+- 新端点 `GET /_api/space`（签名）→ `{"available_mb","reserve_mb","total_mb"}`：根分区可用 − policy `DISK_RESERVE_GB`（默认 20；覆盖系统/中间件/应用运行/快照增长）。
+- 控制台上传区常显「可用空间（已扣预留）：X GB」。
+### 14.2 上传准入（加密导入通道，import-begin 处）
+- 判定式：`sealed_size × UPLOAD_SPACE_FACTOR（默认 4）≤ available − reserve`。因子覆盖：解密临时件+解压膨胀（docker load 落 /var/lib/docker 的未压缩层，典型 2–4×）+ registry 压缩副本。
+- 不足→ E_QUOTA，消息含 可用/预留/估算需求，提示「请先删除旧镜像」。
+- registry 快通道（内网 docker 直推）无 begin 钩子：在 publish 时做同式复核（拉取展开发生在部署时刻）——文档注明不对称性。
+### 14.3 镜像删除
+- `POST /_api/image-rm {image}`（签名）：归属校验（自己的命名空间 `<owner>/` 前缀，admin 全量）→ registry DELETE manifest（digest 查询后删）→ **内联触发 registry-gc**（停-收-启，秒级；live-restore 保护运行中容器）→ 返回 `{"freed_est_mb"}`。
+- 删除即释放空间（不等每周 GC），闭环「上传不够→删除→立即可传」。
+- blob 共享安全：多 tag 共享层由 registry-gc --delete-untagged 天然保留仍被引用者。
+- 控制台：镜像列表（部署 ComboBox 同源数据）每行删除按钮（confirm，显示镜像名）；上传失败 E_QUOTA 时错误文案引导到删除。
+### 14.4 policy 新增
+`DISK_RESERVE_GB=20`、`UPLOAD_SPACE_FACTOR=4`（均可调）。
