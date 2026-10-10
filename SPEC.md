@@ -119,3 +119,15 @@ CLI 对应：`showroom db sql|tables|preview|dump|restore|reset`。公网全可�
 ### 9.2 行为修订（对 §7）
 - 根路径 `/` 与未匹配路径：一律 404，不再 302（零信息暴露）。
 - publish 供给 DB：库不存在才建（CREATE DATABASE 不存在时）；不再幂等重建。
+
+## 10. v1.3 修订：登录向导 / 内存准入 / Redis 查看
+### 10.1 登录改为单一向导（线性三步，替代自由表单）
+步骤1「你是谁」：输入账号名（唯一输入）。步骤2「密钥」：自动判断——浏览器已有本账号密钥→默认「使用本机已有密钥」；否则二选一按钮「新设备生成密钥」（推荐）/「从其他设备导入密钥种子」。步骤3「验证」：自动签名自测；未登记→展示公钥串+「已发给管理员，点此重试」循环；通过→进入管理界面。不再并排出现生成/导入/账号三组控件。
+### 10.2 内存需求与准入（原「内存上限」更名「内存需求」）
+- UI/CLI 文案统一为「内存需求」；语义不变（容器 --memory 硬限）。
+- publish 增加准入判断：读 /proc/meminfo 的 MemAvailable，policy 新增 RESERVE_MEM_MB（默认 1536）；`MemAvailable - RESERVE < 需求内存` → E_QUOTA，msg 给出「可用 X MB（已预留 Y MB）＜ 需求 Z MB」。policy.env 样例同步。
+### 10.3 Redis 内容查看（排障用，跨 owner 不隔离，注明）
+- GET /_api/redis-dbs → {dbs:[0..15]}（静态）
+- GET /_api/redis-keys?db=N&q=前缀&limit≤200 → {keys:[...]}（redis-cli --scan --pattern，db=N -n）
+- GET /_api/redis-get?db=N&key=K → {type,ttl,value}（redis-cli TYPE/PTTL/按类型 GET/LRANGE/SMEMBERS/HGETALL/ZRANGE）
+- 控制台：状态监控页新增「Redis 浏览」区（或独立第五标签）：DB 下拉+key 前缀过滤+点击查看值（等宽展示，值截断 4KB）。
