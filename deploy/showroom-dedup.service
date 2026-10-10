@@ -1,0 +1,9 @@
+[Unit]
+Description=Showroom weekly dedup (duperemove, incremental hashfile)
+After=docker.service
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/bin/showroom-dedup
+Nice=19
+IOSchedulingClass=idle
