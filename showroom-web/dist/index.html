@@ -1,0 +1,594 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Showroom 控制台</title>
+<style>
+  :root { color-scheme: dark; }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; padding: 0 1rem 3rem; background: #14161a; color: #d7dce3;
+    font: 14px/1.6 system-ui, "PingFang SC", "Microsoft YaHei", sans-serif;
+  }
+  h1 { font-size: 18px; margin: 0; }
+  h2 { font-size: 15px; margin: 0 0 .6rem; color: #9fc3e8; }
+  header, section {
+    background: #1b1f26; border: 1px solid #2a2f39; border-radius: 8px;
+    padding: .8rem 1rem; margin-top: 1rem; max-width: 1100px; margin-left: auto; margin-right: auto;
+  }
+  header .row { display: flex; flex-wrap: wrap; gap: .6rem; align-items: center; margin-top: .5rem; }
+  label { display: inline-flex; align-items: center; gap: .35rem; color: #aeb6c2; }
+  input[type=text], input[type=number], textarea, select {
+    background: #14161a; color: #d7dce3; border: 1px solid #343b47; border-radius: 4px;
+    padding: .3rem .45rem; font: inherit;
+  }
+  textarea { width: 100%; min-height: 3.2em; font-family: ui-monospace, monospace; font-size: 12px; }
+  button {
+    background: #2b3d55; color: #e7edf5; border: 1px solid #3d5578; border-radius: 4px;
+    padding: .3rem .8rem; font: inherit; cursor: pointer;
+  }
+  button:hover:not(:disabled) { background: #35507a; }
+  button:disabled { opacity: .4; cursor: not-allowed; }
+  button.danger { background: #5a2b2b; border-color: #7a3d3d; }
+  .mono { font-family: ui-monospace, "SF Mono", Consolas, monospace; font-size: 12px; }
+  .note { color: #8a93a3; font-size: 12px; margin: .4rem 0 0; }
+  .pub { color: #7fd88f; word-break: break-all; }
+  .hidden { display: none; }
+  #msg {
+    max-width: 1100px; margin: 1rem auto 0; padding: .5rem .8rem; border-radius: 6px;
+    display: none; font-size: 13px; white-space: pre-wrap; word-break: break-all;
+  }
+  #msg.err { display: block; background: #3a2226; border: 1px solid #6b3a42; color: #ffb3bd; }
+  #msg.ok { display: block; background: #21362a; border: 1px solid #3a6b4c; color: #a9e8b8; }
+  table { border-collapse: collapse; width: 100%; font-size: 13px; }
+  th, td { text-align: left; padding: .3rem .5rem; border-bottom: 1px solid #2a2f39; white-space: nowrap; }
+  th { color: #8fa0b5; font-weight: 600; position: sticky; top: 0; background: #1b1f26; }
+  td .act { margin-right: .25rem; padding: .1rem .5rem; font-size: 12px; }
+  td.wrap { white-space: normal; word-break: break-all; }
+  .tbl-wrap { overflow: auto; max-height: 60vh; border: 1px solid #2a2f39; border-radius: 6px; }
+  form .row { display: flex; flex-wrap: wrap; gap: .6rem; align-items: center; }
+  dialog {
+    background: #1b1f26; color: #d7dce3; border: 1px solid #3d5578; border-radius: 8px;
+    padding: 1rem; max-width: 80vw; width: 720px;
+  }
+  dialog::backdrop { background: rgba(0,0,0,.55); }
+  dialog pre {
+    background: #14161a; border: 1px solid #2a2f39; border-radius: 6px; padding: .6rem;
+    max-height: 60vh; overflow: auto; white-space: pre-wrap; word-break: break-all; font-size: 12px;
+  }
+  progress { width: 100%; height: 14px; }
+  .status-ok { color: #7fd88f; } .status-bad { color: #ff9aa5; } .status-mid { color: #e8c37f; }
+  a { color: #79b8ff; }
+  .grid2 { display: grid; grid-template-columns: repeat(auto-fill, minmax(160px, 1fr)); gap: .5rem; }
+  fieldset { border: 1px solid #2a2f39; border-radius: 6px; margin: 0 0 .6rem; }
+  legend { color: #8fa0b5; font-size: 12px; padding: 0 .3rem; }
+</style>
+</head>
+<body>
+
+<header>
+  <h1>Showroom 控制台</h1>
+  <div class="row">
+    <label>服务器 <span class="mono" id="srv"></span></label>
+    <label>owner <input type="text" id="owner" placeholder="账号名" size="10"></label>
+    <span>密钥：<span id="keystate" class="status-bad">未生成</span></span>
+    <button id="btn-keygen">生成密钥</button>
+    <button id="btn-importkey">导入密钥(seed hex)</button>
+    <button id="btn-probe" class="need-key">测试连接</button>
+    <button id="btn-refresh" class="need-key">刷新展项列表</button>
+  </div>
+  <div id="pubinfo" class="mono hidden"></div>
+  <p class="note">
+    密钥以 32B seed 存于浏览器 localStorage（试验性存储，正式场景请用 CLI <span class="mono">showroom keygen</span>）；
+    登录=密钥即身份：把下方公钥串交给管理员登记（<span class="mono">showroom owner-add</span>）后即可调用管理 API。
+    所有请求经同源 <span class="mono">/_api/*</span> 代理（SR-SIG1 签名）。
+  </p>
+</header>
+
+<div id="msg"></div>
+
+<section>
+  <h2>展项列表</h2>
+  <div class="tbl-wrap">
+    <table id="proj-tbl">
+      <thead><tr>
+        <th>project</th><th>slot</th><th>tag</th><th>状态</th><th>URL</th><th>端口</th><th>更新时间</th><th>操作</th>
+      </tr></thead>
+      <tbody><tr><td colspan="8" class="note">未加载</td></tr></tbody>
+    </table>
+  </div>
+</section>
+
+<section>
+  <h2>发布</h2>
+  <form id="pub-form" class="row">
+    <label>project <input type="text" id="pub-project" required size="10" pattern="[a-z0-9][a-z0-9-]{0,30}"></label>
+    <label>slot <input type="text" id="pub-slot" value="stable" required size="8" pattern="[a-z0-9][a-z0-9-]{0,30}"></label>
+    <label>tag <input type="text" id="pub-tag" required size="10"></label>
+    <label>mem <input type="text" id="pub-mem" placeholder="256m" size="6"></label>
+    <label>cpu <input type="number" id="pub-cpu" placeholder="1.0" step="0.1" min="0" size="4"></label>
+    <label>容器端口 <input type="number" id="pub-cport" placeholder="8080" min="1" max="65535" size="5"></label>
+    <button class="need-key" type="submit">发布</button>
+  </form>
+  <p class="note">镜像须先经上传（或 registry push）进入 <span class="mono">127.0.0.1:5000/&lt;owner&gt;/&lt;project&gt;:&lt;tag&gt;</span>；project 归属首个创建者。</p>
+</section>
+
+<section>
+  <h2>镜像上传（加密信封 · 分片断点续传）</h2>
+  <fieldset>
+    <legend>参数（SPEC §8.1：8MB/片 · 逐片独立签名 · 服务端拼接后解密导入）</legend>
+    <div class="row">
+      <label>project <input type="text" id="up-project" required size="10" pattern="[a-z0-9][a-z0-9-]{0,30}"></label>
+      <label>slot <input type="text" id="up-slot" value="stable" required size="8" pattern="[a-z0-9][a-z0-9-]{0,30}"></label>
+      <label>tag <input type="text" id="up-tag" required size="10"></label>
+      <label>镜像文件 <input type="file" id="up-file"></label>
+    </div>
+    <p class="note">文件应为 <span class="mono">docker save … | zstd &gt; x.tar.zst</span> 产物（信封内是 zstd(tar)，浏览器端不做压缩，按原字节加密上传）。</p>
+    <label style="display:block">平台公钥 PEM（向管理员索取 <span class="mono">platform_rsa.pub</span>，内容存 localStorage）</label>
+    <textarea id="up-pem" class="mono" placeholder="-----BEGIN PUBLIC KEY-----&#10;…&#10;-----END PUBLIC KEY-----"></textarea>
+  </fieldset>
+  <div class="row">
+    <button id="btn-upload" class="need-key">开始上传</button>
+    <button id="btn-resume" class="need-key">恢复 / 查询状态</button>
+    <label>upload_id <input type="text" id="up-id" list="up-ids" size="34" class="mono" placeholder="续传时填入或从列表选择"></label>
+    <datalist id="up-ids"></datalist>
+  </div>
+  <div style="margin-top:.6rem">
+    <progress id="up-prog" max="1" value="0"></progress>
+    <div id="up-status" class="note">等待上传</div>
+  </div>
+  <p class="note">每片失败自动重试 3 次；中断后保持页面可「恢复」续传（刷新页面后凭 upload_id + 本地会话记录重放已传分片继续）。陈旧会话由服务端 gc 清理（&gt;24h）。</p>
+</section>
+
+<dialog id="dlg-env">
+  <h2 style="display:inline">环境变量</h2>
+  <button style="float:right" onclick="dlgEnv.close()">关闭</button>
+  <pre id="env-pre">加载中…</pre>
+</dialog>
+
+<dialog id="dlg-logs">
+  <h2 style="display:inline">日志</h2>
+  <label style="margin-left:1rem"><input type="checkbox" id="logs-auto">10 秒自动刷新</label>
+  <button style="float:right" onclick="dlgLogs.close()">关闭</button>
+  <pre id="logs-pre">加载中…</pre>
+</dialog>
+
+<script type="module">
+// ———— showroom-web 控制台：原生 JS + showroom-common wasm 垫片（无框架/无构建/无外部资源） ————
+
+// —— 常量（与 showroom-common 信封常量一致，用于前端进度/总长核算）——
+const SEG = 4 * 1024 * 1024;      // AES-GCM 段明文 4MiB
+const WRAP = 384;                  // RSA-3072 wrap 头
+const NONCE = 12, TAG = 16;
+const CHUNK = 8 * 1024 * 1024;    // 上传分片粒度（§8.1）
+const NAME_RE = /^[a-z0-9][a-z0-9-]{0,30}$/;
+const RESERVED = new Set(['v2', '_api', '_bootstrap', '_console']);
+
+// —— wasm 加载 ——
+const $ = (id) => document.getElementById(id);
+const enc = new TextEncoder(), dec = new TextDecoder();
+let ex = null;
+async function loadWasm() {
+  const paths = ['./showroom_bg.wasm', '/_console/showroom_bg.wasm'];
+  let lastErr = null;
+  for (const p of paths) {
+    try { return (await WebAssembly.instantiateStreaming(fetch(p), {})).instance.exports; }
+    catch (e) { lastErr = e; try { return (await WebAssembly.instantiate(await (await fetch(p)).arrayBuffer(), {})).instance.exports; } catch (e2) { lastErr = e2; } }
+  }
+  throw lastErr;
+}
+ex = await loadWasm();
+// wasm 内存可能随分配增长而换代：任何 wasm 调用后都重取 view
+const mem = () => new Uint8Array(ex.memory.buffer);
+const alloc = (n) => { const p = ex.sr_alloc(n); if (!p) throw new Error(`sr_alloc(${n}) 失败`); return p; };
+const put = (b) => { if (!b.length) return [0, 0]; const p = alloc(b.length); mem().set(b, p); return [p, b.length]; }; // 空缓冲：空指针+0 长度（ABI 合法空切片）
+const unput = (p, l) => ex.sr_free(p, l);
+const readCStr = (p, written) => { const m = mem(); let e = p; while (e < p + written && m[e] !== 0) e++; return dec.decode(m.subarray(p, e)); };
+// 熵注入：垫片在 wasm32 无 OS 熵源，随机性全部由 WebCrypto 提供
+{
+  const b = new Uint8Array(64); crypto.getRandomValues(b);
+  const p = ex.sr_alloc(64); mem().set(b, p);
+  if (ex.sr_entropy(p, 64) !== 0) throw new Error('sr_entropy 失败');
+  ex.sr_free(p, 64);
+}
+
+// —— 消息条 ——
+function showMsg(text, kind = 'err') {
+  const el = $('msg');
+  el.textContent = text;
+  el.className = kind;
+  if (kind === 'ok') setTimeout(() => { if (el.textContent === text) el.className = ''; }, 8000);
+}
+const esc = (s) => String(s ?? '').replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
+
+// —— 密钥状态（localStorage：sr.seed hex64 / sr.owner / sr.pempub）——
+const state = { seed: null, pub: '' };
+function loadSeed() {
+  const hex = localStorage.getItem('sr.seed');
+  state.seed = /^[0-9a-fA-F]{64}$/.test(hex || '') ? hex : null;
+  state.pub = '';
+  if (state.seed) {
+    const [sp, spl] = put(Buffer_fromHex(state.seed));
+    const op = alloc(128);
+    const r = ex.sr_pub_string(sp, op, 128);
+    if (r > 0) state.pub = readCStr(op, r);
+    unput(sp, spl); unput(op, 128);
+  }
+  renderKeyState();
+}
+function Buffer_fromHex(hex) {
+  const b = new Uint8Array(hex.length / 2);
+  for (let i = 0; i < b.length; i++) b[i] = parseInt(hex.substr(i * 2, 2), 16);
+  return b;
+}
+function toHex(bytes) {
+  let s = '';
+  for (const b of bytes) s += b.toString(16).padStart(2, '0');
+  return s;
+}
+function renderKeyState() {
+  const ready = !!state.seed && !!$('owner').value;
+  $('keystate').textContent = !state.seed ? '未生成' : '已生成';
+  $('keystate').className = state.seed ? 'status-ok' : 'status-bad';
+  const pi = $('pubinfo');
+  if (state.seed) {
+    pi.classList.remove('hidden');
+    pi.innerHTML = `公钥串（未登记时找管理员 owner-add）：<span class="pub">${esc(state.pub)}</span>`;
+  } else pi.classList.add('hidden');
+  for (const b of document.querySelectorAll('.need-key')) b.disabled = !ready;
+}
+$('owner').value = localStorage.getItem('sr.owner') || '';
+$('owner').addEventListener('input', () => { localStorage.setItem('sr.owner', $('owner').value.trim()); renderKeyState(); });
+$('btn-keygen').addEventListener('click', () => {
+  const sp = alloc(32);
+  if (ex.sr_generate(sp) !== 0) return showMsg('密钥生成失败（wasm）');
+  const hex = toHex(mem().slice(sp, sp + 32));
+  unput(sp, 32);
+  localStorage.setItem('sr.seed', hex);
+  loadSeed();
+  showMsg(`已生成新密钥并存入 localStorage。公钥串：${state.pub}`, 'ok');
+});
+$('btn-importkey').addEventListener('click', () => {
+  const hex = prompt('粘贴 64 位十六进制 seed（showroom keygen 产物 / 其他设备导出）：');
+  if (hex === null) return;
+  if (!/^[0-9a-fA-F]{64}$/.test(hex.trim())) return showMsg('seed 必须是 64 位 hex（32 字节）');
+  localStorage.setItem('sr.seed', hex.trim().toLowerCase());
+  loadSeed();
+  showMsg(`密钥已导入。公钥串：${state.pub}`, 'ok');
+});
+
+// —— SR-SIG1 签名请求（SPEC §1/§3：所有 /_api 一律签名）——
+function keyReady() { return state.seed && $('owner').value.trim() ? true : (showMsg('请先填写 owner 并生成/导入密钥'), false); }
+function nonceHex() {
+  const b = new Uint8Array(16); crypto.getRandomValues(b);
+  return toHex(b);
+}
+/** 对 wasm 内存中 [ptr,ptr+len) 的 body 签名（分片上传零拷贝路径）。 */
+function signHeaderPtr(method, pathQ, bodyPtr, bodyLen) {
+  const owner = $('owner').value.trim();
+  const nonce = nonceHex();
+  const ts = BigInt(Math.floor(Date.now() / 1000));
+  const [sp, spl] = put(Buffer_fromHex(state.seed));
+  const [op, ol] = put(enc.encode(owner)), [mp, ml] = put(enc.encode(method));
+  const [pp, pl] = put(enc.encode(pathQ)), [np, nl] = put(enc.encode(nonce));
+  const out = alloc(640);
+  const r = ex.sr_sign_header(sp, op, ol, mp, ml, pp, pl, ts, np, nl, bodyPtr, bodyLen, out, 640);
+  const auth = r > 0 ? readCStr(out, r) : null;
+  for (const [p, l] of [[sp, spl], [op, ol], [mp, ml], [pp, pl], [np, nl]]) unput(p, l);
+  unput(out, 640);
+  if (!auth) throw Object.assign(new Error('签名失败'), { error: 'E_NET', msg: `sr_sign_header → ${r}` });
+  return auth;
+}
+/** 统一 API 调用：json 传对象 → JSON body；Uint8Array → 原始 body；null → 空 body。 */
+async function api(method, pathQ, body) {
+  if (!keyReady()) throw { error: 'E_STATE', msg: '未配置密钥' };
+  let bodyBytes = new Uint8Array(0), isJson = false;
+  if (body && typeof body === 'object' && !(body instanceof Uint8Array)) {
+    bodyBytes = enc.encode(JSON.stringify(body)); isJson = true;
+  } else if (body instanceof Uint8Array) bodyBytes = body;
+  const [bp, bl] = put(bodyBytes);
+  const auth = signHeaderPtr(method, pathQ, bp, bl);
+  unput(bp, bl);
+  const resp = await fetch(pathQ, {
+    method,
+    headers: { Authorization: auth, ...(isJson ? { 'Content-Type': 'application/json' } : {}) },
+    body: method === 'GET' || method === 'HEAD' ? undefined : bodyBytes,
+  });
+  return checkResp(resp);
+}
+async function checkResp(resp) {
+  const text = await resp.text();
+  let j = null;
+  try { j = JSON.parse(text); } catch { /* 非 JSON */ }
+  if (resp.ok) return j ?? {};
+  const err = { error: j?.error || 'E_NET', msg: j?.msg || `HTTP ${resp.status}` };
+  if (err.error === 'E_AUTH') {
+    err.msg = `${err.msg}（公钥未登记或时间偏差：本机可运行 showroom doctor 排查；公钥串：${state.pub}，请管理员 showroom owner-add）`;
+  }
+  throw err;
+}
+const errText = (e) => (e && (e.error || e.msg)) ? `${e.error || '错误'}: ${e.msg || ''}` : String(e);
+
+// —— 连接探测 / 展项列表 ——
+$('btn-probe').addEventListener('click', async () => {
+  if (!keyReady()) return;
+  try {
+    await api('GET', '/_api/health');
+    showMsg('连接正常：签名验证通过（公钥已登记）。', 'ok');
+  } catch (e) { showMsg(`探测失败 ${errText(e)}`); }
+});
+$('btn-refresh').addEventListener('click', refreshProjects);
+async function refreshProjects() {
+  if (!keyReady()) return;
+  const tb = $('proj-tbl').querySelector('tbody');
+  tb.innerHTML = '<tr><td colspan="8" class="note">加载中…</td></tr>';
+  try {
+    const j = await api('GET', '/_api/projects');
+    const ps = j.projects || [];
+    if (!ps.length) { tb.innerHTML = '<tr><td colspan="8" class="note">暂无展项</td></tr>'; return; }
+    tb.innerHTML = ps.map((p) => `<tr>
+      <td class="mono">${esc(p.project)}</td><td class="mono">${esc(p.slot)}</td>
+      <td class="mono">${esc(p.tag)}</td>
+      <td class="${p.status === 'running' ? 'status-ok' : (p.status === 'missing' ? 'status-bad' : 'status-mid')}">${esc(p.status)}</td>
+      <td class="wrap"><a href="${esc(p.url)}" target="_blank" rel="noopener">${esc(p.url)}</a></td>
+      <td class="mono">${esc(p.port)}</td><td class="mono">${esc(p.updated)}</td>
+      <td>
+        <button class="act need-key" data-act="start" data-p="${esc(p.project)}" data-s="${esc(p.slot)}">启动</button>
+        <button class="act need-key" data-act="stop" data-p="${esc(p.project)}" data-s="${esc(p.slot)}">停止</button>
+        <button class="act need-key" data-act="rollback" data-p="${esc(p.project)}" data-s="${esc(p.slot)}">回滚</button>
+        <button class="act danger need-key" data-act="rm" data-p="${esc(p.project)}" data-s="${esc(p.slot)}">删除</button>
+        <button class="act need-key" data-act="env" data-p="${esc(p.project)}" data-s="${esc(p.slot)}">env</button>
+        <button class="act need-key" data-act="logs" data-p="${esc(p.project)}" data-s="${esc(p.slot)}">日志</button>
+      </td></tr>`).join('');
+  } catch (e) { tb.innerHTML = ''; showMsg(`展项列表加载失败 ${errText(e)}`); }
+}
+$('proj-tbl').addEventListener('click', async (ev) => {
+  const btn = ev.target.closest('button[data-act]');
+  if (!btn || btn.disabled) return;
+  const { act, p: project, s: slot } = btn.dataset;
+  if (act === 'env') return showEnv(project, slot);
+  if (act === 'logs') return showLogs(project, slot);
+  if (act === 'rm' && !confirm(`确认删除展项 ${project}/${slot}？（容器/路由/DB/Redis 一并移除）`)) return;
+  btn.disabled = true;
+  try {
+    const j = await api('POST', `/_api/${act}`, { project, slot });
+    showMsg(`${act} ${project}/${slot} 成功${j.url ? `，URL: ${j.url}` : ''}`, 'ok');
+    refreshProjects();
+  } catch (e) { showMsg(`${act} ${project}/${slot} 失败 ${errText(e)}`); }
+  btn.disabled = !state.seed || !$('owner').value;
+});
+
+// —— 发布 ——
+function checkNames(project, slot, tag) {
+  for (const [w, v] of [['project', project], ['slot', slot]]) {
+    if (!NAME_RE.test(v) || RESERVED.has(v)) return `${w} "${v}" 不合法（^[a-z0-9][a-z0-9-]{0,30}$，保留：${[...RESERVED].join(' ')}）`;
+  }
+  if (!tag || /\s|\//.test(tag)) return `tag "${tag}" 不合法（非空、无空白/斜杠）`;
+  return null;
+}
+$('pub-form').addEventListener('submit', async (ev) => {
+  ev.preventDefault();
+  if (!keyReady()) return;
+  const f = { project: $('pub-project').value.trim(), slot: $('pub-slot').value.trim(), tag: $('pub-tag').value.trim() };
+  const bad = checkNames(f.project, f.slot, f.tag);
+  if (bad) return showMsg(bad);
+  const body = { ...f };
+  if ($('pub-mem').value.trim()) body.mem = $('pub-mem').value.trim();
+  if ($('pub-cpu').value !== '') body.cpu = parseFloat($('pub-cpu').value);
+  if ($('pub-cport').value !== '') body.container_port = parseInt($('pub-cport').value, 10);
+  try {
+    const j = await api('POST', '/_api/publish', body);
+    showMsg(`发布成功：${j.url}（端口 ${j.port}）`, 'ok');
+    refreshProjects();
+  } catch (e) { showMsg(`发布失败 ${errText(e)}`); }
+});
+
+// —— env / logs 模态 ——
+const dlgEnv = $('dlg-env'), dlgLogs = $('dlg-logs');
+async function showEnv(project, slot) {
+  $('env-pre').textContent = '加载中…';
+  dlgEnv.showModal();
+  try {
+    const j = await api('GET', `/_api/env?project=${encodeURIComponent(project)}&slot=${encodeURIComponent(slot)}`);
+    const env = j.env || {};
+    $('env-pre').textContent = Object.keys(env).sort().map((k) => `${k}=${env[k]}`).join('\n') || '（空）';
+  } catch (e) { $('env-pre').textContent = errText(e); }
+}
+let logsTimer = null, logsTarget = null;
+async function fetchLogs() {
+  if (!logsTarget) return;
+  try {
+    const j = await api('GET', `/_api/logs?project=${encodeURIComponent(logsTarget.p)}&slot=${encodeURIComponent(logsTarget.s)}&tail=200`);
+    $('logs-pre').textContent = j.logs || '（空）';
+  } catch (e) { $('logs-pre').textContent = errText(e); }
+}
+async function showLogs(project, slot) {
+  logsTarget = { p: project, s: slot };
+  $('logs-pre').textContent = '加载中…';
+  dlgLogs.showModal();
+  fetchLogs();
+}
+$('logs-auto').addEventListener('change', () => {
+  clearInterval(logsTimer);
+  if ($('logs-auto').checked) logsTimer = setInterval(fetchLogs, 10000);
+});
+dlgLogs.addEventListener('close', () => { clearInterval(logsTimer); $('logs-auto').checked = false; logsTarget = null; });
+
+// —— 镜像上传（SPEC §8.1 分片 + SPEC §2 信封）——
+$('up-pem').value = localStorage.getItem('sr.pempub') || '';
+$('up-pem').addEventListener('input', () => localStorage.setItem('sr.pempub', $('up-pem').value));
+const upPem = () => $('up-pem').value.trim();
+const sealedTotal = (n) => WRAP + n + Math.ceil(n / SEG) * (NONCE + TAG); // 信封总长（用于 import-begin total_bytes）
+let upBusy = false;
+function upProgress(sent, total) {
+  $('up-prog').max = total; $('up-prog').value = sent;
+  const pct = total ? ((sent / total) * 100).toFixed(1) : 0;
+  $('up-status').textContent = `已上传 ${sent} / ${total} 字节（${pct}%）`;
+}
+function refreshUpIds() {
+  $('up-ids').innerHTML = Object.keys(localStorage)
+    .filter((k) => k.startsWith('sr.up.')).map((k) => `<option value="${esc(k.slice(6))}">`).join('');
+}
+function pushSlice(sid, bytes) { // 返回 [written, outPtr, outCap]（调用方负责 sr_free）
+  const [ip, il] = put(bytes);
+  const cap = WRAP + NONCE + TAG + bytes.length + (Math.ceil(bytes.length / SEG) + 2) * (NONCE + TAG) + 64;
+  const ob = alloc(cap);
+  const w = ex.sr_seal_push(sid, ip, il, ob, cap);
+  unput(ip, il);
+  if (w < 0) { unput(ob, cap); throw { error: 'E_NET', msg: `seal push 失败（${w}）` }; }
+  return [w, ob, cap];
+}
+function pushFlush(sid) { // 流结束（len=0）：写出尾段；返回 [written, outPtr, outCap]
+  const cap = WRAP + SEG + NONCE + TAG + 64;
+  const ob = alloc(cap);
+  const w = ex.sr_seal_push(sid, 0, 0, ob, cap);
+  if (w < 0) { unput(ob, cap); throw { error: 'E_NET', msg: `seal flush 失败（${w}）` }; }
+  return [w, ob, cap];
+}
+async function postChunk(uploadId, seq, ptr, len, attempt = 1) {
+  const pathQ = `/_api/import-chunk?upload=${encodeURIComponent(uploadId)}&seq=${seq}`;
+  // 签名必须覆盖上传的确切字节：body 直读 wasm 内存 [ptr, ptr+len)
+  const auth = signHeaderPtr('POST', pathQ, ptr, len);
+  const body = len ? new Uint8Array(mem().buffer, ptr, len).slice() : new Uint8Array(0); // 拷贝脱离 wasm 内存（防后续增长失联）
+  try {
+    const resp = await fetch(pathQ, { method: 'POST', headers: { Authorization: auth, 'Content-Type': 'application/octet-stream' }, body });
+    return await checkResp(resp);
+  } catch (e) {
+    if (attempt < 3 && (!(e.error) || e.error === 'E_NET')) { // 网络类失败重试（服务端 seq 连续性保证不双计）
+      await new Promise((r) => setTimeout(r, 1000 * attempt));
+      return postChunk(uploadId, seq, ptr, len, attempt + 1);
+    }
+    throw e;
+  }
+}
+/** 从 startSeq 继续上传（fresh 与 resume 共用；已 push 过的分片由调用方先行重放）。 */
+async function uploadRest(uploadId, sid, file, startSeq, sent0, total) {
+  const slices = Math.ceil(file.size / CHUNK) || 1;
+  let sent = sent0;
+  for (let i = startSeq; i < slices; i++) {
+    const blob = file.slice(i * CHUNK, Math.min((i + 1) * CHUNK, file.size));
+    const bytes = new Uint8Array(await blob.arrayBuffer());
+    const [w, ob, cap] = pushSlice(sid, bytes);
+    try { await postChunk(uploadId, i, ob, w); } finally { unput(ob, cap); }
+    sent += w; upProgress(sent, total);
+  }
+  { // flush（len=0 尾段）——也作为一个分片上传（0 字节片合法，保证 seq 与 push 一一对应）
+    const [w, ob, cap] = pushFlush(sid);
+    try { await postChunk(uploadId, slices, ob, w); } finally { unput(ob, cap); }
+    sent += w; upProgress(sent, total);
+  }
+  if (sent !== total) throw { error: 'E_STATE', msg: `信封总长校验失败：本地 ${sent} ≠ 预计 ${total}（不上传 import-end，请重试）` };
+  ex.sr_seal_end(sid);
+  const j = await api('POST', `/_api/import-end?upload=${encodeURIComponent(uploadId)}`, null);
+  localStorage.removeItem('sr.up.' + uploadId);
+  refreshUpIds();
+  showMsg(`镜像导入完成（digest: ${j.digest || '?'}）。可用「发布」以 ${$('up-tag').value.trim()} 上线。`, 'ok');
+  $('up-status').textContent = `完成：digest ${j.digest || '?'}`;
+}
+$('btn-upload').addEventListener('click', async () => {
+  if (upBusy) return showMsg('已有上传进行中');
+  if (!keyReady()) return;
+  const project = $('up-project').value.trim(), slot = $('up-slot').value.trim(), tag = $('up-tag').value.trim();
+  const bad = checkNames(project, slot, tag);
+  if (bad) return showMsg(bad);
+  const file = $('up-file').files[0];
+  const pem = upPem();
+  if (!file) return showMsg('请选择镜像文件（docker save | zstd 产物）');
+  if (!pem.startsWith('-----BEGIN PUBLIC KEY-----')) return showMsg('请粘贴平台公钥 PEM（向管理员索取 platform_rsa.pub）');
+  { // zstd 魔数提示（服务端按 zstd 解压）
+    const head = new Uint8Array(await file.slice(0, 4).arrayBuffer());
+    if (!(head[0] === 0x28 && head[1] === 0xb5 && head[2] === 0x2f && head[3] === 0xfd)
+        && !confirm('文件头非 zstd 魔数（28 b5 2f fd）——当前服务端按 zstd(tar) 解压，普通 tar 可能导入失败。仍要继续吗？')) return;
+  }
+  upBusy = true;
+  try {
+    const total = sealedTotal(file.size);
+    // 会话 seed 本地持久化：页面刷新后凭 upload_id 重放已传分片（§8.1 断点续传）
+    const sessSeed = new Uint8Array(32); crypto.getRandomValues(sessSeed);
+    let uploadId;
+    try {
+      const j = await api('POST', '/_api/import-begin', { project, slot, tag, image_id: file.name, total_bytes: total });
+      uploadId = j.upload_id;
+    } catch (e) {
+      if (e.error === 'E_QUOTA') e.msg += `（信封总长 ${total} 字节）`;
+      throw e;
+    }
+    localStorage.setItem('sr.up.' + uploadId, JSON.stringify({ seed: toHex(sessSeed), project, slot, tag, size: file.size, name: file.name }));
+    refreshUpIds();
+    $('up-id').value = uploadId;
+    const [pemp, peml] = put(enc.encode(pem)), [ssp, ssl] = put(sessSeed);
+    const sid = ex.sr_seal_begin_seed(pemp, peml, ssp);
+    unput(pemp, peml); unput(ssp, ssl);
+    if (sid <= 0) throw { error: 'E_NET', msg: `seal 会话创建失败（${sid}）：请检查平台公钥 PEM` };
+    upProgress(0, total);
+    await uploadRest(uploadId, sid, file, 0, 0, total);
+  } catch (e) {
+    showMsg(`上传中断 ${errText(e)}——upload_id 已记录，可稍后「恢复」续传（勿刷新页面则更快）`);
+    $('up-status').textContent = `中断：${errText(e)}`;
+  } finally { upBusy = false; }
+});
+$('btn-resume').addEventListener('click', async () => {
+  if (upBusy) return showMsg('已有上传进行中');
+  if (!keyReady()) return;
+  const id = $('up-id').value.trim();
+  if (!id) return showMsg('请填入要恢复的 upload_id（开始上传后自动记录）');
+  let st;
+  try { st = await api('GET', `/_api/import-status?upload=${encodeURIComponent(id)}`); }
+  catch (e) { return showMsg(`查询失败 ${errText(e)}`); }
+  const rec = (st.received || []).length;
+  const saved = JSON.parse(localStorage.getItem('sr.up.' + id) || 'null');
+  $('up-status').textContent = `会话 ${id}：服务端已收 ${rec} 片 / 共 ${Math.ceil((saved?.size || 0) / CHUNK) + 1} 片，total=${st.total}`;
+  if (!saved) return showMsg('本地无该会话记录（浏览器数据被清则无法续传，请重新上传）');
+  const file = $('up-file').files[0];
+  if (!file || file.size !== saved.size) return showMsg(`恢复需重新选择同一文件（${saved.name}，${saved.size} 字节）`);
+  const pem = upPem();
+  if (!pem.startsWith('-----BEGIN PUBLIC KEY-----')) return showMsg('请粘贴平台公钥 PEM');
+  upBusy = true;
+  try {
+    const total = sealedTotal(file.size);
+    const slices = Math.ceil(file.size / CHUNK) || 1;
+    const [pemp, peml] = put(enc.encode(pem)), [ssp, ssl] = put(Buffer_fromHex(saved.seed));
+    const sid = ex.sr_seal_begin_seed(pemp, peml, ssp);
+    unput(pemp, peml); unput(ssp, ssl);
+    if (sid <= 0) throw { error: 'E_NET', msg: `seal 会话重建失败（${sid}）` };
+    // 重放已传分片（同 seed ⇒ 逐字节相同信封；只推进会话状态，不再上传）
+    let sent = 0;
+    for (let i = 0; i < Math.min(rec, slices); i++) {
+      const blob = file.slice(i * CHUNK, Math.min((i + 1) * CHUNK, file.size));
+      const bytes = new Uint8Array(await blob.arrayBuffer());
+      const [w, ob, cap] = pushSlice(sid, bytes);
+      sent += w; unput(ob, cap);
+    }
+    upProgress(sent, total);
+    const flushBytes = (file.size % SEG) ? (file.size % SEG) + NONCE + TAG : 0; // 尾段输出量（重放公式）
+    if (rec === slices) { // 数据片齐，仅缺 flush 片
+      const [w, ob, cap] = pushFlush(sid);
+      try { await postChunk(id, slices, ob, w); } finally { unput(ob, cap); }
+      sent += w;
+    } else if (rec === slices + 1) {
+      sent += flushBytes; // flush 片也已收到，未重放只补计数
+    } else {
+      await uploadRest(id, sid, file, rec, sent, total);
+      return;
+    }
+    if (sent !== total) throw { error: 'E_STATE', msg: `重放长度不符（${sent}/${total}），请重新上传` };
+    ex.sr_seal_end(sid);
+    const j = await api('POST', `/_api/import-end?upload=${encodeURIComponent(id)}`, null);
+    localStorage.removeItem('sr.up.' + id); refreshUpIds();
+    showMsg(`镜像导入完成（digest: ${j.digest || '?'}）`, 'ok');
+    $('up-status').textContent = `完成：digest ${j.digest || '?'}`;
+  } catch (e) {
+    showMsg(`恢复失败 ${errText(e)}`);
+    $('up-status').textContent = `恢复中断：${errText(e)}`;
+  } finally { upBusy = false; }
+});
+
+// —— 初始化 ——
+$('srv').textContent = location.origin + '/_api';
+loadSeed();
+refreshUpIds();
+if (state.seed && $('owner').value) { refreshProjects(); }
+</script>
+</body>
+</html>

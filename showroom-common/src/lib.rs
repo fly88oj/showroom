@@ -1,13 +1,18 @@
 //! showroom-common：showroomctl / showroom / 本 crate 共享的协议契约层。
 //! 实现 SPEC.md §1（SR-SIG1 签名认证）与 §2（加密信封 v1）。公共 API 见 README.md。
 
-#![forbid(unsafe_code)]
+// wasm32 垫片（src/wasm_shim.rs）需裸指针 C-ABI，其余目标维持 forbid(unsafe_code)
+#![cfg_attr(not(target_arch = "wasm32"), forbid(unsafe_code))]
 
 use std::fmt;
 use std::fs;
 use std::io::{self, BufReader, Read, Write};
+use std::path::Path;
+#[cfg(not(target_arch = "wasm32"))]
+use std::path::PathBuf;
+// wasm32-unknown-unknown 非 unix family，无该模块（save_seed/save_pem 的 0600 权限仅在原生生效）
+#[cfg(not(target_arch = "wasm32"))]
 use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
-use std::path::{Path, PathBuf};
 
 use aes_gcm::aead::generic_array::GenericArray;
 use aes_gcm::aead::{Aead, KeyInit};
@@ -17,12 +22,23 @@ use base64::engine::Engine as _;
 use ed25519_dalek::{Signature, Signer, SigningKey, Verifier, VerifyingKey};
 use rand::rngs::OsRng;
 use rand::RngCore;
-use rsa::pkcs8::{DecodePrivateKey, EncodePrivateKey, EncodePublicKey, LineEnding};
+use rsa::pkcs8::{DecodePrivateKey, EncodePublicKey, LineEnding};
+#[cfg(not(target_arch = "wasm32"))]
+use rsa::pkcs8::EncodePrivateKey;
 use rsa::{Oaep, RsaPrivateKey, RsaPublicKey};
 use sha2::{Digest, Sha256};
 
 /// 下游直接复用 common 锁定的密码学依赖，避免另引版本导致类型不兼容。
 pub use {ed25519_dalek, rsa};
+
+/// wasm32 控制台 C-ABI 垫片（SPEC §8.3）；文件内以 `#![cfg(target_arch = "wasm32")]` 整体隔离。
+pub mod wasm_shim;
+
+// wasm32：getrandom 在该目标无默认后端（"js" feature 需 wasm-bindgen，SPEC §8.3 禁引），
+// 注册全局熵池为自定义后端——仅满足链接（lib.rs 里的 OsRng 路径垫片从不调用）；
+// 垫片随机性一律走 StdRng（熵由 JS 经 sr_entropy 注入）。原生构建不启用 custom feature。
+#[cfg(target_arch = "wasm32")]
+getrandom::register_custom_getrandom!(wasm_shim::custom_getrandom);
 
 /// 密钥文件读写/解析类操作的统一错误（seal/open 用 std::io::Result，verify 用 AuthError）。
 pub type Result<T> = std::result::Result<T, Box<dyn std::error::Error>>;
@@ -30,12 +46,12 @@ pub type Result<T> = std::result::Result<T, Box<dyn std::error::Error>>;
 /// SR-SIG1 时间戳容差：|now − ts| ≤ 300s（SPEC §1）。
 pub const SIG_WINDOW_SECS: i64 = 300;
 
-// —— 信封 v1 常量（SPEC §2）——
-const KEY_LEN: usize = 32; // AES-256
-const NONCE_LEN: usize = 12;
-const TAG_LEN: usize = 16;
-const SEG: usize = 4 * 1024 * 1024; // 每段明文 4MiB
-const WRAP_LEN: usize = 384; // RSA-3072 模长
+// —— 信封 v1 常量（SPEC §2；pub 供 wasm 垫片与控制台 JS 长度核算复用）——
+pub const KEY_LEN: usize = 32; // AES-256
+pub const NONCE_LEN: usize = 12;
+pub const TAG_LEN: usize = 16;
+pub const SEG: usize = 4 * 1024 * 1024; // 每段明文 4MiB
+pub const WRAP_LEN: usize = 384; // RSA-3072 模长
 
 pub fn sha256_hex(data: &[u8]) -> String {
     hex::encode(Sha256::digest(data))
@@ -61,6 +77,8 @@ impl OwnerKey {
         Ok(OwnerKey(SigningKey::from_bytes(&seed)))
     }
 
+    /// 写裸 32B seed（0600；wasm32 无文件系统语义，仅原生提供）。
+    #[cfg(not(target_arch = "wasm32"))]
     pub fn save_seed(&self, path: &Path) -> Result<()> {
         if let Some(dir) = path.parent() {
             if !dir.as_os_str().is_empty() {
@@ -202,6 +220,7 @@ impl PlatformKeys {
     }
 
     /// 写 `<dir>/platform_rsa`（PKCS#8 PEM，0600）与 `<dir>/platform_rsa.pub`，返回私钥路径。
+    #[cfg(not(target_arch = "wasm32"))]
     pub fn save_pem(&self, dir: &Path) -> Result<PathBuf> {
         fs::create_dir_all(dir)?;
         let priv_path = dir.join("platform_rsa");
