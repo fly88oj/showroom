@@ -79,3 +79,22 @@ SHOWROOM_PROJECT=<project>   SHOWROOM_SLOT=<slot>  SHOWROOM_BASE_PATH=/<project>
 - reconcile：遍历 slot.conf，容器缺失/路由缺失则按 conf 重建（幂等）。
 - import：验签→解密到 _tmp（IMPORT_MAX_GB 帽）→`docker load`→`docker tag`→push 127.0.0.1:5000→删临时。
 - gc-images/gc-registry/registry-gc/snapshot/autoheal/disksentinel：见设计文档 §6，由 systemd timer 调 `showroomctl <sub>`。
+
+## 8. 選产补篇（v1.1）：分片导入 / 快照 / 控制台
+### 8.1 分片导入（大文件断点续传；控制台用，CLI 单发不变）
+```
+POST /_api/import-begin   {"project","slot","tag","image_id","total_bytes"}  → {"upload_id"}   [签名]
+POST /_api/import-chunk?upload=<id>&seq=<n>   body=信封原始字节切片（顺序追加）             [签名，每片独立验签]
+GET  /_api/import-status?upload=<id>          → {"received":[seq...],"total"}                [签名]
+POST /_api/import-end?upload=<id>             → 拼接后走单发 import 同一管道（解密→load→tag→push→manifest），删会话 [签名]
+```
+- 服务端会话：_tmp/<upload_id>.bin（追加）+ .meta（owner/project/slot/tag/total/seq 列表，JSON）；seq 必须连续且不重复；total 累计不得超 IMPORT_MAX_GB；end 时字节总数必须等于 total_bytes。
+- 完整性：每片独立 SR-SIG1（哈希覆盖该片）；顺序与完整性由服务端 seq/total 强制——整包完整性=片完整性∪顺序完备。
+- 陈旧会话（>24h）由 gc-images 顺带清理。
+### 8.2 btrfs 快照（showroomctl snapshot hourly|daily）
+- `btrfs subvolume snapshot -r /@showroom /@showroom-snaps/<h-|d->YYYYMMDD-HHMM`（/ @showroom-snaps 父子卷惰性创建）；hourly 保留 24 个、daily 保留 7 个（按名排序裁剪最旧）；失败如实报错不 panic。
+### 8.3 WASM 控制台（showroom-web）
+- Caddy 两站点新增 `handle_path /_console/* { root * /srv/showroom/_console; file_server }`（静态壳不含任何实例数据，登录前不暴露管理信息）。
+- 密码学层：showroom-common 增加 `crate-type=cdylib` + `#[no_mangle] extern "C"` 的 wasm32 垫片（keygen/sign_header/seal 会话式 push/finish，指针+长度进出），**不用 wasm-bindgen/wasm-pack**（零新工具链，rustup target 即可）；JS 侧直接 instantiate 调用。
+- 登录=密钥即身份（P1 档）：首访生成/导入 Ed25519（存 localStorage，页面明确告知属试验性存储），公钥串展示给管理员登记；OPAQUE 属后续。
+- 功能对齐 CLI 只读+发布：列表/发布/停止/启动/删除/回滚/env/logs；镜像上传走 8.1 分片（File.slice 流式 seal，8MB/片，进度条+断点续传）。
