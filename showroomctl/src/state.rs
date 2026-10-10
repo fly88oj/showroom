@@ -414,6 +414,12 @@ pub fn parse_meminfo_available_kb(text: &str) -> Option<u64> {
     line.split_whitespace().nth(1)?.parse().ok()
 }
 
+/// /proc/meminfo 的 MemTotal 行 → KB 数（plan-15 hw 推导输入；缺失/畸形 → None）。
+pub fn parse_meminfo_total_kb(text: &str) -> Option<u64> {
+    let line = text.lines().find(|l| l.starts_with("MemTotal:"))?;
+    line.split_whitespace().nth(1)?.parse().ok()
+}
+
 // —— 磁盘准入（SPEC §14.2，上传导入/快通道复核共用）——
 
 /// 磁盘准入判断（纯函数）：`sealed × UPLOAD_SPACE_FACTOR ≤ avail − DISK_RESERVE_GB` 不满足 → Err

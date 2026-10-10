@@ -182,6 +182,24 @@ pub fn all_container_names() -> Vec<String> {
     }
 }
 
+/// sr-redis 实例的 --databases 实际值（docker inspect Config.Cmd；plan-15 §2.2 Obs 用）：
+/// 容器缺失 → None；无该旗标 → Some(16)（redis 缺省）。
+pub fn redis_databases() -> Option<u16> {
+    let out = Command::new("docker")
+        .args(["inspect", "-f", "{{.Config.Cmd}}", "sr-redis"])
+        .output()
+        .ok()?;
+    if !out.status.success() {
+        return None;
+    }
+    let s = String::from_utf8_lossy(&out.stdout);
+    let toks: Vec<&str> = s.trim().trim_matches(|c| c == '[' || c == ']').split_whitespace().collect();
+    match toks.iter().position(|t| *t == "--databases") {
+        Some(i) => toks.get(i + 1).and_then(|v| v.parse().ok()),
+        None => Some(16),
+    }
+}
+
 /// 健康检查状态（镜像无 HEALTHCHECK 时为 None）。
 pub fn health_status(name: &str) -> Option<String> {
     let out = Command::new("docker")

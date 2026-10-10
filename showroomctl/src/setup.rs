@@ -2,12 +2,20 @@
 //! plan_setup 纯函数出 Action、apply 逐项执行；渲染产物（policy/Caddyfile/单元/脚本）常量内嵌。
 //! 纯函数（渲染/推导/幂等判定）与 subprocess 薄层（observe/apply）分区放置。
 
-use crate::state;
+use std::collections::{BTreeMap, BTreeSet};
+use std::fs;
+use std::path::{Path, PathBuf};
+
+use serde_json::{json, Value};
+
+use crate::dockerops;
+use crate::middleware::{host_env_path, FrpMode, HostEnv};
+use crate::state::{self, ApiError, R};
 
 // —— policy.env 渲染（plan-15 §1：setup 负责缺省生成——缺键补默认、已有键一律保留）——
 
-/// policy 键表（§13.3/§14.4 + 存量键；§14 两键为已落语义，与 §14 实现共用）。
-/// 值为固定缺省；RESERVE_MEM_MB/DISK_RESERVE_GB 首跑缺省可被 hw_defaults 覆盖（见 render_policy_hw）。
+/// policy 键表（§13.3/§14.4 + 存量键）。RESERVE_MEM_MB/DISK_RESERVE_GB 首跑缺省
+/// 可被 hw_defaults 覆盖（见 render_policy_hw）。
 pub const POLICY_KEYS: [(&str, &str); 9] = [
     ("MAX_SLOTS", "30"),
     ("DEFAULT_MEM", "256m"),
@@ -78,9 +86,14 @@ pub fn hw_defaults(mem_mb: u64, disk_mb: u64, cores: u32) -> HwTuning {
         disk_reserve_gb: clamp(disk_gb * 3 / 100, 10, 60),
         pg_shared_buffers_mb: clamp(mem_mb * 12 / 100, 64, 1024),
         pg_effective_cache_mb: mem_mb * 35 / 100,
-        pg_max_connections: u32::try_from(30 + cores.saturating_mul(10)).unwrap_or(120).clamp(40, 120),
+        pg_max_connections: (30 + cores.saturating_mul(10)).clamp(40, 120),
         redis_maxmemory_mb: clamp(mem_mb * 2 / 100, 64, 512),
     }
+}
+
+/// Obs 的硬件观测 → 推导（零/缺失观测走 clamp 下限，不 panic）。
+pub fn hw_from_obs(obs: &Obs) -> HwTuning {
+    hw_defaults(obs.mem_total_mb, obs.disk_total_mb, obs.cores.max(1))
 }
 
 /// 审计注释的硬件摘要：「12G/953G/4 核」（内存/磁盘向下取整 GB）。
@@ -91,7 +104,6 @@ pub fn hw_summary(mem_mb: u64, disk_mb: u64, cores: u32) -> String {
 /// unix 秒 → UTC `YYYY-MM-DD`（审计注释用；civil-from-days 算法，免引 chrono）。
 pub fn date_label(unix: u64) -> String {
     let days = (unix / 86400) as i64;
-    // Howard Hinnant 的 civil_from_days
     let z = days + 719_468;
     let era = if z >= 0 { z } else { z - 146_096 } / 146_097;
     let doe = z - era * 146_097;
@@ -105,103 +117,1313 @@ pub fn date_label(unix: u64) -> String {
     format!("{y:04}-{m:02}-{d:02}")
 }
 
+// —— 调优常量（补充需求②修正：sysctl 全表 / journald 400M+30d / watchdog）——
+
+/// 内核调优（BBR+fq、连接队列、rmem/wmem、tw_reuse/fastopen/mtu_probing、vm 与 inotify）。
+/// tcp_max_syn_backlog=4096（修正 plan 的 8192 笔误，按仓库调优清单键位全集）。
+pub const SYSCTL_CONF: &str = "/etc/sysctl.d/99-showroom.conf";
+pub const SYSCTL_CONTENTS: &str = "\
+net.core.default_qdisc = fq
+net.ipv4.tcp_congestion_control = bbr
+net.core.somaxconn = 4096
+net.ipv4.tcp_max_syn_backlog = 4096
+net.core.rmem_max = 16777216
+net.core.wmem_max = 16777216
+net.ipv4.tcp_rmem = 4096 87380 16777216
+net.ipv4.tcp_wmem = 4096 65536 16777216
+net.ipv4.ip_local_port_range = 10240 65535
+net.ipv4.tcp_tw_reuse = 1
+net.ipv4.tcp_fastopen = 3
+net.ipv4.tcp_mtu_probing = 1
+net.ipv4.tcp_slow_start_after_idle = 0
+vm.swappiness = 10
+vm.vfs_cache_pressure = 50
+fs.file-max = 131072
+fs.inotify.max_user_instances = 512
+fs.inotify.max_user_watches = 1048576
+";
+
+pub const JOURNALD_CONF: &str = "/etc/systemd/journald.conf.d/showroom.conf";
+pub const JOURNALD_CONTENTS: &str = "[Journal]\nSystemMaxUse=400M\nMaxRetentionSec=30d\n";
+
+pub const WATCHDOG_CONF: &str = "/etc/systemd/system.conf.d/showroom.conf";
+pub const WATCHDOG_CONTENTS: &str = "[Manager]\nRuntimeWatchdogSec=10s\n";
+
+/// btrfs 快照父卷（snapshot hourly/daily 惰性创建；setup 顺手收敛，plan-15 §2.2）。
+pub const SNAPS_SUBVOL: &str = "/@showroom-snaps";
+
+// —— 内嵌单元与脚本常量（deploy/ 模板 include_str；IP 遗留已清洗）——
+
+pub const DEDUP_SCRIPT_PATH: &str = "/usr/local/bin/showroom-dedup";
+pub const DEDUP_SCRIPT: &str = "\
+#!/usr/bin/env bash
+# showroom 周度 dedup（duperemove 增量 hashfile 模式；Nice=19 由单元保证）
+set -euo pipefail
+ROOT=\"${SHOWROOM_ROOT:-/srv/showroom}\"
+exec duperemove -d --hashfile=\"$ROOT/state/dedup.hash\" \"$ROOT\"
+";
+
+pub const PRECOMPRESS_PATH: &str = "/usr/local/bin/showroom-precompress";
+pub const PRECOMPRESS_SCRIPT: &str = "\
+#!/usr/bin/env bash
+# _console 静态资源 zstd -19 预压缩（Caddy file_server precompressed 直接下发 .zst）
+set -euo pipefail
+DIR=\"${1:-${SHOWROOM_ROOT:-/srv/showroom}/_console}\"
+cd \"$DIR\"
+for f in *; do
+  case \"$f\" in *.zst) continue ;; esac
+  [ -f \"$f\" ] && zstd -19 -k -q -f \"$f\"
+done
+";
+
+/// frpc 下载源（ChmlFrp linux/amd64；URL 可能回 HTML 壳——FrpcFetch 执行时 file 校验 ELF，
+/// 非 ELF 报错并提示手工放置后重跑 setup，如实降级见 docs/deployment.md）。
+pub const FRPC_URL: &str = "https://chmlfrp.cn/dw/linux/amd64/frpc";
+pub const FRPC_BIN: &str = "/usr/local/frpc/frpc";
+
+/// 恒装的 timer 对（plan-15 §2.2：reconcile/autoheal/gc-images/gc-registry/registry-gc/
+/// snapshot-hourly/snapshot-daily；deploy/ 原文内嵌）。
+pub const TIMER_UNITS: &[(&str, &str)] = &[
+    ("showroom-reconcile.service", include_str!("../../deploy/showroom-reconcile.service")),
+    ("showroom-reconcile.timer", include_str!("../../deploy/showroom-reconcile.timer")),
+    ("showroom-autoheal.service", include_str!("../../deploy/showroom-autoheal.service")),
+    ("showroom-autoheal.timer", include_str!("../../deploy/showroom-autoheal.timer")),
+    ("showroom-gc-images.service", include_str!("../../deploy/showroom-gc-images.service")),
+    ("showroom-gc-images.timer", include_str!("../../deploy/showroom-gc-images.timer")),
+    ("showroom-gc-registry.service", include_str!("../../deploy/showroom-gc-registry.service")),
+    ("showroom-gc-registry.timer", include_str!("../../deploy/showroom-gc-registry.timer")),
+    ("showroom-registry-gc.service", include_str!("../../deploy/showroom-registry-gc.service")),
+    ("showroom-registry-gc.timer", include_str!("../../deploy/showroom-registry-gc.timer")),
+    ("showroom-snapshot-hourly.service", include_str!("../../deploy/showroom-snapshot-hourly.service")),
+    ("showroom-snapshot-hourly.timer", include_str!("../../deploy/showroom-snapshot-hourly.timer")),
+    ("showroom-snapshot-daily.service", include_str!("../../deploy/showroom-snapshot-daily.service")),
+    ("showroom-snapshot-daily.timer", include_str!("../../deploy/showroom-snapshot-daily.timer")),
+];
+
+/// 恒启用的 timer（enable --now）。
+pub const TIMER_ENABLE: &[&str] = &[
+    "showroom-reconcile.timer",
+    "showroom-autoheal.timer",
+    "showroom-gc-images.timer",
+    "showroom-gc-registry.timer",
+    "showroom-registry-gc.timer",
+    "showroom-snapshot-hourly.timer",
+    "showroom-snapshot-daily.timer",
+];
+
+/// dedup 单元对（DEDUP=weekly 装启用；none → UnitDisableRm 收敛）。
+pub const DEDUP_UNITS: &[(&str, &str)] = &[
+    ("showroom-dedup.service", include_str!("../../deploy/showroom-dedup.service")),
+    ("showroom-dedup.timer", include_str!("../../deploy/showroom-dedup.timer")),
+];
+
+const UNIT_API_TEMPLATE: &str = include_str!("../../deploy/showroom-api.service");
+
+/// 全部单元名（observe 探测候选）。
+pub fn all_unit_names() -> Vec<String> {
+    let mut v = vec!["showroom-api.service".to_string()];
+    for (n, _) in TIMER_UNITS {
+        v.push(n.to_string());
+    }
+    for (n, _) in DEDUP_UNITS {
+        v.push(n.to_string());
+    }
+    v.push("chmlfrp.service".to_string());
+    v
+}
+
+pub fn unit_path(name: &str) -> PathBuf {
+    Path::new("/etc/systemd/system").join(name)
+}
+
+/// api 单元渲染：deploy 模板 + SHOWROOM_BASE_URL 注入（host.base_url()；模板 IP 遗留已清洗）。
+pub fn render_unit_api(host: &HostEnv) -> String {
+    UNIT_API_TEMPLATE.replace(
+        "EnvironmentFile=-/etc/showroom/showroom.env",
+        &format!("Environment=SHOWROOM_BASE_URL={}", host.base_url()),
+    )
+}
+
+/// chmlfrp 单元渲染（补充需求①）：凭据经 EnvironmentFile=host.env（0600）注入，
+/// 不落明文进 644 的单元文件。
+pub fn render_unit_chmlfrp(root: &Path) -> String {
+    format!(
+        "\
+[Unit]
+Description=ChmlFrp tunnel (frpc)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+# 凭据在 host.env（0600，root）：EnvironmentFile 注入 FRP_TOKEN/FRP_TUNNEL
+EnvironmentFile=-{env}
+ExecStart={frpc} -u ${{FRP_TOKEN}} -p ${{FRP_TUNNEL}}
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target
+",
+        env = host_env_path(root).display(),
+        frpc = FRPC_BIN,
+    )
+}
+
+// —— Caddyfile 渲染（plan-15 §2.2；快照测试覆盖三组合）——
+
+/// registry ∈ 集合才有 site A 的 /v2 handle；/_bootstrap、/_console、routes import 恒在；
+/// PUBLIC_HOST 空 → 不渲染 site B（纯内网主机）。
+pub fn render_caddyfile(mw: &BTreeSet<String>, lan: &str, public: &str) -> String {
+    let mut s = String::from(
+        "# ————— 公共片段：两个站点共用 —————\n\
+         (showroom-app) {\n\
+         \t# 控制面：全部端点要求 SR-SIG1 签名（零信息暴露由应用层保证）\n\
+         \thandle /_api/* {\n\
+         \t\treverse_proxy 127.0.0.1:8090\n\
+         \t}\n\
+         \t# WASM 控制台（登录成功前不加载任何管理资源）\n\
+         \thandle_path /_console/* {\n\
+         \t\troot * /srv/showroom/_console\n\
+         \t\tfile_server {\n\
+         \t\t\tprecompressed zstd\n\
+         \t\t}\n\
+         \t}\n\
+         \t# 展项路由（showroomctl 按项目生成到 state/routes/<project>.caddy 并 reload）\n\
+         \timport /srv/showroom/state/routes/*.caddy\n\
+         \t# 根路径与未匹配路径一律 404（零信息暴露：不重定向、不暴露站点信息）\n\
+         }\n\
+         \n\
+         # ————— site A：内网面 —————\n",
+    );
+    s.push_str(&format!("http://{lan} {{\n\timport showroom-app\n"));
+    if mw.contains("registry") {
+        s.push_str(
+            "\t# /v2：registry 推拉快通道（basic auth 由 registry 自身校验）\n\
+             \thandle /v2/* {\n\
+             \t\treverse_proxy 127.0.0.1:5000\n\
+             \t}\n",
+        );
+    }
+    s.push_str(
+        "\t# /_bootstrap：CLI / Skill 分发（仅内网面提供，公网面 404）\n\
+         \thandle_path /_bootstrap/* {\n\
+         \t\troot * /srv/showroom/_bootstrap\n\
+         \t\tfile_server\n\
+         \t}\n\
+         }\n",
+    );
+    if !public.is_empty() {
+        s.push_str(&format!(
+            "\n# ————— site B：公网面（frp 等公网隧道流量命中的站点）—————\n\
+             # 公网发布走加密 import 通道，不放 /v2；/_bootstrap 返回 404。\n\
+             http://{public} {{\n\
+             \timport showroom-app\n\
+             }}\n"
+        ));
+    }
+    s
+}
+
+// —— 容器规格常量表（plan-15 §2.2；pg 12 个 -c 参数与 redis maxmemory 随 hw 推导）——
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct ContainerSpec {
+    pub name: String,
+    pub image: String,
+    /// docker run 旗标（network/restart/env/volumes/ports；不含 -d 与 --name）
+    pub flags: Vec<String>,
+    /// 镜像后的命令参数（postgres -c … / redis --appendonly …）
+    pub cmd_args: Vec<String>,
+}
+
+impl ContainerSpec {
+    /// diff/报告的单行摘要（如 "redis:7-alpine --databases 256 --maxmemory 245mb …"）。
+    pub fn detail(&self) -> String {
+        if self.cmd_args.is_empty() {
+            self.image.clone()
+        } else {
+            format!("{} {}", self.image, self.cmd_args.join(" "))
+        }
+    }
+
+    /// docker run 完整参数（含 run -d --name）。
+    pub fn run_args(&self) -> Vec<String> {
+        let mut v = vec!["run".to_string(), "-d".to_string(), "--name".to_string(), self.name.clone()];
+        v.extend(self.flags.iter().cloned());
+        v.push(self.image.clone());
+        v.extend(self.cmd_args.iter().cloned());
+        v
+    }
+}
+
+fn flags(v: &[&str]) -> Vec<String> {
+    v.iter().map(|s| s.to_string()).collect()
+}
+
+/// pg 12 个 -c 参数（补充需求②：实配全集；前三个随 hw 推导，其余固定）。
+pub fn postgres_spec(root: &Path, pg_pass: &str, hw: &HwTuning) -> ContainerSpec {
+    let pw = format!("POSTGRES_PASSWORD={pg_pass}");
+    let data = format!("{}:/var/lib/postgresql/data", root.join("_middleware/postgres").display());
+    ContainerSpec {
+        name: "sr-postgres".into(),
+        image: "postgres:16-alpine".into(),
+        flags: flags(&[
+            "--network", dockerops::DOCKER_NET, "--restart", "unless-stopped", "-e", &pw, "-v", &data,
+        ]),
+        cmd_args: flags(&[
+            "-c", &format!("shared_buffers={}MB", hw.pg_shared_buffers_mb),
+            "-c", &format!("effective_cache_size={}MB", hw.pg_effective_cache_mb),
+            "-c", "work_mem=16MB",
+            "-c", &format!("max_connections={}", hw.pg_max_connections),
+            "-c", "autovacuum_naptime=30s",
+            "-c", "max_wal_size=2GB",
+            "-c", "min_wal_size=256MB",
+            "-c", "checkpoint_completion_target=0.9",
+            "-c", "random_page_cost=1.1",
+            "-c", "effective_io_concurrency=200",
+            "-c", "wal_compression=on",
+            "-c", "maintenance_work_mem=128MB",
+        ]),
+    }
+}
+
+/// redis 规格：--databases 与 policy.REDIS_DBS 一致；--maxmemory 随 hw 推导（补充需求②）。
+pub fn redis_spec(root: &Path, dbs: u16, hw: &HwTuning) -> ContainerSpec {
+    let data = format!("{}:/data", root.join("_middleware/redis").display());
+    ContainerSpec {
+        name: "sr-redis".into(),
+        image: "redis:7-alpine".into(),
+        flags: flags(&[
+            "--network", dockerops::DOCKER_NET, "--restart", "unless-stopped", "-v", &data,
+        ]),
+        cmd_args: flags(&[
+            "--appendonly", "yes",
+            "--databases", &dbs.to_string(),
+            "--maxmemory", &format!("{}mb", hw.redis_maxmemory_mb),
+            "--maxmemory-policy", "allkeys-lru",
+        ]),
+    }
+}
+
+pub fn registry_spec(root: &Path) -> ContainerSpec {
+    let reg = format!("{}:/var/lib/registry", root.join("_middleware/registry").display());
+    let htpasswd = format!("{}:/etc/docker/registry/htpasswd:ro", state::htpasswd_path(root).display());
+    ContainerSpec {
+        name: "sr-registry".into(),
+        image: "registry:2".into(),
+        flags: flags(&[
+            "--network", dockerops::DOCKER_NET, "--restart", "unless-stopped",
+            "-p", "127.0.0.1:5000:5000",
+            "-e", "REGISTRY_STORAGE_DELETE_ENABLED=true",
+            "-e", "REGISTRY_AUTH=htpasswd",
+            "-e", "REGISTRY_AUTH_HTPASSWD_REALM=ShowroomRegistry",
+            "-e", "REGISTRY_AUTH_HTPASSWD_PATH=/etc/docker/registry/htpasswd",
+            "-v", &reg,
+            "-v", &htpasswd,
+        ]),
+        cmd_args: vec![],
+    }
+}
+
+// —— Obs：现状观察值（plan 的唯一世界输入；observe 收集，单测喂 fake）——
+
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct Obs {
+    pub dirs: BTreeSet<PathBuf>,
+    pub files: BTreeMap<PathBuf, String>,
+    pub net: bool,
+    pub containers: BTreeSet<String>,
+    /// sr-redis 实例的 --databases 实际值（容器缺失 → None）
+    pub redis_databases: Option<u16>,
+    pub pkgs: BTreeSet<String>,
+    pub units_installed: BTreeSet<String>,
+    pub units_enabled: BTreeSet<String>,
+    /// 二进制资产存在性（frpc；文本 map 之外的 ELF）
+    pub binaries: BTreeSet<PathBuf>,
+    /// 硬件观测（hw 推导输入；/proc/meminfo MemTotal、df /、nproc）
+    pub mem_total_mb: u64,
+    pub disk_total_mb: u64,
+    pub cores: u32,
+}
+
+// —— Action（plan-15 §2.2 枚举 + 补充需求① FrpcFetch）——
+
+#[derive(Debug, Clone, PartialEq)]
+pub enum Action {
+    CreateDir { path: PathBuf, mode: u32 },
+    WriteFile { path: PathBuf, contents: String, mode: u32 },
+    BtrfsSubvol { path: PathBuf },
+    NetworkCreate { name: String },
+    ContainerUp { spec: ContainerSpec },
+    ContainerRm { name: String },
+    PackageInstall { pkg: &'static str },
+    UnitInstall { name: String, contents: String },
+    UnitEnable { name: String, now: bool },
+    UnitDisableRm { name: String },
+    Cmd { what: String, argv: Vec<String> },
+    /// frpc 下载（补充需求①）：下载后 file 校验 ELF 再 chmod 0755；非 ELF 报错并提示手工放置。
+    FrpcFetch { url: String, dest: PathBuf },
+}
+
+/// 去掉行首 # 注释行（host.env 审计注释不参与幂等比较）。
+fn strip_comment_lines(s: &str) -> String {
+    s.lines().filter(|l| !l.trim_start().starts_with('#')).collect::<Vec<_>>().join("\n")
+}
+
+/// 幂等判定（每类一臂，纯函数，单测直测；plan-15 §2.2）。
+/// 两个定向例外：host.env 比较前剥注释行（审计注释只在首生成落盘，不引发重写churn）；
+/// contents 为空的 WriteFile 是 touch 语义（registry.htpasswd 前置——存在即 clean，
+/// 绝不覆盖 user-add 管理的活账本）。
+pub fn action_needed(a: &Action, obs: &Obs) -> bool {
+    match a {
+        Action::CreateDir { path, .. } => !obs.dirs.contains(path),
+        Action::WriteFile { path, contents, .. } => match obs.files.get(path) {
+            None => true,
+            Some(cur) => {
+                if path.file_name().is_some_and(|n| n == "host.env") {
+                    strip_comment_lines(cur) != strip_comment_lines(contents)
+                } else if contents.is_empty() {
+                    false // touch：存在即 clean
+                } else {
+                    cur != contents
+                }
+            }
+        },
+        Action::BtrfsSubvol { path } => !obs.dirs.contains(path),
+        Action::NetworkCreate { .. } => !obs.net,
+        Action::ContainerUp { spec } => !obs.containers.contains(&spec.name),
+        Action::ContainerRm { name } => obs.containers.contains(name),
+        Action::PackageInstall { pkg } => !obs.pkgs.contains(*pkg),
+        Action::UnitInstall { name, contents } => {
+            obs.files.get(&unit_path(name)).map(String::as_str) != Some(contents.as_str())
+        }
+        Action::UnitEnable { name, .. } => !obs.units_enabled.contains(name),
+        Action::UnitDisableRm { name } => obs.units_installed.contains(name) || obs.units_enabled.contains(name),
+        Action::Cmd { .. } => true, // 派生类：只在触发条件成立时进 plan（见 plan_setup）
+        Action::FrpcFetch { dest, .. } => !obs.binaries.contains(dest),
+    }
+}
+
+/// 期望目录全集（顺序即 plan 顺序；权限按 deployment.md：state 三件 0700，其余 0755）。
+pub fn expected_dirs(root: &Path, host: &HostEnv) -> Vec<(PathBuf, u32)> {
+    let mut v = vec![
+        (root.join("state"), 0o700),
+        (root.join("state/tokens"), 0o700),
+        (root.join("state/users"), 0o700),
+        (root.join("state/projects"), 0o755),
+        (root.join("state/routes"), 0o755),
+        (root.join("_middleware"), 0o755),
+    ];
+    for mw in crate::middleware::MW_NAMES {
+        if host.middleware.contains(mw) {
+            v.push((root.join(format!("_middleware/{mw}")), 0o755));
+        }
+    }
+    v.push((root.join("_console"), 0o755));
+    v.push((root.join("_tmp"), 0o755));
+    v.push((root.join("_bootstrap"), 0o755));
+    if host.frp == FrpMode::Chmlfrp {
+        v.push((PathBuf::from("/usr/local/frpc"), 0o755));
+    }
+    v
+}
+
+/// pg 超级用户密码：优先既有 middleware.cred（沿用，绝不轮换）；缺文件 → 生成 32hex（首跑）。
+fn pg_password(root: &Path, obs: &Obs) -> (String, bool) {
+    if let Some(t) = obs.files.get(&pg_cred_path(root)) {
+        if let Some((_, pw)) = t.trim().split_once(':') {
+            if !pw.is_empty() {
+                return (pw.to_string(), false);
+            }
+        }
+    }
+    (state::rand_hex(16), true)
+}
+
+pub fn pg_cred_path(root: &Path) -> PathBuf {
+    root.join("state/middleware.cred")
+}
+
+/// 期望状态全程序 → 过滤出 needed（幂等核心；满 Obs → 空 plan）。
+/// redis 实例 databases < policy 不产 Action、产 Warning（见 plan_warnings）——数据安全优先。
+pub fn plan_setup(host: &HostEnv, obs: &Obs) -> Vec<Action> {
+    let root = state::root();
+    let hw = hw_from_obs(obs);
+    let mut full: Vec<Action> = vec![];
+
+    for (p, mode) in expected_dirs(&root, host) {
+        full.push(Action::CreateDir { path: p, mode });
+    }
+    full.push(Action::BtrfsSubvol { path: PathBuf::from(SNAPS_SUBVOL) });
+
+    // host.env：首跑（文件缺失）带 hw 审计注释行；已存在则纯 to_env 比较（剥注释幂等）
+    let host_first_run = !obs.files.contains_key(&host_env_path(&root));
+    let host_contents = if host_first_run {
+        format!(
+            "# 由 hw_defaults({}) 推导于 {}\n{}",
+            hw_summary(obs.mem_total_mb, obs.disk_total_mb, obs.cores),
+            date_label(state::unix_now()),
+            host.to_env()
+        )
+    } else {
+        host.to_env()
+    };
+    full.push(Action::WriteFile { path: host_env_path(&root), contents: host_contents, mode: 0o600 });
+
+    let policy_path = root.join("state/policy.env");
+    let policy_existing = obs.files.get(&policy_path).cloned();
+    let policy_contents = if policy_existing.is_some() {
+        render_policy(policy_existing.as_deref())
+    } else {
+        render_policy_hw(None, Some(&hw))
+    };
+    full.push(Action::WriteFile { path: policy_path, contents: policy_contents, mode: 0o644 });
+
+    if host.middleware.contains("registry") {
+        // registry 前置：touch 语义（contents=""，存在即 clean——见 action_needed）
+        full.push(Action::WriteFile { path: state::htpasswd_path(&root), contents: String::new(), mode: 0o644 });
+    }
+
+    full.push(Action::NetworkCreate { name: dockerops::DOCKER_NET.to_string() });
+
+    if host.middleware.contains("postgres") {
+        let (pass, fresh) = pg_password(&root, obs);
+        if fresh {
+            full.push(Action::WriteFile {
+                path: pg_cred_path(&root),
+                contents: format!("postgres:{pass}\n"),
+                mode: 0o600,
+            });
+        }
+        full.push(Action::ContainerUp { spec: postgres_spec(&root, &pass, &hw) });
+    }
+    if host.middleware.contains("redis") {
+        let dbs = state::Policy::load(&root).redis_dbs;
+        full.push(Action::ContainerUp { spec: redis_spec(&root, dbs, &hw) });
+    }
+    if host.middleware.contains("registry") {
+        full.push(Action::ContainerUp { spec: registry_spec(&root) });
+    }
+
+    if host.caddy {
+        full.push(Action::PackageInstall { pkg: "caddy" });
+        full.push(Action::WriteFile {
+            path: PathBuf::from(dockerops::CADDY_FILE),
+            contents: render_caddyfile(&host.middleware, &host.lan_host, &host.public_host),
+            mode: 0o644,
+        });
+    }
+
+    if host.tuning {
+        for (path, contents) in [
+            (SYSCTL_CONF, SYSCTL_CONTENTS),
+            (JOURNALD_CONF, JOURNALD_CONTENTS),
+            (WATCHDOG_CONF, WATCHDOG_CONTENTS),
+        ] {
+            full.push(Action::WriteFile { path: PathBuf::from(path), contents: contents.to_string(), mode: 0o644 });
+        }
+    }
+
+    // 单元文件（api 渲染 + 7 timer 对恒装；dedup 按 DEDUP 分支；chmlfrp 按 FRP 分支）
+    full.push(Action::UnitInstall {
+        name: "showroom-api.service".into(),
+        contents: render_unit_api(host),
+    });
+    for (name, contents) in TIMER_UNITS {
+        full.push(Action::UnitInstall { name: name.to_string(), contents: contents.to_string() });
+    }
+    if host.dedup {
+        for (name, contents) in DEDUP_UNITS {
+            full.push(Action::UnitInstall { name: name.to_string(), contents: contents.to_string() });
+        }
+        full.push(Action::WriteFile {
+            path: PathBuf::from(DEDUP_SCRIPT_PATH),
+            contents: DEDUP_SCRIPT.to_string(),
+            mode: 0o755,
+        });
+    } else {
+        full.push(Action::UnitDisableRm { name: "showroom-dedup.timer".into() });
+        full.push(Action::UnitDisableRm { name: "showroom-dedup.service".into() });
+    }
+    if host.frp == FrpMode::Chmlfrp {
+        full.push(Action::UnitInstall {
+            name: "chmlfrp.service".into(),
+            contents: render_unit_chmlfrp(&root),
+        });
+    }
+
+    // 预压缩脚本（补充需求③：/usr/local/bin/showroom-precompress；file_server precompressed 已渲染进 Caddyfile）
+    full.push(Action::WriteFile {
+        path: PathBuf::from(PRECOMPRESS_PATH),
+        contents: PRECOMPRESS_SCRIPT.to_string(),
+        mode: 0o755,
+    });
+
+    // —— 过滤出 needed，再派生 Cmd（只在触发条件成立时追加——保证二次运行为 clean）——
+    let mut needed: Vec<Action> = full.into_iter().filter(|a| action_needed(a, obs)).collect();
+
+    fn has(list: &[Action], pred: &dyn Fn(&Action) -> bool) -> bool {
+        list.iter().any(pred)
+    }
+    fn wf_pred(p: &str) -> impl Fn(&Action) -> bool + '_ {
+        move |a: &Action| matches!(a, Action::WriteFile { path, .. } if path == Path::new(p))
+    }
+
+    let mut enables: Vec<Action> = vec![Action::UnitEnable { name: "showroom-api.service".into(), now: true }];
+    for t in TIMER_ENABLE {
+        enables.push(Action::UnitEnable { name: t.to_string(), now: true });
+    }
+    if host.dedup {
+        enables.push(Action::UnitEnable { name: "showroom-dedup.timer".into(), now: true });
+    }
+    if host.frp == FrpMode::Chmlfrp {
+        let fetch = Action::FrpcFetch { url: FRPC_URL.to_string(), dest: PathBuf::from(FRPC_BIN) };
+        if action_needed(&fetch, obs) {
+            needed.insert(0, fetch); // 下载先于单元启用
+        }
+        enables.push(Action::UnitEnable { name: "chmlfrp.service".into(), now: true });
+    }
+    let enables: Vec<Action> = enables.into_iter().filter(|a| action_needed(a, obs)).collect();
+
+    // 单元文件有变更 → daemon-reload（先于 enable --now）
+    if has(&needed, &|a| matches!(a, Action::UnitInstall { .. } | Action::UnitDisableRm { .. })) {
+        needed.push(Action::Cmd {
+            what: "daemon-reload".into(),
+            argv: vec!["systemctl".into(), "daemon-reload".into()],
+        });
+    }
+    needed.extend(enables);
+
+    if host.caddy {
+        if has(&needed, &|a| matches!(a, Action::PackageInstall { .. })) {
+            needed.push(Action::Cmd {
+                what: "caddy enable --now（包自带单元）".into(),
+                argv: vec!["systemctl".into(), "enable".into(), "--now".into(), "caddy".into()],
+            });
+        }
+        if has(&needed, &wf_pred(dockerops::CADDY_FILE)) {
+            needed.push(Action::Cmd {
+                what: "caddy validate".into(),
+                argv: vec!["caddy".into(), "validate".into(), "--config".into(), dockerops::CADDY_FILE.into(), "--adapter".into(), "caddyfile".into()],
+            });
+            needed.push(Action::Cmd {
+                what: "caddy reload".into(),
+                argv: vec!["caddy".into(), "reload".into(), "--config".into(), dockerops::CADDY_FILE.into(), "--adapter".into(), "caddyfile".into()],
+            });
+        }
+    }
+    if host.tuning && has(&needed, &wf_pred(SYSCTL_CONF)) {
+        needed.push(Action::Cmd {
+            what: "sysctl --system".into(),
+            argv: vec!["sysctl".into(), "--system".into()],
+        });
+    }
+    if has(&needed, &wf_pred(PRECOMPRESS_PATH)) {
+        needed.push(Action::Cmd {
+            what: "precompress _console（首跑对存在文件执行一次）".into(),
+            argv: vec!["bash".into(), PRECOMPRESS_PATH.into(), root.join("_console").display().to_string()],
+        });
+    }
+    needed
+}
+
+/// redis 漂移黄条（plan-15 §9 冲突点：现网实例 --databases 16 手工遗留——setup 不重建，只引导走 §5 扩容流）。
+pub fn plan_warnings(root: &Path, obs: &Obs) -> Vec<String> {
+    let mut w = vec![];
+    let policy = state::Policy::load(root);
+    if let Some(actual) = obs.redis_databases {
+        if (actual as u16) < policy.redis_dbs {
+            w.push(format!(
+                "redis 实例 databases={actual} < policy REDIS_DBS={} → `showroomctl middleware set redis databases={}`",
+                policy.redis_dbs, policy.redis_dbs
+            ));
+        }
+    }
+    w
+}
+
+// —— observe / apply（subprocess 薄层）——
+
+/// 现状探测：fs + docker/network/systemctl/pacman + 硬件观测。
+/// 探测失败一律取「缺失/零值」而非报错（diff 如实显示将做的动作）。
+pub fn observe(root: &Path, host: &HostEnv) -> Obs {
+    let mut obs = Obs::default();
+    for (p, _) in expected_dirs(root, host) {
+        if p.is_dir() {
+            obs.dirs.insert(p);
+        }
+    }
+    if Path::new(SNAPS_SUBVOL).is_dir() {
+        obs.dirs.insert(PathBuf::from(SNAPS_SUBVOL));
+    }
+    let mut files: Vec<PathBuf> = vec![
+        root.join("state/policy.env"),
+        host_env_path(root),
+        state::htpasswd_path(root),
+        pg_cred_path(root),
+        PathBuf::from(dockerops::CADDY_FILE),
+        PathBuf::from(SYSCTL_CONF),
+        PathBuf::from(JOURNALD_CONF),
+        PathBuf::from(WATCHDOG_CONF),
+        PathBuf::from(DEDUP_SCRIPT_PATH),
+        PathBuf::from(PRECOMPRESS_PATH),
+    ];
+    for name in all_unit_names() {
+        files.push(unit_path(&name));
+    }
+    for p in files {
+        if let Ok(t) = fs::read_to_string(&p) {
+            obs.files.insert(p, t);
+        }
+    }
+    obs.net = dockerops::run_fail_ok("docker", &["network", "inspect", dockerops::DOCKER_NET]);
+    obs.containers = dockerops::all_container_names().into_iter().collect();
+    obs.redis_databases = dockerops::redis_databases();
+    if Path::new(FRPC_BIN).exists() {
+        obs.binaries.insert(PathBuf::from(FRPC_BIN));
+    }
+    if host.caddy && dockerops::run_fail_ok("pacman", &["-Qi", "caddy"]) {
+        obs.pkgs.insert("caddy".to_string());
+    }
+    for name in all_unit_names() {
+        if unit_path(&name).exists() {
+            obs.units_installed.insert(name.clone());
+        }
+        if dockerops::run_tolerant("systemctl", &["is-enabled", &name]) == "enabled" {
+            obs.units_enabled.insert(name);
+        }
+    }
+    // 硬件观测：MemTotal / df / size / nproc（失败零值 → hw clamp 下限）
+    if let Ok(t) = fs::read_to_string("/proc/meminfo") {
+        if let Some(kb) = state::parse_meminfo_total_kb(&t) {
+            obs.mem_total_mb = kb / 1024;
+        }
+    }
+    if let Ok(out) = dockerops::run("df", &["-B1", "--output=size,used", "/"]) {
+        if let Some((size, _)) = state::parse_df_bytes(&out) {
+            obs.disk_total_mb = size >> 20;
+        }
+    }
+    if let Some(n) = dockerops::run_tolerant("nproc", &[]).trim().parse::<u32>().ok() {
+        obs.cores = n;
+    }
+    obs
+}
+
+/// 执行结果报告：逐项 (action, ok, detail) + 变更计数 + 警告（plan-15 §2.2）。
+#[derive(Debug, Clone)]
+pub struct Report {
+    pub items: Vec<(Action, bool, String)>,
+    pub changed: usize,
+    pub warnings: Vec<String>,
+}
+
+/// dry=只列 needed 不执行；逐项执行，单项失败记录继续（容器/单元类失败即中止余项）。
+pub fn apply(root: &Path, actions: &[Action], dry: bool) -> R<Report> {
+    let host = HostEnv::load(root);
+    let obs = observe(root, &host);
+    let mut items: Vec<(Action, bool, String)> = vec![];
+    let mut changed = 0usize;
+    let mut warnings: Vec<String> = vec![];
+    for a in actions {
+        if !action_needed(a, &obs) {
+            items.push((a.clone(), true, "clean".into()));
+            continue;
+        }
+        if dry {
+            items.push((a.clone(), true, "dry-run (needed)".into()));
+            continue;
+        }
+        match exec_action(a) {
+            Ok(detail) => {
+                changed += 1;
+                items.push((a.clone(), true, detail));
+            }
+            Err(e) => {
+                let (kind, target, _) = action_brief(a);
+                warnings.push(format!("{kind} {target} 失败，中止余项: {e}"));
+                items.push((a.clone(), false, e.to_string()));
+                if matches!(
+                    a,
+                    Action::ContainerUp { .. }
+                        | Action::ContainerRm { .. }
+                        | Action::UnitInstall { .. }
+                        | Action::UnitEnable { .. }
+                        | Action::UnitDisableRm { .. }
+                ) {
+                    break;
+                }
+            }
+        }
+    }
+    Ok(Report { items, changed, warnings })
+}
+
+fn exec_action(a: &Action) -> R<String> {
+    use std::os::unix::fs::PermissionsExt;
+    match a {
+        Action::CreateDir { path, mode } => {
+            fs::create_dir_all(path)?;
+            fs::set_permissions(path, fs::Permissions::from_mode(*mode))?;
+            Ok(format!("created ({:o})", mode))
+        }
+        Action::WriteFile { path, contents, mode } => {
+            if let Some(parent) = path.parent() {
+                let _ = fs::create_dir_all(parent);
+            }
+            fs::write(path, contents)?;
+            fs::set_permissions(path, fs::Permissions::from_mode(*mode))?;
+            Ok(format!("written {} bytes ({:o})", contents.len(), mode))
+        }
+        Action::BtrfsSubvol { path } => {
+            let p = path.to_string_lossy();
+            if dockerops::run("btrfs", &["subvolume", "show", &p]).is_ok() {
+                Ok("subvolume exists".into())
+            } else {
+                dockerops::run("btrfs", &["subvolume", "create", &p]).map(|_| "subvolume created".to_string())
+            }
+        }
+        Action::NetworkCreate { name } => {
+            dockerops::docker(&["network", "create", name]).map(|_| "network created".to_string())
+        }
+        Action::ContainerUp { spec } => {
+            let args = spec.run_args();
+            let refs: Vec<&str> = args.iter().map(String::as_str).collect();
+            dockerops::docker(&refs).map(|_| format!("started {}", spec.name))
+        }
+        Action::ContainerRm { name } => dockerops::docker(&["rm", "-f", "-v", name]).map(|_| format!("removed {name}")),
+        Action::PackageInstall { pkg } => dockerops::run("pacman", &["-S", "--noconfirm", pkg]).map(|_| format!("installed {pkg}")),
+        Action::UnitInstall { name, contents } => {
+            fs::write(unit_path(name), contents)?;
+            Ok(format!("{name} installed"))
+        }
+        Action::UnitEnable { name, now } => {
+            let mut argv = vec!["enable"];
+            if *now {
+                argv.push("--now");
+            }
+            argv.push(name.as_str());
+            dockerops::run("systemctl", &argv).map(|_| format!("{name} enabled"))
+        }
+        Action::UnitDisableRm { name } => {
+            let _ = dockerops::run("systemctl", &["disable", "--now", name]);
+            let _ = fs::remove_file(unit_path(name));
+            Ok(format!("{name} disabled + removed"))
+        }
+        Action::Cmd { what, argv } => {
+            let (prog, rest) = argv
+                .split_first()
+                .ok_or_else(|| ApiError::state(format!("cmd '{what}' 空 argv")))?;
+            dockerops::run(prog, &rest.iter().map(String::as_str).collect::<Vec<_>>())
+                .map(|o| o.trim().to_string())
+        }
+        Action::FrpcFetch { url, dest } => exec_frpc_fetch(url, &dest.display().to_string()),
+    }
+}
+
+/// frpc 下载（补充需求①）：curl 下载 → `file` 校验 ELF → chmod 0755；
+/// 非 ELF（站点回 HTML 壳等）→ 删除产物并报错，提示手工放置后重跑 setup。
+fn exec_frpc_fetch(url: &str, dest: &str) -> R<String> {
+    let _ = fs::create_dir_all(Path::new(dest).parent().unwrap_or(Path::new("/usr/local/frpc")));
+    dockerops::run("curl", &["-fsSL", "-o", dest, url])?;
+    let file_out = dockerops::run("file", &[dest]).unwrap_or_default();
+    if !file_out.contains("ELF") {
+        let _ = fs::remove_file(dest);
+        return Err(ApiError::state(format!(
+            "frpc 下载内容非 ELF（file 输出：{file_out}；下载源 {url} 可能回 HTML 壳）：\
+             请手工放置 linux/amd64 frpc 二进制到 {dest} 后重跑 `showroomctl setup --apply`"
+        )));
+    }
+    use std::os::unix::fs::PermissionsExt;
+    fs::set_permissions(dest, fs::Permissions::from_mode(0o755))?;
+    Ok(format!("frpc downloaded + ELF verified -> {dest}"))
+}
+
+// —— diff / 报告呈现（人读行 + JSON 同构）——
+
+pub fn action_brief(a: &Action) -> (&'static str, String, String) {
+    match a {
+        Action::CreateDir { path, mode } => ("CreateDir", path.display().to_string(), format!("{mode:o}")),
+        Action::WriteFile { path, contents, .. } => {
+            let name = path.file_name().and_then(|o| o.to_str()).unwrap_or("");
+            let detail = match name {
+                "policy.env" => format!("{} keys", contents.lines().filter(|l| l.contains('=')).count()),
+                "host.env" => format!("{} keys", contents.lines().filter(|l| l.contains('=') && !l.starts_with('#')).count()),
+                _ => format!("{} lines", contents.lines().count()),
+            };
+            ("WriteFile", path.display().to_string(), detail)
+        }
+        Action::BtrfsSubvol { path } => ("BtrfsSubvol", path.display().to_string(), "btrfs subvolume".into()),
+        Action::NetworkCreate { name } => ("NetworkCreate", name.clone(), "docker network".into()),
+        Action::ContainerUp { spec } => ("ContainerUp", spec.name.clone(), spec.detail()),
+        Action::ContainerRm { name } => ("ContainerRm", name.clone(), "docker rm -f -v".into()),
+        Action::PackageInstall { pkg } => ("PackageInstall", pkg.to_string(), "pacman -S".into()),
+        Action::UnitInstall { name, .. } => ("UnitInstall", name.clone(), "render".into()),
+        Action::UnitEnable { name, now } => {
+            ("UnitEnable", name.clone(), if *now { "enable --now".into() } else { "enable".into() })
+        }
+        Action::UnitDisableRm { name } => ("UnitDisableRm", name.clone(), "disable --now + rm".into()),
+        Action::Cmd { what, .. } => ("Cmd", what.clone(), what.clone()),
+        Action::FrpcFetch { url, dest } => ("FrpcFetch", dest.display().to_string(), url.to_string()),
+    }
+}
+
+/// 人读单行（plan-15 §3 diff 样例的对齐风格）。
+pub fn action_line(a: &Action) -> String {
+    if let Action::ContainerUp { spec } = a {
+        return format!("{:<9}{} ({})", "ctr", spec.name, spec.detail());
+    }
+    let (kind, target, detail) = action_brief(a);
+    let label = match a {
+        Action::CreateDir { .. } => "dir",
+        Action::WriteFile { path, .. } if path.ends_with("99-showroom.conf") => "sysctl",
+        Action::WriteFile { .. } => "file",
+        Action::BtrfsSubvol { .. } => "subvol",
+        Action::NetworkCreate { .. } => "network",
+        Action::ContainerUp { .. } => unreachable!(),
+        Action::ContainerRm { .. } => "ctr-rm",
+        Action::PackageInstall { .. } => "pkg",
+        Action::UnitInstall { .. } => "unit",
+        Action::UnitEnable { .. } => "enable",
+        Action::UnitDisableRm { .. } => "unit-rm",
+        Action::Cmd { .. } => "cmd",
+        Action::FrpcFetch { .. } => "frpc",
+    };
+    let _ = kind;
+    if detail == target || detail.is_empty() {
+        format!("{label:<9}{target}")
+    } else {
+        format!("{label:<9}{target} ({detail})")
+    }
+}
+
+/// diff JSON（plan-15 §3 --json 同构）：{"host_env":…, "actions":[{kind,target,needed,detail}], "warnings":[]}。
+/// actions 传入的即 needed 集（CLI 先过滤），needed 恒 true。
+pub fn diff_json(host: &HostEnv, actions: &[Action], warnings: &[String]) -> Value {
+    json!({
+        "host_env": host.to_json(),
+        "actions": actions.iter().map(|a| {
+            let (kind, target, detail) = action_brief(a);
+            json!({"kind": kind, "target": target, "needed": true, "detail": detail})
+        }).collect::<Vec<_>>(),
+        "warnings": warnings,
+    })
+}
+
+/// Report JSON（apply 后与 diff 同构，加 ok/result；plan-15 §3）。
+pub fn report_json(r: &Report) -> Value {
+    json!({
+        "ok": r.items.iter().all(|(_, ok, _)| *ok),
+        "changed": r.changed,
+        "items": r.items.iter().map(|(a, ok, detail)| {
+            let (kind, target, _) = action_brief(a);
+            json!({"kind": kind, "target": target, "ok": ok, "result": detail})
+        }).collect::<Vec<_>>(),
+        "warnings": r.warnings,
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    // render_policy：空→全默认键；已有键保留、缺键补齐（含 §14 键位）；幂等
+    fn troot(name: &str) -> PathBuf {
+        let d = std::env::temp_dir().join(format!("srctl-setup-test-{}-{name}", std::process::id()));
+        let _ = fs::remove_dir_all(&d);
+        fs::create_dir_all(&d).unwrap();
+        d
+    }
+
+    fn default_host() -> HostEnv {
+        HostEnv::default_for("10.0.0.5")
+    }
+
+    /// 喂固定硬件的 Obs（12G/953G/4 核），免测试机差异。
+    fn obs_with_hw(base: Obs) -> Obs {
+        Obs { mem_total_mb: 12288, disk_total_mb: 976_128, cores: 4, ..base }
+    }
+
+    // —— render_policy / hw（步1 已覆盖，此处仅回归键数）——
     #[test]
     fn render_policy_variants() {
         let fresh = render_policy(None);
-        assert_eq!(
-            fresh,
-            "MAX_SLOTS=30\nDEFAULT_MEM=256m\nMAX_MEM=1g\nIMPORT_MAX_GB=8\nALLOW_LAN_PORT=0\n\
-             RESERVE_MEM_MB=1536\nREDIS_DBS=256\nDISK_RESERVE_GB=20\nUPLOAD_SPACE_FACTOR=4\n"
-        );
-        let m = state::parse_kv(&render_policy(Some("MAX_SLOTS=5\nALLOW_LAN_PORT=1\n")));
-        assert_eq!(m["MAX_SLOTS"], "5", "已有键保留");
-        assert_eq!(m["ALLOW_LAN_PORT"], "1");
-        assert_eq!(m["REDIS_DBS"], "256", "缺键补默认");
-        assert_eq!((m["DISK_RESERVE_GB"].as_str(), m["UPLOAD_SPACE_FACTOR"].as_str()), ("20", "4"), "§14 键位");
-        assert_eq!(m.len(), POLICY_KEYS.len());
-        assert_eq!(render_policy(Some(&fresh)), fresh, "幂等：渲染产物再喂不变");
+        assert_eq!(state::parse_kv(&fresh).len(), POLICY_KEYS.len());
+        assert_eq!(render_policy(Some(&fresh)), fresh);
+        let m = state::parse_kv(&render_policy(Some("MAX_SLOTS=5\n")));
+        assert_eq!(m["MAX_SLOTS"], "5");
     }
 
-    // hw 缺省只影响**首跑**（文件缺失）：已有文件的键永不覆盖
+    // —— plan_setup：空 Obs（全新主机）→ 全量序列（每类 ≥1；快照断言 kinds 序列）——
     #[test]
-    fn render_policy_hw_first_run_only() {
+    fn plan_fresh_host_covers_all_action_classes() {
+        let host = default_host();
+        let plan = plan_setup(&host, &obs_with_hw(Obs::default()));
+        assert!(!plan.is_empty());
+        // 每类至少一个（plan-15 §8 清单）
+        for want in [
+            "CreateDir", "WriteFile", "BtrfsSubvol", "NetworkCreate", "ContainerUp",
+            "PackageInstall", "UnitInstall", "UnitEnable", "Cmd",
+        ] {
+            assert!(
+                plan.iter().any(|a| action_brief(a).0 == want),
+                "fresh plan 缺 {want} 类：{:?}",
+                plan.iter().map(|a| action_brief(a).0).collect::<Vec<_>>()
+            );
+        }
+        // 三容器齐全；pg 12 -c 参数与 redis --databases 256（policy 默认）随 hw
+        let ctrs: Vec<&str> = plan
+            .iter()
+            .filter_map(|a| match a {
+                Action::ContainerUp { spec } => Some(spec.name.as_str()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(ctrs, vec!["sr-postgres", "sr-redis", "sr-registry"]);
+        for a in &plan {
+            if let Action::ContainerUp { spec } = a {
+                if spec.name == "sr-postgres" {
+                    assert!(spec.detail().contains("shared_buffers=1024MB"), "{}", spec.detail());
+                    assert!(spec.detail().contains("max_connections=70"), "{}", spec.detail());
+                }
+                if spec.name == "sr-redis" {
+                    assert!(spec.detail().contains("--databases 256"), "{}", spec.detail());
+                    assert!(spec.detail().contains("--maxmemory 245mb"), "{}", spec.detail());
+                }
+            }
+        }
+        // host.env 首跑带 hw 审计注释；policy.env 用 hw 缺省（RESERVE_MEM_MB=1843）
+        let host_wf = plan.iter().find_map(|a| match a {
+            Action::WriteFile { path, contents, .. } if path.file_name().is_some_and(|n| n == "host.env") => {
+                Some(contents.clone())
+            }
+            _ => None,
+        });
+        let hw_env = host_wf.unwrap();
+        assert!(hw_env.starts_with("# 由 hw_defaults(12G/953G/4 核) 推导于 "), "{hw_env}");
+        let policy_wf = plan.iter().find_map(|a| match a {
+            Action::WriteFile { path, contents, .. } if path.ends_with("policy.env") => Some(contents.clone()),
+            _ => None,
+        });
+        let pm = state::parse_kv(&policy_wf.unwrap());
+        assert_eq!((pm["RESERVE_MEM_MB"].as_str(), pm["DISK_RESERVE_GB"].as_str()), ("1843", "28"));
+        // 快照：kinds 序列稳定（长度 + 首尾锚定，免路径受 SHOWROOM_ROOT 影响的脆断言）
+        let kinds: Vec<&str> = plan.iter().map(|a| action_brief(a).0).collect();
+        assert_eq!(kinds.first(), Some(&"CreateDir"));
+        assert!(!kinds.contains(&"FrpcFetch"), "FRP=none 不产 frpc 动作");
+        assert!(kinds.len() > 30, "全量程序规模合理：{}", kinds.len());
+    }
+
+    // 满 Obs → 空 plan（幂等核心）
+    #[test]
+    fn plan_satisfied_obs_is_empty() {
+        let host = default_host();
+        let plan = plan_setup(&host, &obs_with_hw(Obs::default()));
+        let mut obs = obs_with_hw(Obs::default());
+        for a in &plan {
+            match a {
+                Action::CreateDir { path, .. } => {
+                    obs.dirs.insert(path.clone());
+                }
+                Action::BtrfsSubvol { path } => {
+                    obs.dirs.insert(path.clone());
+                }
+                Action::WriteFile { path, contents, .. } => {
+                    obs.files.insert(path.clone(), contents.clone());
+                }
+                Action::ContainerUp { spec } => {
+                    obs.containers.insert(spec.name.clone());
+                }
+                Action::PackageInstall { pkg } => {
+                    obs.pkgs.insert(pkg.to_string());
+                }
+                Action::UnitInstall { name, contents } => {
+                    obs.files.insert(unit_path(name), contents.clone());
+                    obs.units_installed.insert(name.clone());
+                }
+                Action::UnitEnable { name, .. } => {
+                    obs.units_enabled.insert(name.clone());
+                }
+                _ => {}
+            }
+        }
+        obs.net = true;
+        obs.redis_databases = Some(256);
+        let again = plan_setup(&host, &obs);
+        assert!(again.is_empty(), "满 Obs 应得空 plan，实得：{:?}", again.iter().map(|a| action_brief(a).0).collect::<Vec<_>>());
+    }
+
+    // 变体：去 redis / CADDY=no / DEDUP=none
+    #[test]
+    fn plan_variants() {
+        let mk = |host: &HostEnv| plan_setup(host, &obs_with_hw(Obs::default()));
+        // MIDDLEWARE 去 redis：无 sr-redis Action 且无 _middleware/redis 目录 Action
+        let mut h = default_host();
+        h.middleware.remove("redis");
+        for a in mk(&h) {
+            let (_, target, _) = action_brief(&a);
+            assert!(!target.contains("sr-redis") && !target.contains("_middleware/redis"), "{target}");
+        }
+        assert!(mk(&h).iter().any(|a| matches!(a, Action::ContainerUp { spec } if spec.name == "sr-postgres")));
+
+        // CADDY=no：无 caddy 相关 Action（pkg/Caddyfile/caddy cmds）
+        let mut h = default_host();
+        h.caddy = false;
+        for a in mk(&h) {
+            let (_, target, _) = action_brief(&a);
+            let is_caddy = matches!(a, Action::PackageInstall { pkg: "caddy" })
+                || target.contains("Caddyfile")
+                || target.to_lowercase().contains("caddy");
+            assert!(!is_caddy, "CADDY=no 不应有 caddy 动作：{target}");
+        }
+
+        // DEDUP=none：无 dedup 单元/脚本，且对已装 dedup 单元产 UnitDisableRm 收敛
+        let mut h = default_host();
+        h.dedup = false;
+        let mut obs = obs_with_hw(Obs::default());
+        obs.units_installed.insert("showroom-dedup.timer".into());
+        obs.units_enabled.insert("showroom-dedup.timer".into());
+        let plan = plan_setup(&h, &obs);
+        assert!(!plan.iter().any(|a| matches!(a, Action::UnitInstall { name, .. } if name.contains("dedup"))));
+        assert!(!plan.iter().any(|a| matches!(a, Action::WriteFile { path, .. } if path.ends_with("showroom-dedup"))));
+        assert!(plan.iter().any(|a| matches!(a, Action::UnitDisableRm { .. })), "DEDUP=none 须产 UnitDisableRm");
+        assert!(!plan.iter().any(|a| matches!(a, Action::UnitEnable { name, .. } if name.contains("dedup"))));
+
+        // FRP=chmlfrp：frpc 目录/下载/单元/启用；凭据不落单元明文（EnvironmentFile）
+        let mut h = default_host();
+        h.frp = FrpMode::Chmlfrp;
+        h.frp_token = "tok".into();
+        h.frp_tunnel = "tid".into();
+        let plan = mk(&h);
+        assert!(plan.iter().any(|a| matches!(a, Action::FrpcFetch { .. })));
+        assert!(plan.iter().any(|a| matches!(a, Action::UnitInstall { name, .. } if name == "chmlfrp.service")));
+        let unit = plan
+            .iter()
+            .find_map(|a| match a {
+                Action::UnitInstall { name, contents } if name == "chmlfrp.service" => Some(contents.clone()),
+                _ => None,
+            })
+            .unwrap();
+        assert!(unit.contains("EnvironmentFile="), "{unit}");
+        assert!(!unit.contains("tok"), "凭据不进 644 单元文件");
+        assert!(unit.contains("${FRP_TOKEN}"));
+    }
+
+    // action_needed 每类正反例（plan-15 §8 清单）
+    #[test]
+    fn action_needed_per_class() {
+        let d = PathBuf::from("/x/d");
+        let f = PathBuf::from("/x/f");
+        let mut obs = Obs::default();
+        obs.dirs.insert(d.clone());
+        obs.files.insert(f.clone(), "same".into());
+        obs.net = true;
+        obs.containers.insert("sr-demo".into());
+        obs.containers.insert("sr-old".into());
+        obs.pkgs.insert("caddy".into());
+        obs.units_installed.insert("t.timer".into());
+        obs.units_enabled.insert("t.timer".into());
+        obs.files.insert(unit_path("u.service"), "unit-body".into());
+        obs.units_installed.insert("u.service".into());
+        obs.binaries.insert(PathBuf::from("/usr/local/frpc/frpc"));
+
+        assert!(!action_needed(&Action::CreateDir { path: d.clone(), mode: 0o755 }, &obs));
+        assert!(action_needed(&Action::CreateDir { path: PathBuf::from("/x/e"), mode: 0o755 }, &obs));
+        assert!(!action_needed(&Action::WriteFile { path: f.clone(), contents: "same".into(), mode: 0o644 }, &obs));
+        assert!(action_needed(&Action::WriteFile { path: f.clone(), contents: "diff".into(), mode: 0o644 }, &obs));
+        assert!(action_needed(&Action::WriteFile { path: PathBuf::from("/x/g"), contents: String::new(), mode: 0o644 }, &obs));
+        // host.env：注释行差异不算漂移（审计注释只在首生成落盘）
+        let hp = PathBuf::from("/srv/showroom/state/host.env");
+        obs.files.insert(hp.clone(), "# 由 hw_defaults 推导\nMIDDLEWARE=redis\n".into());
+        assert!(!action_needed(&Action::WriteFile { path: hp, contents: "MIDDLEWARE=redis\n".into(), mode: 0o600 }, &obs));
+        // registry.htpasswd：touch 语义——存在即 clean（不为空也不覆盖）
+        let htp = PathBuf::from("/srv/showroom/state/registry.htpasswd");
+        obs.files.insert(htp.clone(), "alice:$2b$…\n".into());
+        assert!(!action_needed(&Action::WriteFile { path: htp, contents: String::new(), mode: 0o644 }, &obs));
+        // BtrfsSubvol 存在/缺
+        assert!(!action_needed(&Action::BtrfsSubvol { path: d.clone() }, &obs));
+        assert!(action_needed(&Action::BtrfsSubvol { path: PathBuf::from("/x/e") }, &obs));
+        // NetworkCreate（Obs 只跟踪 showroom-net 一个网络）：net 在→clean / 缺→needed
+        assert!(!action_needed(&Action::NetworkCreate { name: "showroom-net".into() }, &obs));
+        let mut obs_no_net = obs.clone();
+        obs_no_net.net = false;
+        assert!(action_needed(&Action::NetworkCreate { name: "showroom-net".into() }, &obs_no_net));
+        assert!(!action_needed(&Action::PackageInstall { pkg: "caddy" }, &obs));
+        assert!(action_needed(&Action::PackageInstall { pkg: "duperemove" }, &obs));
+        // ContainerUp 在/缺；ContainerRm 在/缺
+        let spec = registry_spec(Path::new("/r"));
+        assert!(!obs.containers.contains(&spec.name));
+        assert!(action_needed(&Action::ContainerUp { spec }, &obs));
+        assert!(action_needed(&Action::ContainerRm { name: "sr-old".into() }, &obs));
+        assert!(!action_needed(&Action::ContainerRm { name: "sr-none".into() }, &obs));
+        // UnitInstall 内容同/异；UnitEnable 已启用/未；UnitDisableRm 已装/无
+        assert!(!action_needed(
+            &Action::UnitInstall { name: "u.service".into(), contents: "unit-body".into() },
+            &obs
+        ));
+        assert!(action_needed(
+            &Action::UnitInstall { name: "u.service".into(), contents: "changed".into() },
+            &obs
+        ));
+        assert!(action_needed(
+            &Action::UnitInstall { name: "v.service".into(), contents: "x".into() },
+            &obs
+        ));
+        assert!(!action_needed(&Action::UnitEnable { name: "t.timer".into(), now: true }, &obs));
+        assert!(action_needed(&Action::UnitEnable { name: "u.service".into(), now: false }, &obs));
+        assert!(action_needed(&Action::UnitDisableRm { name: "u.service".into() }, &obs));
+        assert!(!action_needed(&Action::UnitDisableRm { name: "zz.timer".into() }, &obs));
+        // Cmd 恒 needed（派生类只在触发时进 plan）；FrpcFetch 在/缺
+        assert!(action_needed(&Action::Cmd { what: "x".into(), argv: vec!["echo".into()] }, &obs));
+        assert!(action_needed(
+            &Action::FrpcFetch { url: "u".into(), dest: PathBuf::from("/x/other") },
+            &obs
+        ));
+    }
+
+    // render_caddyfile 三组合快照（plan-15 §8：registry 缺 → 无 /v2；PUBLIC_HOST 空 → 无 site B）
+    #[test]
+    fn render_caddyfile_snapshots() {
+        let full: BTreeSet<String> = ["postgres", "redis", "registry"].iter().map(|s| s.to_string()).collect();
+        let no_reg: BTreeSet<String> = ["postgres", "redis"].iter().map(|s| s.to_string()).collect();
+
+        let a = render_caddyfile(&full, "lan.example", "pub.example");
+        assert!(a.contains("http://lan.example {"));
+        assert!(a.contains("handle /v2/* {"), "registry 在集合 → site A 有 /v2");
+        assert!(a.contains("reverse_proxy 127.0.0.1:5000"));
+        assert!(a.contains("http://pub.example {"), "PUBLIC_HOST 非空 → site B");
+        assert!(a.contains("precompressed zstd"), "file_server precompressed 恒渲染");
+        assert!(a.contains("import /srv/showroom/state/routes/*.caddy"));
+        assert!(a.contains("handle_path /_bootstrap/* {"));
+
+        let b = render_caddyfile(&no_reg, "lan.example", "pub.example");
+        assert!(!b.contains("handle /v2/*"), "registry 缺 → 无 /v2 块");
+        assert!(!b.contains("127.0.0.1:5000"), "registry 缺 → 不反代 registry");
+        assert!(b.contains("http://pub.example {"));
+
+        let c = render_caddyfile(&full, "lan.example", "");
+        assert!(!c.contains("site B"), "PUBLIC_HOST 空 → 不渲染 site B");
+        assert!(c.contains("handle /v2/* {"));
+
+        // 三组合完整文本快照（组合 a 全文）
+        assert_eq!(
+            a,
+            "# ————— 公共片段：两个站点共用 —————\n\
+             (showroom-app) {\n\
+             \t# 控制面：全部端点要求 SR-SIG1 签名（零信息暴露由应用层保证）\n\
+             \thandle /_api/* {\n\
+             \t\treverse_proxy 127.0.0.1:8090\n\
+             \t}\n\
+             \t# WASM 控制台（登录成功前不加载任何管理资源）\n\
+             \thandle_path /_console/* {\n\
+             \t\troot * /srv/showroom/_console\n\
+             \t\tfile_server {\n\
+             \t\t\tprecompressed zstd\n\
+             \t\t}\n\
+             \t}\n\
+             \t# 展项路由（showroomctl 按项目生成到 state/routes/<project>.caddy 并 reload）\n\
+             \timport /srv/showroom/state/routes/*.caddy\n\
+             \t# 根路径与未匹配路径一律 404（零信息暴露：不重定向、不暴露站点信息）\n\
+             }\n\
+             \n\
+             # ————— site A：内网面 —————\n\
+             http://lan.example {\n\
+             \timport showroom-app\n\
+             \t# /v2：registry 推拉快通道（basic auth 由 registry 自身校验）\n\
+             \thandle /v2/* {\n\
+             \t\treverse_proxy 127.0.0.1:5000\n\
+             \t}\n\
+             \t# /_bootstrap：CLI / Skill 分发（仅内网面提供，公网面 404）\n\
+             \thandle_path /_bootstrap/* {\n\
+             \t\troot * /srv/showroom/_bootstrap\n\
+             \t\tfile_server\n\
+             \t}\n\
+             }\n\
+             \n\
+             # ————— site B：公网面（frp 等公网隧道流量命中的站点）—————\n\
+             # 公网发布走加密 import 通道，不放 /v2；/_bootstrap 返回 404。\n\
+             http://pub.example {\n\
+             \timport showroom-app\n\
+             }\n"
+        );
+    }
+
+    // render_unit_api：BASE_URL 注入 + 模板占位行替换
+    #[test]
+    fn render_unit_api_injects_base_url() {
+        let host = default_host();
+        let unit = render_unit_api(&host);
+        assert!(unit.contains(&format!("Environment=SHOWROOM_BASE_URL={}", host.base_url())), "{unit}");
+        assert!(!unit.contains("EnvironmentFile"), "{unit}");
+        assert!(unit.contains("ExecStart=/usr/local/bin/showroomctl serve"));
+        assert!(unit.contains("Restart=always"));
+    }
+
+    // 容器规格三张常量表（plan-15 §2.2 + 补充需求② hw 派生）
+    #[test]
+    fn container_specs_match_constant_tables() {
+        let root = Path::new("/srv/showroom");
         let hw = hw_defaults(12288, 976_128, 4);
-        let m = state::parse_kv(&render_policy_hw(None, Some(&hw)));
-        assert_eq!(m["RESERVE_MEM_MB"], hw.reserve_mem_mb.to_string());
-        assert_eq!(m["DISK_RESERVE_GB"], hw.disk_reserve_gb.to_string());
-        // 已有文件：显式值永远优先，hw 不参与
-        let keep = state::parse_kv(&render_policy_hw(Some("RESERVE_MEM_MB=1536\n"), Some(&hw)));
-        assert_eq!(keep["RESERVE_MEM_MB"], "1536");
-        // 已有文件但缺该键：补固定缺省（非 hw——hw 只用于整文件首生成）
-        let partial = state::parse_kv(&render_policy_hw(Some("MAX_SLOTS=5\n"), Some(&hw)));
-        assert_eq!(partial["RESERVE_MEM_MB"], "1536");
+
+        let pg = postgres_spec(root, "deadbeef", &hw);
+        assert_eq!(pg.name, "sr-postgres");
+        assert_eq!(pg.image, "postgres:16-alpine");
+        assert!(pg.flags.contains(&"POSTGRES_PASSWORD=deadbeef".to_string()));
+        assert!(pg.flags.contains(&"/srv/showroom/_middleware/postgres:/var/lib/postgresql/data".to_string()));
+        // 12 个 -c 参数（补充需求②实配全集）
+        let c_params: Vec<&String> = pg.cmd_args.iter().filter(|a| *a != "-c").collect();
+        assert_eq!(c_params.len(), 12, "{:?}", pg.cmd_args);
+        let pair = |k: &str, v: &str| pg.flags.windows(2).any(|w| w[0] == k && w[1] == v);
+        assert!(pair("--network", "showroom-net"));
+        assert!(pair("--restart", "unless-stopped"));
+        assert!(pg.cmd_args.windows(2).any(|w| w[0] == "-c" && w[1] == "shared_buffers=1024MB"));
+        assert!(pg.cmd_args.windows(2).any(|w| w[0] == "-c" && w[1] == "effective_cache_size=4300MB"));
+        assert!(pg.cmd_args.windows(2).any(|w| w[0] == "-c" && w[1] == "work_mem=16MB"));
+        assert!(pg.cmd_args.windows(2).any(|w| w[0] == "-c" && w[1] == "max_connections=70"));
+        assert!(pg.cmd_args.windows(2).any(|w| w[0] == "-c" && w[1] == "autovacuum_naptime=30s"));
+        assert!(pg.cmd_args.windows(2).any(|w| w[0] == "-c" && w[1] == "max_wal_size=2GB"));
+        assert!(pg.cmd_args.windows(2).any(|w| w[0] == "-c" && w[1] == "wal_compression=on"));
+
+        let rd = redis_spec(root, 256, &hw);
+        assert_eq!(rd.image, "redis:7-alpine");
+        assert!(rd.flags.contains(&"/srv/showroom/_middleware/redis:/data".to_string()));
+        assert!(rd.detail().contains("--appendonly yes --databases 256 --maxmemory 245mb --maxmemory-policy allkeys-lru"));
+
+        let rg = registry_spec(root);
+        assert_eq!(rg.image, "registry:2");
+        assert!(rg.flags.contains(&"127.0.0.1:5000:5000".to_string()));
+        assert!(rg.flags.contains(&"REGISTRY_STORAGE_DELETE_ENABLED=true".to_string()));
+        assert!(rg.flags.contains(&"REGISTRY_AUTH=htpasswd".to_string()));
+        assert!(rg.flags.contains(&"REGISTRY_AUTH_HTPASSWD_REALM=ShowroomRegistry".to_string()));
+        assert!(rg.flags.contains(&"REGISTRY_AUTH_HTPASSWD_PATH=/etc/docker/registry/htpasswd".to_string()));
+        assert!(rg.flags.contains(&"/srv/showroom/_middleware/registry:/var/lib/registry".to_string()));
+        assert!(rg.flags.contains(&"/srv/showroom/state/registry.htpasswd:/etc/docker/registry/htpasswd:ro".to_string()));
+        assert_eq!(rg.cmd_args, Vec::<String>::new());
     }
 
-    // hw_defaults 三档（补充需求）：4G 小机 / 12G 本机 / 64G 大机
+    // apply 冒烟：dry 只列不执行；真执行 dir/file/cmd 落地（subprocess 仅此薄层冒烟；
+    // 幂等性由 plan_satisfied_obs_is_empty 在纯函数层证明——apply 的 clean 复核走 observe，
+    // observe 只探测 SHOWROOM_ROOT 期望集，临时目录不在其中，故此处不做二次 clean 断言）
     #[test]
-    fn hw_defaults_tiers() {
-        // 4G 小机（2 核 / 100G 盘）：reserve 兜底 1024；disk 兜底 10；shared 491；conn 50；redis 81
-        let small = hw_defaults(4096, 102_400, 2);
-        assert_eq!(
-            (
-                small.reserve_mem_mb,
-                small.disk_reserve_gb,
-                small.pg_shared_buffers_mb,
-                small.pg_effective_cache_mb,
-                small.pg_max_connections,
-                small.redis_maxmemory_mb
-            ),
-            (1024, 10, 491, 1433, 50, 81)
-        );
-
-        // 12G 本机（4 核 / 953G 盘）：reserve=1843（12G×15% 向下取整）
-        let mid = hw_defaults(12288, 976_128, 4);
-        assert_eq!(
-            (
-                mid.reserve_mem_mb,
-                mid.disk_reserve_gb,
-                mid.pg_shared_buffers_mb,
-                mid.pg_effective_cache_mb,
-                mid.pg_max_connections,
-                mid.redis_maxmemory_mb
-            ),
-            (1843, 28, 1024, 4300, 70, 245)
-        );
-
-        // 64G 大机（16 核 / 4T 盘）：reserve 封顶 6144；disk 封顶 60；shared 封顶 1G；conn 封顶 120；redis 封顶 512
-        let big = hw_defaults(65_536, 4_194_304, 16);
-        assert_eq!(
-            (
-                big.reserve_mem_mb,
-                big.disk_reserve_gb,
-                big.pg_shared_buffers_mb,
-                big.pg_effective_cache_mb,
-                big.pg_max_connections,
-                big.redis_maxmemory_mb
-            ),
-            (6144, 60, 1024, 22_937, 120, 512)
-        );
-
-        // 极小兜底：单核 512M 机器不越界
-        let tiny = hw_defaults(512, 5120, 1);
-        assert!(tiny.reserve_mem_mb >= 1024 && tiny.disk_reserve_gb >= 10);
-        assert_eq!(tiny.pg_max_connections, 40);
-        assert_eq!(tiny.pg_shared_buffers_mb, 64);
-    }
-
-    // 审计摘要与日期标签
-    #[test]
-    fn hw_summary_and_date() {
-        assert_eq!(hw_summary(12288, 976_128, 4), "12G/953G/4 核");
-        assert_eq!(hw_summary(4096, 102_400, 2), "4G/100G/2 核");
-        assert_eq!(date_label(0), "1970-01-01");
-        assert_eq!(date_label(1_760_117_600), "2025-10-10");
-        assert_eq!(date_label(1_738_982_400), "2025-02-08");
-        assert_eq!(date_label(1_709_164_800), "2024-02-29", "闰年边界");
+    fn apply_smoke_dry_then_execute() {
+        let root = troot("apply");
+        let dir = root.join("nested/dir");
+        let file = dir.join("f.txt");
+        let actions = vec![
+            Action::CreateDir { path: dir.clone(), mode: 0o755 },
+            Action::WriteFile { path: file.clone(), contents: "hi".into(), mode: 0o644 },
+            Action::Cmd { what: "echo".into(), argv: vec!["echo".into(), "smoke".into()] },
+        ];
+        let dry = apply(&root, &actions, true).unwrap();
+        assert_eq!(dry.changed, 0);
+        assert!(dry.items.iter().all(|(_, ok, _)| *ok));
+        assert!(!dir.exists(), "dry 不落盘");
+        let rep = apply(&root, &actions, false).unwrap();
+        assert_eq!(rep.changed, 3, "{:?}", rep.items);
+        assert!(file.exists());
+        assert_eq!(fs::read_to_string(&file).unwrap(), "hi");
+        use std::os::unix::fs::PermissionsExt;
+        assert_eq!(fs::metadata(&file).unwrap().permissions().mode() & 0o777, 0o644);
+        let _ = fs::remove_dir_all(&root);
     }
 }
