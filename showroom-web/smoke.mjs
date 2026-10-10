@@ -6,6 +6,9 @@
 //      - 信封总长不变量 384 + n + ceil(n/4MiB)*(12+16)（SPEC §2）
 //      - node 独立解封（RSA-OAEP-SHA256 unwrap + 分段 AES-256-GCM）恢复原文
 //      - 同 seed 重放逐字节一致（§8.1 断点续传前提）
+//   3b) SPEC §9 下行：sr_keygen_rsa → sr_rsa_{pub,priv}_pem 非空；
+//       seal（wasm 一次性对 / node 平台对）→ sr_open_begin/push/flush/end 流式解封往返
+//       （奇数分块推送 + 跨段明文 + 空明文 + 截断/坏 PEM/坏会话错误码）
 //   4) 错误码路径：容量不足/坏指针/坏会话
 import { readFileSync } from 'node:fs';
 import {
@@ -19,7 +22,7 @@ const enc = new TextEncoder(), dec = new TextDecoder();
 // wasm memory 可能随内部分配增长而换代：任何 wasm 调用之后都要重取 view
 const mem = () => new Uint8Array(ex.memory.buffer);
 
-const alloc = (n) => { const p = ex.sr_alloc(n); if (!p) throw new Error('sr_alloc 失败'); return p; };
+const alloc = (n) => { const p = ex.sr_alloc(n); if (!p) throw new Error(`sr_alloc(${n}) 失败（内存 ${ex.memory.buffer.byteLength / 65536} 页）`); return p; };
 const put = (bytes) => { const p = alloc(bytes.length); mem().set(bytes, p); return [p, bytes.length]; };
 const readCStr = (p, written) => { const m = mem(); let e = p; while (e < p + written && m[e] !== 0) e++; return dec.decode(m.subarray(p, e)); };
 let failed = 0;
@@ -136,6 +139,124 @@ ok(Buffer.concat(outs).equals(plain), 'node 解封恢复原文（信封逐字节
   ex.sr_seal_end(sid);
   for (const [p, l] of [[pemp, peml], [ip, il]]) ex.sr_free(p, l);
   ex.sr_free(ob, WRAP + small.length + NON + TAG + 64);
+}
+
+// —— 3b) SPEC §9 下行解封：一次性 RSA 对 + open 会话 ——
+// 容量不足自动扩容重试（-(所需) ≥ 40 与错误码 |e| ≤ 7 可区分）
+function shimCStr(fn, cap0) {
+  let cap = cap0, p = alloc(cap);
+  let r = fn(p, cap);
+  while (r < 0 && r <= -40) { ex.sr_free(p, cap); cap = -r; p = alloc(cap); r = fn(p, cap); }
+  const s = r > 0 ? readCStr(p, r) : null;
+  ex.sr_free(p, cap);
+  return [r, s];
+}
+const kid = ex.sr_keygen_rsa();
+ok(kid > 0, `sr_keygen_rsa → 会话 ${kid}`);
+const [rpub, wasmPubPem] = shimCStr((p, c) => ex.sr_rsa_pub_pem(kid, p, c), 1024);
+ok(rpub > 0 && wasmPubPem.startsWith('-----BEGIN PUBLIC KEY-----'), 'sr_rsa_pub_pem → SPKI PEM 非空');
+const [rpriv, wasmPrivPem] = shimCStr((p, c) => ex.sr_rsa_priv_pem(kid, p, c), 4096);
+ok(rpriv > 0 && wasmPrivPem.startsWith('-----BEGIN PRIVATE KEY-----'), 'sr_rsa_priv_pem → PKCS#8 PEM 非空');
+
+// open 流式解封：奇数分块推送（跨段边界 carry）+ len=0 flush
+function openAll(privPemStr, envelope, chunk) {
+  const [pp, pl] = put(Buffer.from(privPemStr, 'utf8'));
+  const sid = ex.sr_open_begin(pp, pl);
+  ex.sr_free(pp, pl);
+  if (!(sid > 0)) { ok(false, `sr_open_begin → ${sid}`); return null; }
+  ok(sid > 0, `sr_open_begin → 会话 ${sid}`);
+  const push = (bytes) => {
+    const [ip, il] = bytes.length ? put(bytes) : [0, 0]; // 空输入=流结束信号，免分配
+    let cap = bytes.length + SEG + 64, ob = alloc(cap);
+    let w = ex.sr_open_push(sid, ip, il, ob, cap);
+    if (w < 0 && w <= -40) { ex.sr_free(ob, cap); cap = -w; ob = alloc(cap); w = ex.sr_open_push(sid, ip, il, ob, cap); }
+    const out = w > 0 ? Buffer.from(mem().subarray(ob, ob + w)) : null;
+    ex.sr_free(ip, il); ex.sr_free(ob, cap);
+    if (w < 0) throw new Error(`sr_open_push → ${w}`);
+    return out;
+  };
+  const outs = [];
+  for (let o = 0; o < envelope.length; o += chunk) {
+    const part = push(envelope.subarray(o, Math.min(o + chunk, envelope.length)));
+    if (part) outs.push(part);
+  }
+  const tail = push(new Uint8Array(0)); // len=0 = 流结束
+  if (tail) outs.push(tail);
+  ok(ex.sr_open_end(sid) === 0, 'sr_open_end → 0');
+  return Buffer.concat(outs);
+}
+function sealOneShot(pubPemBuf, input) { // 随机会话整段封包（信封全量返回）
+  const [pemp, peml] = put(pubPemBuf);
+  const sid = ex.sr_seal_begin(pemp, peml);
+  ex.sr_free(pemp, peml);
+  if (!(sid > 0)) throw new Error(`sr_seal_begin → ${sid}`);
+  const parts = [];
+  const CHUNK2 = 5 * 1024 * 1024 + 999; // 奇数块，与 4MiB 段边界不对齐
+  for (let o = 0; o < input.length; o += CHUNK2) {
+    const [ip, il] = put(input.subarray(o, Math.min(o + CHUNK2, input.length)));
+    const cap = WRAP + NON + TAG + il + (Math.ceil(il / SEG) + 2) * (NON + TAG);
+    const ob = alloc(cap);
+    const w = ex.sr_seal_push(sid, ip, il, ob, cap);
+    if (w > 0) parts.push(Buffer.from(mem().subarray(ob, ob + w)));
+    ex.sr_free(ip, il); ex.sr_free(ob, cap);
+    if (w < 0) throw new Error(`seal push → ${w}`);
+  }
+  { const cap = WRAP + NON + TAG + SEG + 64, ob = alloc(cap);
+    const w = ex.sr_seal_push(sid, 0, 0, ob, cap);
+    if (w > 0) parts.push(Buffer.from(mem().subarray(ob, ob + w)));
+    ex.sr_free(ob, cap);
+    if (w < 0) throw new Error(`seal flush → ${w}`); }
+  ex.sr_seal_end(sid);
+  return Buffer.concat(parts);
+}
+
+// b1. wasm 一次性对：seal → open 往返（跨段 + 尾部零头，1MB+123 奇数分块喂 open）
+{
+  const n2 = SEG + 7777;
+  const plain2 = Buffer.alloc(n2, 0x5a); plain2[0] = 9; plain2[n2 - 1] = 8;
+  const env2 = sealOneShot(Buffer.from(wasmPubPem, 'utf8'), plain2);
+  ok(env2.length === WRAP + n2 + Math.ceil(n2 / SEG) * (NON + TAG), `wasm 对信封总长 ${env2.length}`);
+  ok(openAll(wasmPrivPem, env2, 1024 * 1024 + 123).equals(plain2), 'wasm 对 seal→open 往返（奇数分块）');
+}
+// b2. node 平台对（PKCS#8 私钥 PEM，即 WebCrypto exportKey 同格式）：open 解封 §3 已产出的信封
+{
+  const nodePrivPem = privateKey.export({ type: 'pkcs8', format: 'pem' }).toString();
+  ok(openAll(nodePrivPem, sealed, 4096 + 7).equals(plain), 'node 对 seal→open 往返（跨 3 段信封）');
+}
+// b3. 空明文信封（仅 384B wrap 头）
+{
+  const env0 = sealOneShot(Buffer.from(wasmPubPem, 'utf8'), Buffer.alloc(0));
+  ok(env0.length === WRAP, `空明文信封 = ${env0.length}B`);
+  ok(openAll(wasmPrivPem, env0, 4096).length === 0, '空明文解封 → 0B');
+}
+// b4. 错误码：截断信封 / flush 后再 push / 坏 PEM / 坏会话
+{
+  const n3 = 1234;
+  const env3 = sealOneShot(Buffer.from(wasmPubPem, 'utf8'), Buffer.alloc(n3, 7));
+  const [pp3, pl3] = put(Buffer.from(wasmPrivPem, 'utf8'));
+  const sid3 = ex.sr_open_begin(pp3, pl3);
+  ex.sr_free(pp3, pl3);
+  const [ip3, il3] = put(env3.subarray(0, env3.length - 5)); // 截去尾段 5 字节
+  const ob3 = alloc(SEG + 64);
+  ok(ex.sr_open_push(sid3, ip3, il3, ob3, SEG + 64) === 0, '截断信封 push：唯一段<满段，暂存不出明文（0）');
+  ok(ex.sr_open_push(sid3, 0, 0, ob3, SEG + 64) === -7, '截断尾段 flush → -7');
+  ex.sr_free(ip3, il3); ex.sr_free(ob3, SEG + 64);
+  ex.sr_open_end(sid3);
+  // flush 后再 push → -2（API 误用）
+  const env4 = sealOneShot(Buffer.from(wasmPubPem, 'utf8'), Buffer.from('x'));
+  { const [pp4, pl4] = put(Buffer.from(wasmPrivPem, 'utf8'));
+    const s4 = ex.sr_open_begin(pp4, pl4); ex.sr_free(pp4, pl4);
+    const [ip4, il4] = put(env4); const ob4 = alloc(SEG + 64);
+    ex.sr_open_push(s4, ip4, il4, ob4, SEG + 64);
+    ex.sr_open_push(s4, 0, 0, ob4, SEG + 64); // flush
+    ok(ex.sr_open_push(s4, ip4, il4, ob4, SEG + 64) === -2, 'flush 后再 push → -2');
+    ex.sr_free(ip4, il4); ex.sr_free(ob4, SEG + 64);
+    ex.sr_open_end(s4);
+  }
+  { const [gp, gl] = put(Buffer.from('not a pem'));
+    ok(ex.sr_open_begin(gp, gl) === -3, '坏私钥 PEM → -3'); ex.sr_free(gp, gl); }
+  ok(ex.sr_open_push(9999, 0, 0, 0, 0) === -5, 'open 不存在的会话 → -5');
+  ok(ex.sr_open_end(9999) === -5, 'open end 不存在的会话 → -5');
 }
 
 // —— 4) 错误码 ——

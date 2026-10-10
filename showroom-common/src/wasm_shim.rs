@@ -10,6 +10,14 @@
 //! - 错误码（负数）：-1 内部 panic；-2 参数非法（空指针/越界/UTF-8）；
 //!   -3 seed/PEM 无效；-5 会话不存在；-6 熵池未注入（先调 sr_entropy）；-7 加密失败。
 //! - `sr_seal_push(sid, ptr, 0, …)`：len=0 表示输入流结束（flush 尾段），此后只应 sr_seal_end。
+//! - `sr_open_push(sid, ptr, 0, …)`：同上——len=0 表示信封流结束（解出尾段），此后只应
+//!   sr_open_end；容量不足返回 -(所需字节数)，但报告值下限 40（尾段明文可小至 1B，
+//!   需与错误码区间 |e| ≤ 7 区分开）。
+//!
+//! §9 下行解密（db-dump）：`sr_keygen_rsa` 生成 RSA-3072 一次性对（`sr_rsa_pub_pem`
+//! 上行给服务端加密 dump、`sr_rsa_priv_pem` 留本地）；返回信封经 `sr_open_begin/
+//! sr_open_push/sr_open_end` 流式解封（首 384B RSA-OAEP 解出 k，后续段 AES-GCM），
+//! 与原生 common::open 逐字节兼容。wasm 无文件 IO，全部内存缓冲。
 //!
 //! 随机性：wasm32-unknown-unknown 无 OS 熵源（getrandom 该目标无后端，SPEC §8.3 又禁引
 //! wasm-bindgen），熵由 JS 侧 crypto.getRandomValues 生成后经 `sr_entropy()` 注入，
@@ -19,6 +27,8 @@
 //!
 //! ponytail 天花板（明知且接受）：sr_alloc/sr_free 为全局 HashMap 指针池，不合并碎片、
 //! 不抗双重释放以外的误用；会话表为只增不回收的 Vec 槽位；锁在 wasm 单线程下无争用。
+//! RSA 一次性密钥对会话（sr_keygen_rsa）同样不回收——单页生命周期内次数有限（db-dump
+//! 每次备份一把），私钥材料滞留 wasm 内存属 P1 试验档接受面。
 
 #![cfg(target_arch = "wasm32")]
 
@@ -34,8 +44,8 @@ use base64::engine::Engine as _;
 use ed25519_dalek::{Signer, SigningKey};
 use rand::rngs::StdRng;
 use rand::{RngCore, SeedableRng};
-use rsa::pkcs8::DecodePublicKey;
-use rsa::{Oaep, RsaPublicKey};
+use rsa::pkcs8::{DecodePrivateKey, DecodePublicKey, EncodePrivateKey, EncodePublicKey, LineEnding};
+use rsa::{Oaep, RsaPrivateKey, RsaPublicKey};
 use sha2::Sha256;
 
 use crate::{build_canonical, sha256_hex, KEY_LEN, NONCE_LEN, SEG, TAG_LEN, WRAP_LEN};
@@ -393,6 +403,199 @@ pub extern "C" fn sr_seal_end(sid: i32) -> i32 {
             return Err(E_SESSION);
         }
         let mut v = SESSIONS.lock().unwrap();
+        match v.get_mut(sid as usize - 1) {
+            Some(slot) => {
+                *slot = None;
+                Ok(0)
+            }
+            None => Err(E_SESSION),
+        }
+    })
+}
+
+// —— RSA 一次性密钥对会话（SPEC §9：db-dump 下行信封的客户端侧）——
+
+static RSA_SESSIONS: Mutex<Vec<Option<RsaPrivateKey>>> = Mutex::new(Vec::new());
+
+fn rsa_with<T>(sid: i32, f: impl FnOnce(&RsaPrivateKey) -> Result<T, i32>) -> Result<T, i32> {
+    if sid <= 0 {
+        return Err(E_SESSION);
+    }
+    let v = RSA_SESSIONS.lock().unwrap();
+    match v.get(sid as usize - 1) {
+        Some(Some(k)) => f(k),
+        _ => Err(E_SESSION),
+    }
+}
+
+/// 生成 RSA-3072 一次性密钥对（熵池驱动；仅用于 db-dump 信封的公钥上行）。
+/// 返回会话句柄（>0）或负错误码。
+#[no_mangle]
+pub extern "C" fn sr_keygen_rsa() -> i32 {
+    guarded(|| {
+        // 3072 位 → 模长 384B，与 §2 wrap 头长度契约一致
+        let k = with_global_rng(|r| RsaPrivateKey::new(r, 3072))
+            .map_err(|_| E_ENTROPY)?
+            .map_err(|_| E_CRYPTO)?;
+        let mut v = RSA_SESSIONS.lock().unwrap();
+        v.push(Some(k)); // 槽位只增不回收（ponytail；见文件头注）
+        Ok(v.len() as i32)
+    })
+}
+
+/// 导出会话公钥 PEM（SPKI，"-----BEGIN PUBLIC KEY-----"）。
+#[no_mangle]
+pub extern "C" fn sr_rsa_pub_pem(sid: i32, out: *mut u8, cap: usize) -> i32 {
+    guarded(|| {
+        rsa_with(sid, |k| {
+            let pem = k
+                .to_public_key()
+                .to_public_key_pem(LineEnding::LF)
+                .map_err(|_| E_CRYPTO)?;
+            write_cstr(&pem, out, cap)
+        })
+    })
+}
+
+/// 导出会话私钥 PEM（PKCS#8，"-----BEGIN PRIVATE KEY-----"；一次性，用后即弃）。
+#[no_mangle]
+pub extern "C" fn sr_rsa_priv_pem(sid: i32, out: *mut u8, cap: usize) -> i32 {
+    guarded(|| {
+        rsa_with(sid, |k| {
+            let pem = k.to_pkcs8_pem(LineEnding::LF).map_err(|_| E_CRYPTO)?;
+            write_cstr(pem.as_str(), out, cap)
+        })
+    })
+}
+
+// —— open 会话（SPEC §2 信封解封，流式版本；与原生 common::open 逐字节兼容）——
+
+struct OpenState {
+    /// 首个 384B wrap 头解封时取用一次，之后置 None（私钥材料尽早离场）。
+    priv_key: Option<RsaPrivateKey>,
+    cipher: Option<Aes256Gcm>,
+    /// 未消费的信封字节 carry（可能仍含未解封的 384B wrap 头）。
+    buf: Vec<u8>,
+    /// flush 之后流已结束，再 push 属 API 误用。
+    finished: bool,
+}
+
+static OPEN_SESSIONS: Mutex<Vec<Option<OpenState>>> = Mutex::new(Vec::new());
+
+/// 开启解封会话：priv_pem 为 PKCS#8 PEM（"-----BEGIN PRIVATE KEY-----"；
+/// WebCrypto exportKey('pkcs8') 与 sr_rsa_priv_pem 产物均此格式）。
+/// 返回会话句柄（>0）或负错误码。
+#[no_mangle]
+pub extern "C" fn sr_open_begin(priv_pem: *const u8, pem_len: usize) -> i32 {
+    guarded(|| {
+        let pem = utf8(priv_pem, pem_len)?;
+        let k = RsaPrivateKey::from_pkcs8_pem(&pem).map_err(|_| E_KEY)?;
+        let st = OpenState { priv_key: Some(k), cipher: None, buf: Vec::new(), finished: false };
+        let mut v = OPEN_SESSIONS.lock().unwrap();
+        v.push(Some(st)); // 槽位只增不回收（ponytail；句柄从 1 起）
+        Ok(v.len() as i32)
+    })
+}
+
+fn open_push(sid: i32, data: &[u8], out: *mut u8, cap: usize) -> Result<i32, i32> {
+    if sid <= 0 {
+        return Err(E_SESSION);
+    }
+    let mut v = OPEN_SESSIONS.lock().unwrap();
+    let st = match v.get_mut(sid as usize - 1) {
+        Some(Some(s)) => s,
+        _ => return Err(E_SESSION),
+    };
+    if st.finished {
+        return Err(E_ARGS);
+    }
+    let flush = data.is_empty();
+    // 先按 §2 精确核算本次明文产出并检查容量，再动状态——失败路径可原样重试，
+    // 不会因容量探测把 data 重复追加进 carry。
+    let blk = NONCE_LEN + SEG + TAG_LEN; // 一个满段在信封中的字节数
+    let hdr = if st.cipher.is_none() { WRAP_LEN } else { 0 };
+    let rem = (st.buf.len() + data.len()).saturating_sub(hdr);
+    let needed = (rem / blk) * SEG + if flush && rem % blk >= NONCE_LEN + TAG_LEN {
+        rem % blk - NONCE_LEN - TAG_LEN // 尾段明文
+    } else {
+        0
+    };
+    if (needed > 0 && out.is_null()) || cap < needed {
+        // 报告值下限 40：尾段明文可小至 1B，须与错误码区间（|e| ≤ 7）区分
+        return Err(-(needed.max(40) as i32));
+    }
+    st.buf.extend_from_slice(data);
+    if st.cipher.is_none() {
+        if st.buf.len() < WRAP_LEN {
+            if flush {
+                return Err(E_CRYPTO); // 流结束但 wrap 头不齐（截断信封）
+            }
+            return Ok(0); // 头未到齐，暂存等待后续 push
+        }
+        let wrap: Vec<u8> = st.buf.drain(..WRAP_LEN).collect();
+        let pk = st.priv_key.take().ok_or(E_CRYPTO)?;
+        let k = pk.decrypt(Oaep::new::<Sha256>(), &wrap).map_err(|_| E_CRYPTO)?;
+        drop(pk);
+        let k: [u8; KEY_LEN] = k.as_slice().try_into().map_err(|_| E_CRYPTO)?;
+        st.cipher = Some(Aes256Gcm::new(GenericArray::from_slice(&k)));
+    }
+    let cipher = st.cipher.clone().expect("cipher 已建立");
+    let mut w = W { buf: unsafe { std::slice::from_raw_parts_mut(out, cap) }, pos: 0 };
+    while st.buf.len() >= blk {
+        // 满段：[12B nonce][SEG 密文+16B tag]
+        let mut nonce = [0u8; NONCE_LEN];
+        nonce.copy_from_slice(&st.buf[..NONCE_LEN]);
+        st.buf.drain(..NONCE_LEN);
+        let ct: Vec<u8> = st.buf.drain(..SEG + TAG_LEN).collect();
+        let pt = cipher
+            .decrypt(GenericArray::from_slice(&nonce), ct.as_slice())
+            .map_err(|_| E_CRYPTO)?;
+        w.put(&pt);
+    }
+    if flush {
+        if !st.buf.is_empty() {
+            if st.buf.len() < NONCE_LEN + TAG_LEN {
+                return Err(E_CRYPTO); // 尾段连 nonce+tag 都不齐
+            }
+            let mut nonce = [0u8; NONCE_LEN];
+            nonce.copy_from_slice(&st.buf[..NONCE_LEN]);
+            st.buf.drain(..NONCE_LEN);
+            let ct: Vec<u8> = std::mem::take(&mut st.buf);
+            let pt = cipher
+                .decrypt(GenericArray::from_slice(&nonce), ct.as_slice())
+                .map_err(|_| E_CRYPTO)?;
+            w.put(&pt);
+        }
+        st.finished = true;
+    }
+    Ok(w.pos as i32)
+}
+
+/// 推入信封字节分片：内部按段边界流式解密（首 384B wrap 头在到齐时解出 k）。
+/// 返回本次写出的明文字节数（可能为 0——头/段未到齐时暂存）。
+/// len=0 = 输入结束：解出尾段并返回其明文长度；此后只应 sr_open_end。
+#[no_mangle]
+pub extern "C" fn sr_open_push(
+    sid: i32,
+    data: *const u8,
+    len: usize,
+    out: *mut u8,
+    out_cap: usize,
+) -> i32 {
+    guarded(|| {
+        let data = unsafe { slice_const(data, len)?};
+        open_push(sid, data, out, out_cap)
+    })
+}
+
+/// 结束并丢弃解封会话。
+#[no_mangle]
+pub extern "C" fn sr_open_end(sid: i32) -> i32 {
+    guarded(|| {
+        if sid <= 0 {
+            return Err(E_SESSION);
+        }
+        let mut v = OPEN_SESSIONS.lock().unwrap();
         match v.get_mut(sid as usize - 1) {
             Some(slot) => {
                 *slot = None;
