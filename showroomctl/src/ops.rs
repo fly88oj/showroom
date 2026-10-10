@@ -955,14 +955,10 @@ mod tests {
         let (_, a1) = key_bind(&root, "bob", &k1.pub_string()).unwrap();
         assert!(a1, "首把绑定钥匙应继承 admin");
         assert!(!root.join("state/users/bob/admin.pending").exists(), "pending 应一次性消费");
-        // 第二把不继承（pending 已清）
+        // k1 已是 admin 钥：后续钥匙按既有规则继续继承（pending 只是首把的引导，账号从此是管理员）
         let k2 = showroom_common::UserKey::generate();
         let (_, a2) = key_bind(&root, "bob", &k2.pub_string()).unwrap();
-        assert!(!a2, "pending 消费后第二把不应继承");
-        // 但 k1 是 admin 钥，按既有继承规则 k3 应继承
-        let k3 = showroom_common::UserKey::generate();
-        let (_, a3) = key_bind(&root, "bob", &k3.pub_string()).unwrap();
-        assert!(a3, "已有 admin 钥匙时新钥匙仍按既有规则继承");
+        assert!(a2, "已有 admin 钥匙（k1）时后续钥匙应按既有规则继承");
     }
 
     #[test]
