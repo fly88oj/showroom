@@ -111,7 +111,7 @@ pub fn publish(
     };
     let redisdb = match &old {
         Some(c) => c.redisdb,
-        None => state::alloc_redisdb(root)?,
+        None => state::alloc_redisdb(root, &policy)?,
     };
 
     let repo = format!("{owner}/{}", project.to_ascii_lowercase());
@@ -162,7 +162,7 @@ pub fn publish(
     let net = dockerops::DOCKER_NET;
     let image = image_ref(owner, project, tag);
     let run_res = dockerops::docker(&[
-        "run", "-d", "--name", &newname, "--network", &net, "--restart", "unless-stopped",
+        "run", "-d", "--name", &newname, "--network", net, "--restart", "unless-stopped",
         "--memory", &mem, "--cpus", &cpu_s, "--env-file", env_file, "-p", &publish_port, &image,
     ]);
     if let Err(e) = run_res {

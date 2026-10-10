@@ -439,6 +439,55 @@ pub fn import_check(image_id: &str) -> bool {
     dockerops::run_fail_ok("docker", &["image", "inspect", image_id])
 }
 
+// —— 镜像列表（SPEC §13.1，GET /_api/images 内核；与 gc_registry 同源的 catalog/tags HTTP）——
+
+/// registry catalog → 每 repo tags/list → 展平为 `["<repo>:<tag>",…]`。
+/// owner=Some 仅取 `<owner>/` 命名空间 repo（提前过滤省 HTTP 往返）；None（admin）全量。
+/// repo 数与 tag 总量受 state::IMAGES_MAX_REPOS/TAGS 上限；单 repo tags/list 失败跳过如实记录。
+pub fn images(root: &Path, owner: Option<&str>) -> R<Vec<String>> {
+    let (code, _, body) = dockerops::http_registry(root, "GET", "/v2/_catalog", None)?;
+    if code != 200 {
+        return Err(ApiError::state(format!("registry catalog: HTTP {code}")));
+    }
+    let cat: Value = serde_json::from_slice(&body).map_err(|e| ApiError::state(format!("catalog json: {e}")))?;
+    let repos: Vec<String> = cat["repositories"]
+        .as_array()
+        .map(|a| a.iter().filter_map(|v| v.as_str().map(str::to_string)).collect())
+        .unwrap_or_default();
+
+    let mut catalog: Vec<(String, Vec<String>)> = vec![];
+    for repo in repos {
+        if let Some(o) = owner {
+            if !state::repo_owned_by(&repo, o) {
+                continue; // 别人的 repo 不取 tags（省 HTTP，也免 tag 计入上限）
+            }
+        }
+        if catalog.len() >= state::IMAGES_MAX_REPOS {
+            break;
+        }
+        let (code, _, body) = dockerops::http_registry(root, "GET", &format!("/v2/{repo}/tags/list"), None)?;
+        if code != 200 {
+            eprintln!("showroomctl: images: {repo}: tags/list HTTP {code}");
+            continue;
+        }
+        let tags: Vec<String> = match serde_json::from_slice::<Value>(&body) {
+            Ok(v) => v["tags"]
+                .as_array()
+                .map(|a| a.iter().filter_map(|t| t.as_str().map(str::to_string)).collect())
+                .unwrap_or_default(),
+            Err(e) => {
+                eprintln!("showroomctl: images: {repo}: tags json: {e}");
+                continue;
+            }
+        };
+        catalog.push((repo, tags));
+        if catalog.iter().map(|(_, t)| t.len()).sum::<usize>() >= state::IMAGES_MAX_TAGS {
+            break; // 已够上限，不再发起剩余 repo 的 tags/list
+        }
+    }
+    Ok(state::flatten_images(&catalog, owner))
+}
+
 // —— owner 管理（CLI 与 /_api/admin/* 端点共用；owner/kid 均过名字校验防路径拼接）——
 
 /// owner_add 产物：kid + registry 明文密码（密码只此一次返回给远程发卡方；本机 reg.cred 常驻）。

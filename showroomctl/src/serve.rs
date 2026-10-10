@@ -167,14 +167,14 @@ async fn dispatch(
         // —— 管理组（SPEC §12.2）：统一验签后再过 admin_guard，非管理员与 E_AUTH 同 404 ——
 
         ("GET", "/_api/admin/owners", _) => {
-            admin_guard(&s, &owner, &kid)?;
+            admin_guard(s, &owner, &kid)?;
             let root = s.root.clone();
             let owners = blk(move || Ok(ops::owner_list(&root))).await?;
             Ok(Json(json!({"owners": owners})))
         }
 
         ("POST", "/_api/admin/owner-add", Collected::Mem(b)) => {
-            admin_guard(&s, &owner, &kid)?; // 先守卫后解析 body：非管理员不因 body 畸形泄露 E_NAME/E_AUTH 差异
+            admin_guard(s, &owner, &kid)?; // 先守卫后解析 body：非管理员不因 body 畸形泄露 E_NAME/E_AUTH 差异
             let req: AdminOwnerAddReq = jbody(b)?;
             let root = s.root.clone();
             let added = blk(move || {
@@ -186,7 +186,7 @@ async fn dispatch(
         }
 
         ("POST", "/_api/admin/owner-revoke", Collected::Mem(b)) => {
-            admin_guard(&s, &owner, &kid)?; // 先守卫后解析 body：非管理员不因 body 畸形泄露 E_NAME/E_AUTH 差异
+            admin_guard(s, &owner, &kid)?; // 先守卫后解析 body：非管理员不因 body 畸形泄露 E_NAME/E_AUTH 差异
             let req: AdminOwnerReq = jbody(b)?;
             let root = s.root.clone();
             blk(move || ops::owner_revoke(&root, &req.owner)).await?;
@@ -194,7 +194,7 @@ async fn dispatch(
         }
 
         ("POST", "/_api/admin/key-rm", Collected::Mem(b)) => {
-            admin_guard(&s, &owner, &kid)?; // 先守卫后解析 body：非管理员不因 body 畸形泄露 E_NAME/E_AUTH 差异
+            admin_guard(s, &owner, &kid)?; // 先守卫后解析 body：非管理员不因 body 畸形泄露 E_NAME/E_AUTH 差异
             let req: AdminKeyReq = jbody(b)?;
             let root = s.root.clone();
             blk(move || ops::owner_key_rm(&root, &req.owner, &req.kid)).await?;
@@ -202,7 +202,7 @@ async fn dispatch(
         }
 
         ("POST", "/_api/admin/key-admin", Collected::Mem(b)) => {
-            admin_guard(&s, &owner, &kid)?; // 先守卫后解析 body：非管理员不因 body 畸形泄露 E_NAME/E_AUTH 差异
+            admin_guard(s, &owner, &kid)?; // 先守卫后解析 body：非管理员不因 body 畸形泄露 E_NAME/E_AUTH 差异
             let req: AdminKeyAdminReq = jbody(b)?;
             let root = s.root.clone();
             blk(move || ops::key_set_admin(&root, &req.owner, &req.kid, req.admin)).await?;
@@ -210,7 +210,7 @@ async fn dispatch(
         }
 
         ("GET", "/_api/admin/status", _) => {
-            admin_guard(&s, &owner, &kid)?;
+            admin_guard(s, &owner, &kid)?;
             let root = s.root.clone();
             let status = blk(move || ops::admin_status(&root)).await?;
             Ok(Json(status))
@@ -226,6 +226,16 @@ async fn dispatch(
                 Ok(Json(json!({"projects": v})))
             })
             .await
+        }
+
+        // —— 镜像列表（SPEC §13.1，部署表单 ComboBox）：catalog+tags 展平；
+        //     按签名用户 `<owner>/` 前缀过滤；admin 钥匙不过滤 ——
+        ("GET", "/_api/images", _) => {
+            let admin = ops::key_is_admin(&s.root, &owner, &kid);
+            let root = s.root.clone();
+            let o = owner.clone();
+            let images = blk(move || ops::images(&root, if admin { None } else { Some(&o) })).await?;
+            Ok(Json(json!({"images": images})))
         }
 
         ("POST", "/_api/publish", Collected::Mem(b)) => {
@@ -405,14 +415,25 @@ async fn dispatch(
             Ok(Json(json!({"ok": true})))
         }
 
-        // —— Redis 浏览（SPEC §10.3，排障用）：统一验签；跨 owner 不做归属校验（SPEC 已注明）——
+        // —— Redis 浏览（SPEC §10.3 排障 + §13.2 用户隔离）：db 须 ∈ 名下项目 redisdb 集合；admin 放开全量 ——
 
         ("GET", "/_api/redis-dbs", _) => {
-            Ok(Json(json!({"dbs": (0..state::REDIS_DBS).collect::<Vec<u8>>()})))
+            let policy = state::Policy::load(&s.root);
+            let admin = ops::key_is_admin(&s.root, &owner, &kid);
+            let dbs: Vec<u16> = if admin {
+                (0..policy.redis_pool_cap()).collect()
+            } else {
+                state::user_redis_dbs(&s.root, &owner)
+            };
+            let mut v = json!({"dbs": dbs});
+            if admin {
+                v["admin_view"] = json!(true); // 控制台据此标注「管理员视图」
+            }
+            Ok(Json(v))
         }
 
         ("GET", "/_api/redis-keys", _) => {
-            let db = state::parse_redis_db(&qget(&q, "db")?)?;
+            let db = redis_db_guard(s, &q, &owner, &kid)?;
             let pat = q.get("q").cloned().unwrap_or_default();
             // 默认 100 上限 200（--scan 无 limit 参数，内核读满即杀并标截断）
             let limit: usize = q.get("limit").and_then(|t| t.parse().ok()).unwrap_or(100).min(200);
@@ -421,7 +442,7 @@ async fn dispatch(
         }
 
         ("GET", "/_api/redis-get", _) => {
-            let db = state::parse_redis_db(&qget(&q, "db")?)?;
+            let db = redis_db_guard(s, &q, &owner, &kid)?;
             let key = qget(&q, "key")?;
             let (t, ttl_ms, value) = blk(move || ops::redis_get(db, &key)).await?;
             Ok(Json(json!({"type": t, "ttl_ms": ttl_ms, "value": value})))
@@ -445,7 +466,8 @@ async fn dispatch(
         }
 
         _ => Err(ApiError::new("E_NOTFOUND", "no such endpoint")),
-    };    Ok(r.map(|j| j.into_response())?)
+    };
+    r.map(|j| j.into_response())
 }
 
 // —— body 收集：哈希始终可算完，验签失败者只见统一 404 ——
@@ -591,6 +613,19 @@ fn admin_guard(s: &S, owner: &str, kid: &str) -> R<()> {
         Ok(())
     } else {
         Err(ApiError::new("E_AUTH", format!("not an admin key: {owner}/{kid}")))
+    }
+}
+
+/// Redis 浏览归属校验（SPEC §13.2）：请求 db 须 ∈ 签名用户名下项目的 redisdb 集合
+/// （state::user_redis_dbs）；admin 钥匙放开全量（0..policy 池）。
+/// 非归属 → E_AUTH（404 同体，不泄露池内容；与 own_check 语义一致）。
+fn redis_db_guard(s: &S, q: &HashMap<String, String>, owner: &str, kid: &str) -> R<u8> {
+    let policy = state::Policy::load(&s.root);
+    let db = state::parse_redis_db(&qget(q, "db")?, policy.redis_pool_cap())?;
+    if ops::key_is_admin(&s.root, owner, kid) || state::user_redis_dbs(&s.root, owner).contains(&(db as u16)) {
+        Ok(db)
+    } else {
+        Err(ApiError::new("E_AUTH", format!("redis db {db} not in '{owner}' projects' pool")))
     }
 }
 
@@ -775,6 +810,55 @@ mod tests {
         assert_eq!(admin_guard(&s, "root", &plain.kid).unwrap_err().code, "E_AUTH");
         assert_eq!(admin_guard(&s, "nobody", &added.kid).unwrap_err().code, "E_AUTH");
         assert_eq!(admin_guard(&s, "root", "ffffffff").unwrap_err().code, "E_AUTH");
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    // redis_db_guard 边界（§13.2）：自己的 db 放行；别人的/未分配的 → E_AUTH（404 同体）；
+    // admin 钥匙放开全量；形状非法（非数字/超池）→ E_NAME
+    #[test]
+    fn redis_db_guard_boundaries() {
+        let root = std::env::temp_dir().join(format!("srctl-redis-guard-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).unwrap();
+        let s: S = Arc::new(AppState { root: root.clone(), nonces: Mutex::new(HashMap::new()) });
+
+        // alice 名下项目占 db 3/7；bob 占 db 2
+        for (p, owner, db) in [("demo1", "alice", 3u8), ("demo2", "alice", 7), ("demo3", "bob", 2)] {
+            let c = crate::state::Conf {
+                owner: owner.into(), tag: "v1".into(), port: 8100, cport: 8080,
+                mem: "256m".into(), cpu: 1.0, redisdb: db, updated: 1,
+                stopped: false, legacyslot: None,
+            };
+            c.save(&root, p).unwrap();
+        }
+        let qq = |db: &str| HashMap::from([("db".to_string(), db.to_string())]);
+
+        // 自己的 db 放行；别人的（bob 的 2）/未分配的（200）→ E_AUTH
+        assert_eq!(redis_db_guard(&s, &qq("3"), "alice", "ab12cd34").unwrap(), 3);
+        assert_eq!(redis_db_guard(&s, &qq("7"), "alice", "ab12cd34").unwrap(), 7);
+        assert_eq!(redis_db_guard(&s, &qq("2"), "alice", "ab12cd34").unwrap_err().code, "E_AUTH");
+        assert_eq!(redis_db_guard(&s, &qq("200"), "alice", "ab12cd34").unwrap_err().code, "E_AUTH");
+        assert_eq!(redis_db_guard(&s, &qq("3"), "nobody", "ab12cd34").unwrap_err().code, "E_AUTH");
+
+        // admin 钥匙放开全量（含别人的 2 与池内任意 255）；超池/非数字仍 E_NAME
+        let k = showroom_common::OwnerKey::generate();
+        let added = crate::ops::owner_add(&s.root, "root", &k.pub_string(), true, false).unwrap();
+        assert_eq!(redis_db_guard(&s, &qq("2"), "root", &added.kid).unwrap(), 2);
+        assert_eq!(redis_db_guard(&s, &qq("255"), "root", &added.kid).unwrap(), 255);
+        assert_eq!(redis_db_guard(&s, &qq("256"), "root", &added.kid).unwrap_err().code, "E_NAME");
+        assert_eq!(redis_db_guard(&s, &qq("abc"), "root", &added.kid).unwrap_err().code, "E_NAME");
+        assert_eq!(redis_db_guard(&s, &HashMap::new(), "root", &added.kid).unwrap_err().code, "E_NAME");
+
+        // 非管理员钥匙即便 owner 有钥匙档案也不越权（无 E_AUTH 与 404 之外的信息差）
+        let k2 = showroom_common::OwnerKey::generate();
+        let plain = crate::ops::owner_add(&s.root, "root", &k2.pub_string(), false, false).unwrap();
+        assert_eq!(redis_db_guard(&s, &qq("3"), "root", &plain.kid).unwrap_err().code, "E_AUTH");
+
+        // 小池（REDIS_DBS=8）：池内 7 放行、池外 15 → E_NAME（alice 名下 db 7 < 8 仍可用）
+        std::fs::create_dir_all(root.join("state")).unwrap();
+        std::fs::write(root.join("state/policy.env"), "REDIS_DBS=8\n").unwrap();
+        assert_eq!(redis_db_guard(&s, &qq("7"), "alice", "ab12cd34").unwrap(), 7);
+        assert_eq!(redis_db_guard(&s, &qq("15"), "root", &added.kid).unwrap_err().code, "E_NAME");
         let _ = std::fs::remove_dir_all(&root);
     }
 

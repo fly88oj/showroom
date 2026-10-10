@@ -269,8 +269,8 @@ fn dispatch(cli: &Cli) -> R<()> {
                 println!("{}", json!({"projects": v}));
             } else {
                 println!(
-                    "{:<24} {:<12} {:<20} {:<9} {:<5} {:<6} {:<5} {:<10} {}",
-                    "PROJECT", "OWNER", "TAG", "STATUS", "PORT", "MEM", "CPU", "UPDATED", "URL"
+                    "{:<24} {:<12} {:<20} {:<9} {:<5} {:<6} {:<5} {:<10} URL",
+                    "PROJECT", "OWNER", "TAG", "STATUS", "PORT", "MEM", "CPU", "UPDATED"
                 );
                 for (p, c, st) in rows {
                     println!(

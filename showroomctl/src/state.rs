@@ -11,7 +11,6 @@ use showroom_common::{ed25519_dalek::VerifyingKey, sha256_hex, OwnerKey};
 
 pub const PORT_MIN: u16 = 8100;
 pub const PORT_MAX: u16 = 8199;
-pub const REDIS_DBS: u8 = 16;
 
 // —— 错误：code 对齐 SPEC §3 ——
 #[derive(Debug)]
@@ -297,6 +296,9 @@ pub struct Policy {
     pub allow_lan_port: bool,
     /// 内存准入预留（§10.2，MB）：MemAvailable 减去它之后须仍满足本次发布的需求。
     pub reserve_mem_mb: u64,
+    /// Redis 逻辑库池大小（§13.3；policy.env `REDIS_DBS=` 可调，默认 256）。
+    /// 分配单位维持每项目一库（§13.3）；与 MAX_SLOTS 的一致性由文档说明（默认 30≤256）。
+    pub redis_dbs: u16,
 }
 
 impl Default for Policy {
@@ -308,6 +310,7 @@ impl Default for Policy {
             import_max_gb: 8,
             allow_lan_port: false,
             reserve_mem_mb: 1536,
+            redis_dbs: 256,
         }
     }
 }
@@ -323,11 +326,17 @@ impl Policy {
             import_max_gb: m.get("IMPORT_MAX_GB").and_then(|v| v.parse().ok()).unwrap_or(8),
             allow_lan_port: m.get("ALLOW_LAN_PORT").map(|v| v != "0").unwrap_or(false),
             reserve_mem_mb: m.get("RESERVE_MEM_MB").and_then(|v| v.parse().ok()).unwrap_or(1536),
+            redis_dbs: m.get("REDIS_DBS").and_then(|v| v.parse().ok()).unwrap_or(256),
         }
     }
 
     pub fn import_cap_bytes(&self) -> u64 {
         self.import_max_gb << 30
+    }
+
+    /// redisdb 分配池有效上界（§13.3）：Conf.redisdb 为 u8，库号至多 0-255（256 个）。
+    pub fn redis_pool_cap(&self) -> u16 {
+        self.redis_dbs.min(256)
     }
 }
 
@@ -440,22 +449,39 @@ pub fn release_port(root: &Path, project: &str) -> R<()> {
     Ok(())
 }
 
-/// redis 逻辑 DB 0-15：扫现有项目 conf 找空闲（§11 按项目分配）；占满 → E_QUOTA。
-pub fn alloc_redisdb(root: &Path) -> R<u8> {
+/// redis 逻辑 DB 分配（§11 按项目一库；§13.3 池大小=policy.redis_dbs，默认 256）：
+/// 扫现有项目 conf 找空闲；占满 → E_QUOTA（消息含 已用/总量）。存量兼容：已分配库号不变。
+pub fn alloc_redisdb(root: &Path, policy: &Policy) -> R<u8> {
     let used: BTreeSet<u8> = all_confs(root).into_iter().map(|(_, c)| c.redisdb).collect();
-    (0..REDIS_DBS)
+    let cap = policy.redis_pool_cap();
+    (0..cap)
+        .map(|d| d as u8)
         .find(|d| !used.contains(d))
-        .ok_or_else(|| ApiError::new("E_QUOTA", "no free redis db in 0-15"))
+        .ok_or_else(|| ApiError::new("E_QUOTA", format!("redis db pool exhausted: {}/{} in use", used.len(), cap)))
+}
+
+/// 用户名下项目的 redisdb 集合（§13.2 浏览隔离）：扫全部项目 conf 按 conf.owner 聚合，升序去重。
+pub fn user_redis_dbs(root: &Path, owner: &str) -> Vec<u16> {
+    let mut v: Vec<u16> = all_confs(root)
+        .into_iter()
+        .filter(|(_, c)| c.owner == owner)
+        .map(|(_, c)| c.redisdb as u16)
+        .collect();
+    v.sort_unstable();
+    v.dedup();
+    v
 }
 
 // —— Redis 浏览纯函数（SPEC §10.3）——
 
-/// db 参数：数字 0-15（REDIS_DBS-1），否则 E_NAME。
-pub fn parse_redis_db(s: &str) -> R<u8> {
-    s.parse::<u8>()
+/// db 参数：数字 0-(cap-1)（cap=policy.redis_pool_cap，§13.3 可调），否则 E_NAME。
+pub fn parse_redis_db(s: &str, cap: u16) -> R<u8> {
+    let cap = cap.min(256);
+    s.parse::<u16>()
         .ok()
-        .filter(|d| *d < REDIS_DBS)
-        .ok_or_else(|| ApiError::new("E_NAME", format!("db 须为 0-{} 的数字", REDIS_DBS - 1)))
+        .filter(|d| *d < cap)
+        .map(|d| d as u8)
+        .ok_or_else(|| ApiError::new("E_NAME", format!("db 须为 0-{} 的数字", cap.saturating_sub(1))))
 }
 
 /// q（前缀过滤）→ --scan pattern：空 → "*"（全部）；非空须过白名单 [a-zA-Z0-9:_*.-]，尾部补 *。
@@ -492,6 +518,43 @@ pub fn clip_value(s: &str) -> String {
         end -= 1;
     }
     format!("{}...(截断)", &s[..end])
+}
+
+// —— 镜像列表纯函数（SPEC §13.1，部署表单 ComboBox 数据源）——
+
+/// GET /_api/images 的 repo 数与 tag 总量上限（防响应膨胀；超出静默截断）。
+pub const IMAGES_MAX_REPOS: usize = 500;
+pub const IMAGES_MAX_TAGS: usize = 500;
+
+/// repo 是否属于 owner：`<owner>/` 命名空间（§4 镜像 127.0.0.1:5000/<owner>/<project>:<tag>）。
+/// split 精确比对首段，"alice-x/y" 不误吞给 "alice"。
+pub fn repo_owned_by(repo: &str, owner: &str) -> bool {
+    repo.split_once('/').map(|(ns, _)| ns == owner).unwrap_or(false)
+}
+
+/// catalog+tags 展平（§13.1 纯函数）：owner=Some 仅留该用户 repo，None（admin 钥匙）全量；
+/// repo 数与 tag 总量分别受 IMAGES_MAX_REPOS/IMAGES_MAX_TAGS 上限。
+pub fn flatten_images(catalog: &[(String, Vec<String>)], owner: Option<&str>) -> Vec<String> {
+    let mut out: Vec<String> = vec![];
+    let mut repos = 0usize;
+    for (repo, tags) in catalog {
+        if let Some(o) = owner {
+            if !repo_owned_by(repo, o) {
+                continue;
+            }
+        }
+        repos += 1;
+        if repos > IMAGES_MAX_REPOS {
+            break;
+        }
+        for t in tags {
+            if out.len() >= IMAGES_MAX_TAGS {
+                return out;
+            }
+            out.push(format!("{repo}:{t}"));
+        }
+    }
+    out
 }
 
 // —— 发布者公钥 / registry 凭据文件 ——
@@ -603,6 +666,7 @@ pub fn plan_project_lift(slots: &[(String, u64)]) -> (String, Vec<String>) {
 ///   多槽位取 updated 最新者上提（conf 附 `legacyslot=<slot>` 供 DB 检测沿用），其余删除；
 /// - ports.reg 三列 → 两列（被弃槽位的行一并移除，防端口被幽灵占用）；
 /// - `routes/<p>-<s>.caddy` 旧文件删除，按胜出 conf 端口写新 `<p>.caddy`。
+///
 /// 全程 eprintln 如实记录；返回是否有变更（调用方据此 reload caddy）。
 /// 容器 docker rename 收养在 ops::migrate_legacy（state 层不碰 docker）。
 pub fn migrate_legacy_layout(root: &Path) -> bool {
@@ -669,12 +733,10 @@ pub fn migrate_legacy_layout(root: &Path) -> bool {
                 "env" => env_path(root, &p),
                 _ => last2_path(root, &p),
             };
-            if src.exists() {
-                if fs::rename(&src, &dst).is_err() {
-                    // 同目录树内 rename 恒同盘；失败（并发占用等）退回拷贝语义
-                    if let Ok(b) = fs::read(&src) {
-                        let _ = fs::write(&dst, b);
-                    }
+            if src.exists() && fs::rename(&src, &dst).is_err() {
+                // 同目录树内 rename 恒同盘；失败（并发占用等）退回拷贝语义
+                if let Ok(b) = fs::read(&src) {
+                    let _ = fs::write(&dst, b);
                 }
             }
         }
@@ -758,7 +820,7 @@ pub fn prune_snapshots(names: &[String], keep: usize) -> Vec<String> {
 /// 注意：coreutils 9.4 无 `total` 字段，用 `size`（同为 1B 块总量）；取最后一个非空行，
 /// 两列空白分隔的 u64——多路径调用时与传入路径一一对应，单路径取末行即本路径。
 pub fn parse_df_bytes(text: &str) -> Option<(u64, u64)> {
-    let last = text.lines().filter(|l| !l.trim().is_empty()).last()?;
+    let last = text.lines().rfind(|l| !l.trim().is_empty())?;
     let mut it = last.split_whitespace();
     let total: u64 = it.next()?.parse().ok()?;
     let used: u64 = it.next()?.parse().ok()?;
@@ -966,7 +1028,7 @@ mod tests {
         fs::create_dir_all(root.join("state")).unwrap();
         fs::write(
             root.join("state/policy.env"),
-            "MAX_SLOTS=5\nDEFAULT_MEM=128m\nMAX_MEM=512m\nIMPORT_MAX_GB=2\nALLOW_LAN_PORT=1\nRESERVE_MEM_MB=512\n",
+            "MAX_SLOTS=5\nDEFAULT_MEM=128m\nMAX_MEM=512m\nIMPORT_MAX_GB=2\nALLOW_LAN_PORT=1\nRESERVE_MEM_MB=512\nREDIS_DBS=8\n",
         )
         .unwrap();
         let p = Policy::load(&root);
@@ -978,10 +1040,12 @@ mod tests {
                 p.import_max_gb,
                 p.allow_lan_port,
                 p.reserve_mem_mb,
+                p.redis_dbs,
             ),
-            (5, "128m", "512m", 2, true, 512)
+            (5, "128m", "512m", 2, true, 512, 8)
         );
         assert_eq!(p.import_cap_bytes(), 2 << 30);
+        assert_eq!(p.redis_pool_cap(), 8, "§13.3 REDIS_DBS 可调");
 
         let d = Policy::load(&troot("policy-default"));
         assert_eq!(
@@ -992,9 +1056,18 @@ mod tests {
                 d.import_max_gb,
                 d.allow_lan_port,
                 d.reserve_mem_mb,
+                d.redis_dbs,
             ),
-            (30, "256m", "1g", 8, false, 1536)
+            (30, "256m", "1g", 8, false, 1536, 256)
         );
+        assert_eq!(d.redis_pool_cap(), 256, "§13.3 默认池 256");
+        // 非法值回默认；超 u8 承载（>256）的池 cap 收在 256（Conf.redisdb 为 u8）
+        let root2 = troot("policy-redis");
+        fs::create_dir_all(root2.join("state")).unwrap();
+        fs::write(root2.join("state/policy.env"), "REDIS_DBS=abc\n").unwrap();
+        assert_eq!(Policy::load(&root2).redis_dbs, 256);
+        fs::write(root2.join("state/policy.env"), "REDIS_DBS=1000\n").unwrap();
+        assert_eq!(Policy::load(&root2).redis_pool_cap(), 256);
 
         assert_eq!(parse_mem("256m"), Some(256 * 1024 * 1024));
         assert_eq!(parse_mem("1g"), Some(1 << 30));
@@ -1043,7 +1116,7 @@ mod tests {
         assert!(reg.lines().all(|l| l.split_whitespace().count() == 2), "{reg}");
     }
 
-    // 附带：redisdb 分配（conf 扫描，按项目）
+    // 附带：redisdb 分配（conf 扫描，按项目；§13.3 池大小=policy.redis_dbs，耗尽 E_QUOTA 含 已用/总量）
     #[test]
     fn redisdb_alloc() {
         let root = troot("redis");
@@ -1053,7 +1126,50 @@ mod tests {
         let mut n = base_conf(1);
         n.redisdb = 1;
         n.save(&root, "other").unwrap();
-        assert_eq!(alloc_redisdb(&root).unwrap(), 2);
+        // 默认池 256：0/1 已占 → 分 2
+        assert_eq!(alloc_redisdb(&root, &Policy::default()).unwrap(), 2);
+
+        // 小池耗尽（§13.3）：池 4 → 依次分 2、3；占满 0-3 后 E_QUOTA，msg 含 已用/总量（4/4）
+        let small = Policy { redis_dbs: 4, ..Policy::default() };
+        assert_eq!(alloc_redisdb(&root, &small).unwrap(), 2);
+        let save = |p: &str, db: u8| {
+            let mut c = base_conf(1);
+            c.redisdb = db;
+            c.save(&root, p).unwrap();
+        };
+        save("third", 2);
+        assert_eq!(alloc_redisdb(&root, &small).unwrap(), 3);
+        save("fourth", 3);
+        let e = alloc_redisdb(&root, &small).unwrap_err();
+        assert_eq!(e.code, "E_QUOTA", "{}", e.msg);
+        assert!(e.msg.contains("4/4"), "msg 须含 已用/总量: {}", e.msg);
+        // 池收窄（REDIS_DBS=2）后 0/1 均被占 → 本池如实报耗尽（已用 4 > 总量 2 也如实带出）
+        let tiny = Policy { redis_dbs: 2, ..Policy::default() };
+        let e2 = alloc_redisdb(&root, &tiny).unwrap_err();
+        assert_eq!(e2.code, "E_QUOTA");
+        assert!(e2.msg.contains("4/2"), "{}", e2.msg);
+    }
+
+    // 附带 b：user_redis_dbs 聚合（§13.2 浏览隔离）——按 conf.owner 收集，升序去重；无项目空表
+    #[test]
+    fn user_redis_dbs_aggregation() {
+        let root = troot("user-dbs");
+        for (p, owner, db) in [
+            ("demo1", "alice", 3u8),
+            ("demo2", "alice", 7),
+            ("demo3", "alice", 3), // 重复 db 去重
+            ("demo4", "bob", 2),
+            ("demo5", "carol", 255),
+        ] {
+            let mut c = base_conf(1);
+            c.owner = owner.into();
+            c.redisdb = db;
+            c.save(&root, p).unwrap();
+        }
+        assert_eq!(user_redis_dbs(&root, "alice"), vec![3, 7]);
+        assert_eq!(user_redis_dbs(&root, "bob"), vec![2]);
+        assert_eq!(user_redis_dbs(&root, "carol"), vec![255], "§13.3 大池库号原样聚合");
+        assert!(user_redis_dbs(&root, "nobody").is_empty());
     }
 
     // 5b. 多槽位上提计划（纯函数）：updated 最新胜；并列名字大者胜；单槽位无败者
@@ -1115,7 +1231,7 @@ mod tests {
     fn migrate_legacy_multi_slot() {
         let root = troot("migrate2");
         for (s, updated, port) in [("stable", 100u64, 8100u16), ("next", 300, 8101), ("pr42", 200, 8102)] {
-            let dir = root.join(format!("state/projects/hello"));
+            let dir = root.join("state/projects/hello");
             fs::create_dir_all(&dir).unwrap();
             let mut c = base_conf(updated);
             c.port = port;
@@ -1235,12 +1351,18 @@ Cached:         13121516 kB
     // 10. Redis 浏览白名单（§10.3）：db / q / key 边界 + 值 4KB 截断
     #[test]
     fn redis_browse_validation() {
-        // db：0 与 15 放行；16 / 负数 / 非数字 / 空 → E_NAME
-        assert_eq!(parse_redis_db("0").unwrap(), 0);
-        assert_eq!(parse_redis_db("15").unwrap(), 15);
+        // db：cap 内放行；≥cap / 负数 / 非数字 / 空 → E_NAME（cap=policy.redis_pool_cap，§13.3）
+        assert_eq!(parse_redis_db("0", 16).unwrap(), 0);
+        assert_eq!(parse_redis_db("15", 16).unwrap(), 15, "16 池上边界");
         for bad in ["16", "99", "-1", "abc", "", "1.5", " 1"] {
-            assert_eq!(parse_redis_db(bad).unwrap_err().code, "E_NAME", "{bad:?}");
+            assert_eq!(parse_redis_db(bad, 16).unwrap_err().code, "E_NAME", "{bad:?}");
         }
+        // 默认 256 池：255 放行、256 拒（u8 承载上界）
+        assert_eq!(parse_redis_db("255", 256).unwrap(), 255);
+        assert_eq!(parse_redis_db("256", 256).unwrap_err().code, "E_NAME");
+        // 超大 cap 也收在 256（防 u8 溢出）
+        assert_eq!(parse_redis_db("255", 1000).unwrap(), 255);
+        assert_eq!(parse_redis_db("256", 1000).unwrap_err().code, "E_NAME");
 
         // q → pattern：空 → "*"；白名单内补尾部 *；白名单外 → None
         assert_eq!(redis_scan_pattern("").as_deref(), Some("*"));
@@ -1272,6 +1394,64 @@ Cached:         13121516 kB
         assert!(clipped_cjk.ends_with("...(截断)"));
         assert!(clipped_cjk.len() < REDIS_VALUE_MAX + 15, "多字节按边界截短");
         assert_eq!(clipped_cjk.matches('中').count() * 3 + "...(截断)".len(), clipped_cjk.len());
+    }
+
+    // 10b. 镜像列表纯函数（§13.1）：owner 前缀过滤 / admin 全量 / repo 与 tag 上限
+    #[test]
+    fn images_flatten_and_filter() {
+        // catalog 样例：repo 名典序（registry:2 catalog 实际顺序）× 各自 tags
+        let cat = |v: &[(&str, &[&str])]| -> Vec<(String, Vec<String>)> {
+            v.iter()
+                .map(|(r, ts)| (r.to_string(), ts.iter().map(|t| t.to_string()).collect()))
+                .collect()
+        };
+        let catalog = cat(&[
+            ("alice/api", &["v1"]),
+            ("alice/web", &["v1", "v2"]),
+            ("bob/web", &["v1"]),
+            ("bare", &["latest"]), // 无 owner 前缀 repo：任何用户过滤都不可见（admin 可见）
+        ]);
+
+        // admin（None）：全量展平 "repo:tag"
+        assert_eq!(
+            flatten_images(&catalog, None),
+            ["alice/api:v1", "alice/web:v1", "alice/web:v2", "bob/web:v1", "bare:latest"]
+                .map(String::from)
+                .to_vec()
+        );
+        // alice：仅 alice/ 命名空间
+        assert_eq!(
+            flatten_images(&catalog, Some("alice")),
+            ["alice/api:v1", "alice/web:v1", "alice/web:v2"].map(String::from).to_vec()
+        );
+        assert_eq!(flatten_images(&catalog, Some("bob")), ["bob/web:v1".to_string()]);
+        assert!(flatten_images(&catalog, Some("nobody")).is_empty());
+        // 前缀不误吞："ali" 不匹配 "alice/web"（split 精确比对首段）
+        assert!(flatten_images(&catalog, Some("ali")).is_empty());
+        assert!(repo_owned_by("alice/web", "alice") && !repo_owned_by("alice-x/y", "alice"));
+        assert!(!repo_owned_by("bare", "alice"), "无命名空间 repo 不属于任何人");
+        // 空 catalog / 空 tags
+        assert!(flatten_images(&[], None).is_empty());
+        assert!(flatten_images(&cat(&[("alice/x", &[])]), Some("alice")).is_empty());
+
+        // 上限：repo > IMAGES_MAX_REPOS 只取前 500 个；tag 总量 > IMAGES_MAX_TAGS 截到 500
+        let many_repos: Vec<(String, Vec<String>)> = (0..IMAGES_MAX_REPOS + 10)
+            .map(|i| (format!("alice/r{i}"), vec!["v1".to_string()]))
+            .collect();
+        let out = flatten_images(&many_repos, Some("alice"));
+        assert_eq!(out.len(), IMAGES_MAX_REPOS);
+        assert_eq!(out.last().unwrap(), "alice/r499:v1");
+
+        let many_tags = ("alice/big".to_string(), (0..IMAGES_MAX_TAGS + 10).map(|i| format!("t{i}")).collect::<Vec<_>>());
+        let out2 = flatten_images(&[many_tags], None);
+        assert_eq!(out2.len(), IMAGES_MAX_TAGS);
+        assert_eq!(out2.last().unwrap(), "alice/big:t499");
+        // 别人的 repo 不计入自己的 repo 上限（过滤先行）
+        let mut mixed: Vec<(String, Vec<String>)> = (0..IMAGES_MAX_REPOS + 5)
+            .map(|i| (format!("bob/r{i}"), vec!["v1".to_string()]))
+            .collect();
+        mixed.push(("alice/x".to_string(), vec!["v1".to_string()]));
+        assert_eq!(flatten_images(&mixed, Some("alice")), ["alice/x:v1".to_string()]);
     }
 
     // 11. admin status 纯解析（SPEC §12.2）：df / docker ps / list-timers 样例文本

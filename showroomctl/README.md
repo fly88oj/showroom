@@ -58,3 +58,13 @@ Caddyfile 路径（`/etc/caddy/Caddyfile`）为常量。
 已知天花板（ponytail 注释同步在代码里）：滚动更新因同槽位唯一 host 端口先停旧再起新（秒级中断）；
 gc-registry 标签按字典序近似新旧（registry:2 无时间戳 API）；端口分配无并发锁（本机唯一管理通道）；
 MAX_SLOTS 按全平台 slot 总数计。
+
+Redis 浏览（§10.3/§13.2）：`/_api/redis-dbs|keys|get` 按签名用户隔离——普通钥匙仅能访问
+自己名下项目分到的逻辑库（`redis-dbs` 只列自己的；admin 钥匙全量并标 `admin_view:true`）。
+诚实边界：这是**界面级/协作级隔离**（防误看防误操作）——容器内应用持有原始连接仍可 SELECT
+任意库，非安全边界；应用级强隔离需独实例或 Redis ACL，成本过高不做。
+
+Redis 逻辑库池（§13.3）：分配单位维持每项目一库（conf `redisdb`，客户端 URL 零配合）；
+池大小 policy.env `REDIS_DBS=` 可调，默认 256（`Conf.redisdb` 为 u8，库号至多 0-255；
+需 sr-redis 启动参数 `--databases` ≥ 该值）。与 `MAX_SLOTS`（默认 30）的一致性由运维保证
+（30≤256）；池耗尽发布返回 `E_QUOTA`（消息含 已用/总量），存量已分配库号不受调整影响。

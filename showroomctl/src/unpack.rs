@@ -5,6 +5,7 @@
 //!   CLI `docker save | zstd`、服务端 dump 生成侧的 zstd-19 包裹；
 //! - gzip 流（1F 8B 08）：降级路径（浏览器侧 zstd 不可用时的 gzip 替代算法）；
 //! - 裸流：`docker save` 原生 tar、原生 pg_dump -Fc（"PGDMP" 头）——直通交下游。
+//!
 //! 按前 4 字节魔数一次性路由；不足 4 字节的残流 flush 时直通（非任一完整格式，
 //! 交 docker load / pg_restore 如实报错）。
 

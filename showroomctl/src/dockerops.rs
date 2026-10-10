@@ -302,8 +302,11 @@ pub fn ensure_internal_cred(root: &Path) -> R<(String, String)> {
     Ok(("_internal".into(), pass))
 }
 
+/// registry HTTP 应答：(状态码, 小写 headers, body)。
+pub type RegistryHttp = (u16, Vec<(String, String)>, Vec<u8>);
+
 /// 返回 (status, 小写 headers, body)。
-pub fn http_registry(root: &Path, method: &str, path: &str, accept: Option<&str>) -> R<(u16, Vec<(String, String)>, Vec<u8>)> {
+pub fn http_registry(root: &Path, method: &str, path: &str, accept: Option<&str>) -> R<RegistryHttp> {
     let (user, pass) = ensure_internal_cred(root)?;
     let auth = STANDARD.encode(format!("{user}:{pass}"));
     let mut req = format!(
