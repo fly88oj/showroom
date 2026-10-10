@@ -171,3 +171,13 @@ CLI 对应：`showroom db sql|tables|preview|dump|restore|reset`。公网全可�
   - `GET /_api/admin/status` → 服务状态(systemd is-active 四服务)、磁盘(根+@showroom)、内存(MemAvailable)、容器列表(名/状态)、timers 下次触发
 - 控制台「管理」标签（仅 admin 钥匙可见）：账号与钥匙表格（发卡对话框含公钥粘贴+是否管理员勾选）、状态面板（自动刷新 30s）、快捷动作（收权/删钥匙，confirm）。
 - 安全语义：管理员钥匙遗失=平台最高权限泄露，owner-key-rm 单独吊销；whoami 用当前请求的 kid 判定。
+
+## 13. v1.6：部署入口并存 + 镜像选择 + Redis 浏览隔离
+### 13.1 发布入口三存（一键不取代分步）
+- 「一键部署」：tar→压缩→上传→立即发布（快捷路径）。
+- 「仅上传」：只入 registry，不入库部署（发布者择时部署）。
+- 「部署」：独立表单——**镜像 ComboBox**（datalist 搜索）列当前可选镜像，默认仅当前用户的（admin 可看全部）；选中后填内存需求/端口→发布（旧版本单独部署即从此入口）。
+- 新端点 `GET /_api/images`（签名）→ `{"images":["<owner>/<project>:<tag>",...]}`：registry catalog+tags 合并；按签名用户 owner 前缀过滤；admin 钥匙不过滤。
+### 13.2 Redis 浏览按用户隔离（低成本实现，不动 Redis 本体）
+- 隔离单位=Redis 逻辑库：`state` 已按项目分配 redisdb（0-15）。`/_api/redis-dbs|keys|get` 增加校验：请求 db ∈ 当前用户名下项目的 redisdb 集合；admin 钥匙放开全量。控制台 DB 下拉仅列自己的（admin 全量，标注「管理员视图」）。
+- 诚实边界（文档注明）：容器内应用持有原始连接仍可 SELECT 任意库——这是**界面级/协作级隔离**（防误看防误操作），非安全边界；应用级强隔离需独实例或 Redis ACL+rewrite，成本过高不做。
