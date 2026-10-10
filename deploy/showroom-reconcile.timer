@@ -1,0 +1,9 @@
+[Unit]
+Description=Hourly showroom reconcile
+
+[Timer]
+OnBootSec=2min
+OnUnitActiveSec=1h
+
+[Install]
+WantedBy=timers.target

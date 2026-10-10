@@ -468,11 +468,13 @@ pub fn caddy_route(project: &str, slot: &str, port: u16) -> String {
     };
     // caddy matcher 名只允许字母数字下划线：连字符换下划线
     let m = format!("sr_{project}_{slot}").replace('-', "_");
+    // handle_path 自动剥掉 {base} 前缀再反代（容器收到的是 / 起始路径）
     format!(
         "@{m}_nos path {base}\n\
          redir @{m}_nos {base}/ 308\n\
-         @{m} path {base}/*\n\
-         reverse_proxy @{m} 127.0.0.1:{port}\n"
+         handle_path {base}/* {{\n\
+           reverse_proxy 127.0.0.1:{port}\n\
+         }}\n"
     )
 }
 
@@ -568,14 +570,14 @@ mod tests {
         let s = caddy_route("demo", "stable", 8100);
         assert!(s.contains("@sr_demo_stable_nos path /demo\n"));
         assert!(s.contains("redir @sr_demo_stable_nos /demo/ 308\n"));
-        assert!(s.contains("@sr_demo_stable path /demo/*\n"));
-        assert!(s.contains("reverse_proxy @sr_demo_stable 127.0.0.1:8100\n"));
+        assert!(s.contains("handle_path /demo/* {\n"));
+        assert!(s.contains("reverse_proxy 127.0.0.1:8100\n"));
 
         let n = caddy_route("demo", "pr42", 8101);
         assert!(n.contains("@sr_demo_pr42_nos path /demo/pr42\n"));
         assert!(n.contains("redir @sr_demo_pr42_nos /demo/pr42/ 308\n"));
-        assert!(n.contains("@sr_demo_pr42 path /demo/pr42/*\n"));
-        assert!(n.contains("reverse_proxy @sr_demo_pr42 127.0.0.1:8101\n"));
+        assert!(n.contains("handle_path /demo/pr42/* {\n"));
+        assert!(n.contains("reverse_proxy 127.0.0.1:8101\n"));
     }
 
     // 4. policy 解析与限额判断

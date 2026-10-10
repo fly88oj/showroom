@@ -1,0 +1,7 @@
+[Unit]
+Description=Showroom autoheal (restart unhealthy/unexpected-exit containers)
+After=docker.service
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/bin/showroomctl autoheal

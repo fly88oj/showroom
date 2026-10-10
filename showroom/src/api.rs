@@ -262,7 +262,8 @@ fn stream_sha256(path: &Path) -> Result<String, ApiError> {
         }
         h.update(&buf[..n]);
     }
-    Ok(showroom_common::sha256_hex(&h.finalize()))
+    use sha2::Digest;
+    Ok(h.finalize().iter().map(|b| format!("{b:02x}")).collect())
 }
 
 /// 平台 RSA 公钥（import 通道信封用；由管理员提供，放 ~/.showroom/platform_rsa.pub）。
@@ -276,6 +277,14 @@ pub fn load_platform_pub() -> Result<rsa::RsaPublicKey, String> {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn stream_sha256_known_vector() {
+        let p = std::env::temp_dir().join("sr-sha-test.bin");
+        std::fs::write(&p, b"hello").unwrap();
+        let h = super::stream_sha256(&p).unwrap_or_default();
+        assert_eq!(h, "2cf24dba5fb0a30e26e83b2ac5b9e29e1b161e5c1fa7425e73043362938b9824");
+    }
+
     use super::*;
 
     #[test]

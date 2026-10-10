@@ -23,19 +23,23 @@ body= wrap || aes256gcm(k, zstd(docker_save_tar))
 密钥文件：用户 `~/.showroom/id_ed25519`（PEM/PKCS8 或裸 32B seed+pub，实现自定但 CLI 与服务端经 common 互认）；平台对 `/srv/showroom/state/platform_rsa{.pub}`。
 
 ## 3. HTTP API（server=showroomctl serve，127.0.0.1:8090，经 Caddy /_api/* 代理）
-| 方法路径 | 认证 | 请求 | 响应 |
-|---|---|---|---|
-| GET /_api/health | 无 | - | `{"ok":true}` |
-| GET /_api/projects | 无 | - | `{"projects":[{project,slot,owner,tag,url,status,port,mem,cpu,updated}]}` |
-| POST /_api/publish | 签名 | `{project,slot,tag,mem?,cpu?,container_port?}` | `{ok,url,port}` |
-| POST /_api/stop\|start\|rm\|rollback | 签名 | `{project,slot}` | `{ok,...}` |
-| GET /_api/logs | 签名 | `?project=&slot=&tail=100` | `{"logs":"..."}` |
-| GET /_api/env | 签名 | `?project=&slot=` | `{"env":{"DB_HOST":"…","DATABASE_URL":"…",…}}`（发布者查看连接信息的入口） |
-| POST /_api/import | 签名 | query `?project=&slot=&tag=`，body=信封 | `{ok,digest}` |
-| POST /_api/import-check | 签名 | `{image_id}` | `{present:bool}` |
+**零信息暴露原则：/_api/* 下所有端点（含 health/projects）一律要求 SR-SIG1 签名；未认证或验签失败的任何请求（无论路径是否存在、方法是否支持）统一返回 404 + `{"error":"E_AUTH"}`——不泄露路径存在性、版本、项目名等任何管理侧信息。**
 
-错误统一：HTTP 4xx/5xx + `{"error":"E_CODE","msg":"..."}`；错误码 `E_AUTH/E_NAME/E_QUOTA/E_NOTFOUND/E_STATE/E_NET`。
+| 方法路径 | 请求 | 响应 |
+|---|---|---|
+| GET /_api/health | - | `{"ok":true}` |
+| GET /_api/projects | - | `{"projects":[{project,slot,owner,tag,url,status,port,mem,cpu,updated}]}` |
+| POST /_api/publish | `{project,slot,tag,mem?,cpu?,container_port?}` | `{ok,url,port}` |
+| POST /_api/stop\|start\|rm\|rollback | `{project,slot}` | `{ok,...}` |
+| GET /_api/logs | `?project=&slot=&tail=100` | `{"logs":"..."}` |
+| GET /_api/env | `?project=&slot=` | `{"env":{…}}`（发布者查看连接信息的入口） |
+| POST /_api/import | query `?project=&slot=&tag=`，body=信封 | `{ok,digest}` |
+| POST /_api/import-check | `{image_id}` | `{present:bool}` |
+
+错误统一：HTTP 4xx/5xx + `{"error":"E_CODE","msg":"..."}`；错误码 `E_AUTH/E_NAME/E_QUOTA/E_NOTFOUND/E_STATE/E_NET`（msg 不得包含未登记公钥串以外的内部信息；验签失败与路径不存在不可区分）。
 owner 归属校验：签名 owner 必须等于 slot.conf 中 owner（publish 时 project 归属首个创建者）。
+
+**静态面（Caddy）**：`/{project}[/slot]/*` 展项页面公开；`/_bootstrap/*`（CLI/Skill 分发）**仅 site A（内网面）提供，site B（公网面）返回 404**；未来的 `/_console` 公网面仅暴露最小登录壳（登录成功前不加载任何管理资源）。
 
 ## 4. 命名与保留
 project/slot：`^[a-z0-9][a-z0-9-]{0,30}$`，project 全局唯一，保留：`v2 _api _bootstrap _console`。

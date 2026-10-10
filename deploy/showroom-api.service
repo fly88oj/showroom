@@ -1,0 +1,16 @@
+[Unit]
+Description=Showroom control-plane API
+After=network-online.target docker.service
+Wants=network-online.target docker.service
+
+[Service]
+Type=simple
+Environment=SHOWROOM_BASE_URL=http://your-host.example.com
+ExecStart=/usr/local/bin/showroomctl serve
+Restart=always
+RestartSec=3
+# 状态与配置都在 /srv/showroom
+WorkingDirectory=/srv/showroom
+
+[Install]
+WantedBy=multi-user.target

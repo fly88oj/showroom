@@ -13,14 +13,14 @@ use base64::engine::Engine as _;
 use crate::state::{self, ApiError, R};
 
 pub const REGISTRY: &str = "127.0.0.1:5000"; // SPEC §4：镜像 127.0.0.1:5000/<owner>/<project>:<tag>
-pub const MANIFEST_ACCEPT: &str = "application/vnd.docker.distribution.manifest.v2+json";
+pub const MANIFEST_ACCEPT: &str = "application/vnd.docker.distribution.manifest.v2+json, application/vnd.oci.image.manifest.v1+json, application/vnd.docker.distribution.manifest.list.v2+json, application/vnd.oci.image.index.v1+json";
 
 pub fn caddy_file() -> String {
     std::env::var("SHOWROOM_CADDY_FILE").unwrap_or_else(|_| "/etc/caddy/Caddyfile".into())
 }
 
 pub fn docker_network() -> String {
-    std::env::var("SHOWROOM_DOCKER_NET").unwrap_or_else(|_| "showroom".into())
+    std::env::var("SHOWROOM_DOCKER_NET").unwrap_or_else(|_| "showroom-net".into())
 }
 
 fn fail(what: &str, o: &Output) -> ApiError {

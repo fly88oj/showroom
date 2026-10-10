@@ -1,0 +1,7 @@
+[Unit]
+Description=Showroom reconcile (rebuild drifted containers/routes)
+After=docker.service showroom-api.service
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/bin/showroomctl reconcile

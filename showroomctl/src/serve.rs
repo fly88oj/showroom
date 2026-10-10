@@ -354,8 +354,10 @@ async fn auth(s: &S, method: &str, uri: &str, body_sha: &str, headers: &HeaderMa
         .ok_or_else(|| ApiError::new("E_AUTH", "missing Authorization"))?;
     let owner = authv.strip_prefix("SR-SIG1 ").and_then(|r| r.split(':').next()).unwrap_or("");
     let pubkeys = if owner.is_empty() { vec![] } else { state::owner_pubkeys(&s.root, owner) };
-    let v = verify_with_hash(authv, &pubkeys, method, uri, body_sha, now)
-        .map_err(|e| ApiError::new("E_AUTH", e.to_string()))?;
+    let v = verify_with_hash(authv, &pubkeys, method, uri, body_sha, now).map_err(|e| {
+        eprintln!("showroomctl: auth fail: {e:?} {method} {uri}");
+        ApiError::new("E_AUTH", e.to_string())
+    })?;
     let mut m = s.nonces.lock().unwrap();
     if !nonce_fresh(&mut m, &v.owner, &v.nonce, now) {
         return Err(ApiError::new("E_AUTH", format!("nonce replay: {}:{}", v.owner, v.nonce)));

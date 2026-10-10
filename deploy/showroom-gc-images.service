@@ -1,0 +1,7 @@
+[Unit]
+Description=Showroom image/volume/builder garbage collection
+After=docker.service
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/bin/showroomctl gc-images
