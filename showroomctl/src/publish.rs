@@ -254,7 +254,8 @@ pub fn receive_envelope(root: &Path, mut r: impl Read) -> R<(PathBuf, String)> {
     Ok((path, hex::encode(hasher.finalize())))
 }
 
-/// 已落盘信封 → common::open 解密 → zstd 解压流式喂 `docker load` → tag → push → manifest digest。
+/// 已落盘信封 → common::open 解密 →（魔数自适应：zstd / gzip / 裸 tar 直通，unpack::MagicSink）
+/// 流式喂 `docker load` → tag → push → manifest digest。
 /// 无论成败删除临时文件。common::PlatformKeys 未暴露私钥，这里经重导出的 rsa crate 直接读 PEM（同版本无类型分裂）。
 pub fn import_from_file(
     root: &Path,
@@ -279,7 +280,8 @@ fn import_inner(root: &Path, owner: &str, project: &str, tag: &str, sealed: &Pat
     let priv_key = showroom_common::rsa::RsaPrivateKey::from_pkcs8_pem(&pem)
         .map_err(|e| ApiError::state(format!("platform_rsa parse: {e}")))?;
 
-    // docker load ← zstd 解压 ← common::open 解密（单进程管道，不落第二个文件）
+    // docker load ← MagicSink（解密后前 4 字节魔数自适应：zstd 帧流（浏览器压缩/CLI zstd）
+    // / gzip 降级 / 裸 tar 直通）← common::open 解密（单进程管道，不落第二个文件）
     let mut child = Command::new("docker")
         .arg("load")
         .stdin(Stdio::piped())
@@ -288,13 +290,7 @@ fn import_inner(root: &Path, owner: &str, project: &str, tag: &str, sealed: &Pat
         .spawn()
         .map_err(|e| ApiError::state(format!("spawn docker load: {e}")))?;
     let stdin = child.stdin.take().unwrap();
-    let mut zw = match zstd::stream::write::Decoder::new(stdin) {
-        Ok(z) => z,
-        Err(e) => {
-            dockerops::kill_wait(&mut child);
-            return Err(ApiError::state(format!("zstd decoder init: {e}")));
-        }
-    };
+    let mut sink = crate::unpack::MagicSink::new(stdin);
     let plain_bytes = {
         let sealed_file = match fs::File::open(sealed) {
             Ok(f) => f,
@@ -303,7 +299,7 @@ fn import_inner(root: &Path, owner: &str, project: &str, tag: &str, sealed: &Pat
                 return Err(ApiError::state(format!("open sealed envelope: {e}")));
             }
         };
-        match showroom_common::open(&priv_key, sealed_file, &mut zw) {
+        match showroom_common::open(&priv_key, sealed_file, &mut sink) {
             Ok(n) => n,
             Err(e) => {
                 dockerops::kill_wait(&mut child);
@@ -318,11 +314,11 @@ fn import_inner(root: &Path, owner: &str, project: &str, tag: &str, sealed: &Pat
             format!("decrypted payload exceeds IMPORT_MAX_GB={}GB", cap >> 30),
         ));
     }
-    if let Err(e) = zw.flush() {
+    if let Err(e) = sink.flush() {
         dockerops::kill_wait(&mut child);
-        return Err(ApiError::state(format!("zstd flush: {e}")));
+        return Err(ApiError::state(format!("decode sink flush: {e}")));
     }
-    drop(zw); // write::Decoder 无 finish()：flush 排空缓冲，drop 关闭 docker load 的 stdin（EOF）
+    drop(sink); // zstd/gzip 解码器在 drop 收尾帧并关闭 docker load 的 stdin（EOF）
     let out = child
         .wait_with_output()
         .map_err(|e| ApiError::state(format!("docker load wait: {e}")))?;

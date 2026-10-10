@@ -17,6 +17,9 @@ base64 = "0.22"
 hex = "0.4"
 
 # wasm32 专用：getrandom 无该目标默认后端（js feature 会引 wasm-bindgen，SPEC §8.3 禁用），
-# 走 "custom" 后端桥到熵池（见 lib.rs register_custom_getrandom / wasm_shim.rs）
+# 走 "custom" 后端桥到熵池（见 lib.rs register_custom_getrandom / wasm_shim.rs）；
+# zstd 为浏览器上传压缩会话（wasm_shim sr_zstd_*；zstd-sys 的 C 源经 clang 交叉编译该目标，
+# 原生侧的解压消费方在 showroomctl——那里已直接依赖 zstd，common 原生构建不重复引入）
 [target.'cfg(target_arch = "wasm32")'.dependencies]
 getrandom = { version = "0.2", features = ["custom"] }
+zstd = "0.13"

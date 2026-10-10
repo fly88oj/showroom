@@ -25,6 +25,14 @@
 //! 同 seed + 同 push 序列 ⇒ 逐字节相同的信封，供 §8.1 断点续传在页面刷新后重放已传分片
 //! （安全等级与 localStorage 存 owner seed 的 P1 试验档一致）。
 //!
+//! zstd 压缩会话（sr_zstd_begin/push/end，与 seal 会话同构）——浏览器上传压缩统一走 zstd：
+//! 每次 push 把输入压成**一个独立完整的 zstd 帧**（帧边界即 push 边界），输出按调用顺序
+//! 拼接即为合法的拼接帧流——服务端魔数自适应的流式解码器天然跨帧续解；且每片输出仅由
+//! (level, 输入字节) 决定（zstd 无随机性），断点续传重放与原会话逐字节一致——确定性来源
+//! 是算法确定性（对照 seal 的 seed 确定性）。输出上界 = ZSTD_COMPRESSBOUND
+//! （len + len/256 + 64）；容量不足返回 -(所需字节数)（下限 40，与错误码区间区分）；
+//! 空输入（len=0）合法但不产帧（返回 0），会话无 flush/尾段概念，结束即 sr_zstd_end。
+//!
 //! ponytail 天花板（明知且接受）：sr_alloc/sr_free 为全局 HashMap 指针池，不合并碎片、
 //! 不抗双重释放以外的误用；会话表为只增不回收的 Vec 槽位；锁在 wasm 单线程下无争用。
 //! RSA 一次性密钥对会话（sr_keygen_rsa）同样不回收——单页生命周期内次数有限（db-dump
@@ -596,6 +604,97 @@ pub extern "C" fn sr_open_end(sid: i32) -> i32 {
             return Err(E_SESSION);
         }
         let mut v = OPEN_SESSIONS.lock().unwrap();
+        match v.get_mut(sid as usize - 1) {
+            Some(slot) => {
+                *slot = None;
+                Ok(0)
+            }
+            None => Err(E_SESSION),
+        }
+    })
+}
+
+// —— zstd 压缩会话（上传压缩统一；与 seal 会话同构的流式 push 模型）——
+
+struct ZstdState {
+    /// 可复用压缩上下文（跨 push 摊平 level-19 的工作区分配；每次 compress 重置参数）。
+    comp: zstd::bulk::Compressor<'static>,
+    /// push 输出暂存（容量按 ZSTD_COMPRESSBOUND 预留，跨 push 复用）。
+    buf: Vec<u8>,
+}
+
+static ZSTD_SESSIONS: Mutex<Vec<Option<ZstdState>>> = Mutex::new(Vec::new());
+
+/// zstd 压缩输出上界（ZSTD_COMPRESSBOUND 公式）：len + len/256 +（小输入固定余量 64）。
+fn zstd_bound(len: usize) -> usize {
+    len + (len >> 8) + 64
+}
+
+fn zstd_push(sid: i32, data: &[u8], out: *mut u8, cap: usize) -> Result<i32, i32> {
+    if sid <= 0 {
+        return Err(E_SESSION);
+    }
+    let mut v = ZSTD_SESSIONS.lock().unwrap();
+    let st = match v.get_mut(sid as usize - 1) {
+        Some(Some(s)) => s,
+        _ => return Err(E_SESSION),
+    };
+    if data.is_empty() {
+        return Ok(0); // 空输入不产空帧（流结束由 sr_zstd_end 承担，无尾段概念）
+    }
+    // 先压缩到内部暂存再验容量：容量不足时不写任何字节、不改变会话状态（可扩容原样重试）
+    st.buf.clear();
+    st.buf.resize(zstd_bound(data.len()), 0);
+    let n = st.comp.compress_to_buffer(data, st.buf.as_mut_slice()).map_err(|_| E_CRYPTO)?;
+    if out.is_null() || cap < n {
+        // 报告值下限 40：小输入的帧可 < 40B，须与错误码区间（|e| ≤ 7）区分
+        return Err(-(n.max(40) as i32));
+    }
+    let out_slice = unsafe { std::slice::from_raw_parts_mut(out, n) };
+    out_slice.copy_from_slice(&st.buf[..n]);
+    Ok(n as i32)
+}
+
+/// 开启 zstd 压缩会话：level 1..=22（控制台上传用 19）。返回会话句柄（>0）或负错误码。
+#[no_mangle]
+pub extern "C" fn sr_zstd_begin(level: i32) -> i32 {
+    guarded(|| {
+        if !(1..=22).contains(&level) {
+            return Err(E_ARGS);
+        }
+        let comp = zstd::bulk::Compressor::new(level).map_err(|_| E_CRYPTO)?;
+        let st = ZstdState { comp, buf: Vec::new() };
+        let mut v = ZSTD_SESSIONS.lock().unwrap();
+        v.push(Some(st)); // 槽位只增不回收（ponytail；句柄从 1 起）
+        Ok(v.len() as i32)
+    })
+}
+
+/// 推入待压缩字节：本次输入被压成**一个独立完整的 zstd 帧**（多次 push 的输出按序拼接
+/// 即为合法拼接帧流，服务端流式解码器跨帧续解）。返回本次写出的字节数；容量不足返回
+/// -(所需字节数)（下限 40）。空输入（len=0）合法但产出 0 字节；结束即 sr_zstd_end。
+#[no_mangle]
+pub extern "C" fn sr_zstd_push(
+    sid: i32,
+    data: *const u8,
+    len: usize,
+    out: *mut u8,
+    out_cap: usize,
+) -> i32 {
+    guarded(|| {
+        let data = unsafe { slice_const(data, len)?};
+        zstd_push(sid, data, out, out_cap)
+    })
+}
+
+/// 结束并丢弃压缩会话（输出为逐帧拼接的确定产物，无需收尾 flush）。
+#[no_mangle]
+pub extern "C" fn sr_zstd_end(sid: i32) -> i32 {
+    guarded(|| {
+        if sid <= 0 {
+            return Err(E_SESSION);
+        }
+        let mut v = ZSTD_SESSIONS.lock().unwrap();
         match v.get_mut(sid as usize - 1) {
             Some(slot) => {
                 *slot = None;

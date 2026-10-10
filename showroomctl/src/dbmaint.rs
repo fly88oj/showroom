@@ -385,84 +385,9 @@ pub fn dump_cleanup(root: &Path, id: &str) {
     }
 }
 
-// —— restore 输入解包（§B）：解密后的字节流兼容两种形态 ——
-// 原生 pg_dump -Fc（"PGDMP" 头，含 -Z0/-Z9 内压变体）或整体 zstd 包裹的 -Fc（28 B5 2F FD 帧头）。
-// 按前 4 字节魔数路由：zstd → 先解压再喂 pg_restore；否则直喂（pg_restore 原生兼容 -Fc 全系）。
-
-/// zstd 帧魔数。
-pub const ZSTD_MAGIC: [u8; 4] = [0x28, 0xB5, 0x2F, 0xFD];
-
-/// restore 路径选择（纯函数）：前 4 字节命中 zstd 魔数 → 需 zstd 解压；否则原生直喂。
-/// 不足 4 字节不可能是任一格式（-Fc 头 "PGDMP" ≥5B、zstd 帧头恰 4B），返回 false 由残流兜底。
-pub fn is_zstd(prefix: &[u8]) -> bool {
-    prefix.len() >= 4 && prefix[..4] == ZSTD_MAGIC
-}
-
-/// restore 数据面写入器：缓冲至 ≥4 字节后按魔数一次性选定 zstd 解压 / 直通，
-/// 缓冲期字节不丢（首写可能只到 1 字节）。W 生产为 pg_restore 的 stdin（测试用 Vec）。
-/// Broken 仅为整状态置换时的瞬时占位（构造解码器失败即上抛 io 错，之后不会再被写）。
-enum RestoreSink<W: Write> {
-    Buffering { buf: Vec<u8>, out: W },
-    Plain(W),
-    Zstd(zstd::stream::write::Decoder<'static, W>),
-    Broken,
-}
-
-impl<W: Write> RestoreSink<W> {
-    pub fn new(out: W) -> Self {
-        RestoreSink::Buffering { buf: Vec::new(), out }
-    }
-}
-
-impl<W: Write> Write for RestoreSink<W> {
-    fn write(&mut self, data: &[u8]) -> std::io::Result<usize> {
-        // 未决阶段：整状态取出，攒够 4 字节后定路（mem::replace 避免 &mut 下搬移泛型 W）
-        if matches!(self, RestoreSink::Buffering { .. }) {
-            let st = std::mem::replace(self, RestoreSink::Broken);
-            let RestoreSink::Buffering { mut buf, out } = st else { unreachable!() };
-            buf.extend_from_slice(data);
-            if buf.len() < 4 {
-                *self = RestoreSink::Buffering { buf, out };
-                return Ok(data.len());
-            }
-            if !is_zstd(&buf) {
-                let mut out = out;
-                out.write_all(&buf)?;
-                *self = RestoreSink::Plain(out);
-                return Ok(data.len());
-            }
-            match zstd::stream::write::Decoder::new(out) {
-                Ok(mut d) => {
-                    d.write_all(&buf)?;
-                    *self = RestoreSink::Zstd(d);
-                    Ok(data.len())
-                }
-                Err(e) => Err(std::io::Error::other(format!("zstd decoder init: {e}"))),
-            }
-        } else {
-            match self {
-                RestoreSink::Plain(w) => w.write(data),
-                RestoreSink::Zstd(d) => d.write(data),
-                // 未决态必经上方分支 return；此处只剩 Broken（解码器构造失败后）
-                _ => Err(std::io::Error::other("restore sink broken")),
-            }
-        }
-    }
-
-    fn flush(&mut self) -> std::io::Result<()> {
-        match self {
-            RestoreSink::Buffering { buf, out } => {
-                // 残流不足 4 字节：非任一完整格式，直通交 pg_restore 如实报错
-                let b = std::mem::take(buf);
-                out.write_all(&b)?;
-                out.flush()
-            }
-            RestoreSink::Plain(w) => w.flush(),
-            RestoreSink::Zstd(d) => d.flush(),
-            RestoreSink::Broken => Ok(()),
-        }
-    }
-}
+// —— restore 输入解包：解密后的字节流经 unpack::MagicSink 魔数自适应（zstd / gzip / 直通，
+// 与 import_inner 共用同一探测封装）——原生 pg_dump -Fc（"PGDMP" 头）直喂 pg_restore
+// （原生兼容 -Z0/-Z9 内压全系）；zstd-19 包裹（服务端 dump 生成侧或浏览器压缩）先解压。
 
 /// POST /_api/db-restore：confirm 门 → 平台私钥流式解密 →（zstd 魔数探测）→ pg_restore
 /// stdin（--clean --if-exists）。sealed（serve 收 body 落的 _tmp 文件）由调用方兜底删除；
@@ -483,7 +408,7 @@ fn restore_inner(root: &Path, p: &str, sealed: &Path) -> R<()> {
     let cap = state::Policy::load(root).import_cap_bytes();
     let db = resolve_db(p, legacyslot_of(root, p).as_deref())?.0;
 
-    // pg_restore ← RestoreSink（zstd 魔数探测）← common::open 解密
+    // pg_restore ← MagicSink（魔数自适应：zstd / gzip / 直通）← common::open 解密
     // （单进程管道：dump 不落第二份盘、不整包进内存）
     let mut child = Command::new("docker")
         .args([
@@ -497,7 +422,7 @@ fn restore_inner(root: &Path, p: &str, sealed: &Path) -> R<()> {
     let stdin = child.stdin.take().unwrap();
     let sp = sealed.to_path_buf();
     let writer = std::thread::spawn(move || -> R<u64> {
-        let mut sink = RestoreSink::new(BufWriter::new(stdin));
+        let mut sink = crate::unpack::MagicSink::new(BufWriter::new(stdin));
         let mut sf = fs::File::open(&sp)?;
         let n = showroom_common::open(&priv_key, &mut sf, &mut sink)
             .map_err(|e| ApiError::state(format!("decrypt envelope: {e}")))?;
@@ -794,7 +719,9 @@ mod tests {
         assert_eq!(plan_chunk(4 << 20, 0, 4 << 20).unwrap(), (4 << 20, true));
     }
 
-    // —— §B restore 魔数探测：zstd-19 包裹与原生 -Fc 两条路（zstd crate 真压缩样本）——
+    // —— §B restore 魔数探测：zstd-19 包裹与原生 -Fc 两条路 ——
+    // 魔数纯函数与三路由/拼接帧解包的单测在 unpack.rs（与 import_inner 共用封装）；
+    // 此处保留 dump 生成侧 ↔ restore 解包侧的一致性。
 
     /// -Fc 样式样本："PGDMP" 头 + 伪数据（真实 -Fc 由服务端 pg_dump -Z0 -Fc 产出）。
     fn fc_sample() -> Vec<u8> {
@@ -803,21 +730,23 @@ mod tests {
         v
     }
 
-    // 魔数判断纯函数：zstd 压缩产物命中；原生 -Fc / 不足 4 字节不命中
+    // dump 生成侧一致性：pg_dump -Z0 -Fc 的产物（PGDMP 头原生流）经 zstd-19 包裹后
+    // 正是 restore 侧 zstd 路径的输入形态（生成/解包两端对同一压缩容器往返）
     #[test]
-    fn zstd_magic_detection() {
+    fn dump_zstd19_roundtrip_with_sink() {
         let fc = fc_sample();
+        // 生成侧管道等价物：zstd-19 包裹（dump_seal_to 中 Encoder 的读侧效果）
         let packed = zstd::encode_all(fc.as_slice(), DUMP_ZSTD_LEVEL).unwrap();
-        assert_eq!(&packed[..4], &ZSTD_MAGIC, "zstd 帧头 28 B5 2F FD");
-        assert!(is_zstd(&packed));
-        assert!(is_zstd(&packed[..8]));
-        assert!(!is_zstd(&fc), "原生 -Fc（PGDMP 头）不命中");
-        assert!(!is_zstd(&fc[..4]));
-        assert!(!is_zstd(b"PG"), "不足 4 字节不判 zstd");
-        assert!(!is_zstd(b""));
+        // restore 侧：魔数探测 + 解压（SharedBuf 见下）
+        let b = SharedBuf(std::rc::Rc::new(std::cell::RefCell::new(vec![])));
+        let mut s = crate::unpack::MagicSink::new(b.clone());
+        s.write_all(&packed).unwrap();
+        s.flush().unwrap();
+        drop(s);
+        assert_eq!(b.0.borrow().clone(), fc);
     }
 
-    /// 共享缓冲写入器：让 RestoreSink 泛型 W 可在测试里回收输出（Rc 单线程）。
+    /// 共享缓冲写入器：让 MagicSink 泛型 W 可在测试里回收输出（Rc 单线程）。
     #[derive(Clone)]
     struct SharedBuf(std::rc::Rc<std::cell::RefCell<Vec<u8>>>);
     impl Write for SharedBuf {
@@ -828,67 +757,5 @@ mod tests {
         fn flush(&mut self) -> std::io::Result<()> {
             Ok(())
         }
-    }
-
-    fn sink_collect(sink: RestoreSink<SharedBuf>, buf: &SharedBuf) -> Vec<u8> {
-        drop(sink); // drop 关闭 zstd 解码器（排空内部缓冲）
-        buf.0.borrow().clone()
-    }
-
-    // RestoreSink 路径选择与数据面：zstd-19 包裹 → 解压还原；原生 -Fc → 直通；
-    // 分片喂入跨魔数边界不丢字节；残流不足 4 字节 flush 直通
-    #[test]
-    fn restore_sink_routes_by_magic() {
-        let fc = fc_sample();
-        let packed = zstd::encode_all(fc.as_slice(), DUMP_ZSTD_LEVEL).unwrap();
-        assert!(packed.len() < fc.len(), "可压缩样本应显著缩小说明 zstd-19 生效");
-
-        // 原生 -Fc：整段与分片喂入都直通
-        let b1 = SharedBuf(std::rc::Rc::new(std::cell::RefCell::new(vec![])));
-        let mut s1 = RestoreSink::new(b1.clone());
-        s1.write_all(&fc).unwrap();
-        s1.flush().unwrap();
-        assert_eq!(sink_collect(s1, &b1), fc);
-
-        let b2 = SharedBuf(std::rc::Rc::new(std::cell::RefCell::new(vec![])));
-        let mut s2 = RestoreSink::new(b2.clone());
-        for chunk in fc.chunks(1000) {
-            s2.write_all(chunk).unwrap();
-        }
-        s2.flush().unwrap();
-        assert_eq!(sink_collect(s2, &b2), fc);
-
-        // zstd-19 包裹：分片喂入跨魔数边界（1+3+余量）也正确解压
-        let b3 = SharedBuf(std::rc::Rc::new(std::cell::RefCell::new(vec![])));
-        let mut s3 = RestoreSink::new(b3.clone());
-        s3.write_all(&packed[..1]).unwrap();
-        s3.write_all(&packed[1..4]).unwrap();
-        for chunk in packed[4..].chunks(700) {
-            s3.write_all(chunk).unwrap();
-        }
-        s3.flush().unwrap();
-        assert_eq!(sink_collect(s3, &b3), fc, "zstd 路径还原 -Fc 明文");
-
-        // 残流不足 4 字节：flush 直通（非任一完整格式，交 pg_restore 报错）
-        let b4 = SharedBuf(std::rc::Rc::new(std::cell::RefCell::new(vec![])));
-        let mut s4 = RestoreSink::new(b4.clone());
-        s4.write_all(b"PG").unwrap();
-        s4.flush().unwrap();
-        assert_eq!(sink_collect(s4, &b4), b"PG");
-    }
-
-    // dump 生成侧一致性：pg_dump -Z0 -Fc 的产物（PGDMP 头原生流）经 zstd-19 包裹后
-    // 正是 restore 侧 zstd 路径的输入形态（生成/解包两端对同一压缩容器往返）
-    #[test]
-    fn dump_zstd19_roundtrip_with_sink() {
-        let fc = fc_sample();
-        // 生成侧管道等价物：zstd-19 包裹（dump_seal_to 中 Encoder 的读侧效果）
-        let packed = zstd::encode_all(fc.as_slice(), DUMP_ZSTD_LEVEL).unwrap();
-        // restore 侧：魔数探测 + 解压
-        let b = SharedBuf(std::rc::Rc::new(std::cell::RefCell::new(vec![])));
-        let mut s = RestoreSink::new(b.clone());
-        s.write_all(&packed).unwrap();
-        s.flush().unwrap();
-        assert_eq!(sink_collect(s, &b), fc);
     }
 }

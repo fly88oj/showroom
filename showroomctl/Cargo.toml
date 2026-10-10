@@ -13,6 +13,7 @@ serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 bcrypt = "0.15"
 zstd = "0.13"
+flate2 = "1" # gzip 降级路径的魔数自适应解包（default features = 纯 Rust miniz_oxide 后端）
 rand = "0.8"
 sha2 = "0.10"
 hex = "0.4"

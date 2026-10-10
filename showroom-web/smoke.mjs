@@ -9,8 +9,14 @@
 //   3b) SPEC §9 下行：sr_keygen_rsa → sr_rsa_{pub,priv}_pem 非空；
 //       seal（wasm 一次性对 / node 平台对）→ sr_open_begin/push/flush/end 流式解封往返
 //       （奇数分块推送 + 跨段明文 + 空明文 + 截断/坏 PEM/坏会话错误码）
+//   3c) zstd 压缩会话（上传压缩统一）：sr_zstd_begin(19)/push/end——每次 push 一个独立
+//       完整 zstd 帧，多段输出拼接后由系统 zstd CLI 解压比对（node 无内置 zstd）；
+//       同分片重放逐字节一致（断点续传前提）；空输入/坏 level/坏会话/容量探测错误码
 //   4) 错误码路径：容量不足/坏指针/坏会话
-import { readFileSync } from 'node:fs';
+import { readFileSync, writeFileSync, mkdtempSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+import { execFileSync } from 'node:child_process';
 import {
   createHash, createDecipheriv, createPrivateKey, createPublicKey,
   generateKeyPairSync, privateDecrypt, constants as rc, verify as edVerify,
@@ -257,6 +263,62 @@ function sealOneShot(pubPemBuf, input) { // 随机会话整段封包（信封全
     ok(ex.sr_open_begin(gp, gl) === -3, '坏私钥 PEM → -3'); ex.sr_free(gp, gl); }
   ok(ex.sr_open_push(9999, 0, 0, 0, 0) === -5, 'open 不存在的会话 → -5');
   ok(ex.sr_open_end(9999) === -5, 'open end 不存在的会话 → -5');
+}
+
+// —— 3c) zstd 压缩会话：独立帧 push 拼接 → 系统 zstd CLI 解压比对 + 确定性重放 + 错误码 ——
+{
+  const ZCHUNK = 8 * 1024 * 1024; // 控制台上传分片粒度（compressToBlob 同粒度）
+  const mk = (n, mod) => { const b = Buffer.alloc(n); for (let i = 0; i < n; i++) b[i] = (i * 31 + 7) % mod; return b; };
+  // > 8MB 一片 + 恰好 8MB 一片 + 尾部零头 + 单字节（跨帧边界形态全覆盖）
+  const parts = [mk(ZCHUNK + 12345, 251), mk(ZCHUNK, 199), mk(4097, 17), Buffer.from([0x00])];
+  const run = () => {
+    const sid = ex.sr_zstd_begin(19);
+    ok(sid > 0, `sr_zstd_begin(19) → 会话 ${sid}`);
+    const frames = [];
+    for (const p of parts) {
+      const [ip, il] = put(p);
+      const cap = p.length + (p.length >> 3) + 4096; // ≥ 垫片上界 len+len/256+64
+      const ob = alloc(cap);
+      const w = ex.sr_zstd_push(sid, ip, il, ob, cap);
+      if (w < 0) { ex.sr_free(ip, il); ex.sr_free(ob, cap); throw new Error(`zstd push → ${w}`); }
+      frames.push(Buffer.from(mem().subarray(ob, ob + w)));
+      ex.sr_free(ip, il); ex.sr_free(ob, cap);
+    }
+    // 空输入合法但不产帧（返回 0）
+    const ob0 = alloc(64);
+    ok(ex.sr_zstd_push(sid, 0, 0, ob0, 64) === 0, '空输入 push → 0（不产空帧）');
+    ex.sr_free(ob0, 64);
+    ok(ex.sr_zstd_end(sid) === 0, 'sr_zstd_end → 0');
+    return frames;
+  };
+  const raw = Buffer.concat(parts);
+  const f1 = run(), f2 = run();
+  ok(f1.length === parts.length, `每段产一个独立帧（${f1.length} 帧）`);
+  const z1 = Buffer.concat(f1), z2 = Buffer.concat(f2);
+  ok(z1.equals(z2), '同分片重放逐字节一致（断点续传重放前提）');
+  ok(z1.subarray(0, 4).equals(Buffer.from('28b52ffd', 'hex')), '输出首 4 字节 = zstd 魔数 28 B5 2F FD');
+  ok(z1.length < raw.length, `压缩生效：${raw.length} → ${z1.length} 字节`);
+  // node 无内置 zstd：产物落临时文件，由系统 zstd CLI 解压回读比对（多帧拼接流整体解码）
+  const dir = mkdtempSync(join(tmpdir(), 'sr-zstd-smoke-'));
+  const zf = join(dir, 'multi.zst'), of = join(dir, 'out.bin');
+  writeFileSync(zf, z1);
+  execFileSync('zstd', ['-d', '-qf', '-o', of, zf]);
+  ok(readFileSync(of).equals(raw), `系统 zstd CLI 解压拼接帧流恢复原文（${raw.length} 字节）`);
+  // 错误码：坏 level / 坏会话 / 容量探测（负值 ≤ -40 与 |e| ≤ 7 区分）
+  ok(ex.sr_zstd_begin(0) === -2 && ex.sr_zstd_begin(23) === -2, 'level 越界（0/23）→ -2');
+  ok(ex.sr_zstd_push(9999, 0, 0, 0, 0) === -5, '不存在的会话 → -5');
+  ok(ex.sr_zstd_end(9999) === -5, 'zstd end 不存在的会话 → -5');
+  {
+    const sid = ex.sr_zstd_begin(19);
+    const [ip, il] = put(Buffer.from('0123456789abcdef'));
+    const ob = alloc(8); // 容量不足
+    const r = ex.sr_zstd_push(sid, ip, il, ob, 8);
+    ok(r <= -40, `容量不足 → 负所需长度（${r}，下限 40 与错误码区分）`);
+    const cap = 4096, ob2 = alloc(cap);
+    ok(ex.sr_zstd_push(sid, ip, il, ob2, cap) > 0, '扩容后原样重试成功（会话状态未消耗）');
+    ex.sr_free(ip, il); ex.sr_free(ob, 8); ex.sr_free(ob2, cap);
+    ex.sr_zstd_end(sid);
+  }
 }
 
 // —— 4) 错误码 ——

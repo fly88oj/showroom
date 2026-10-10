@@ -199,7 +199,7 @@
           <input type="text" id="pub-mem" value="256m" list="dl-mem" size="6"></label>
         <label class="field"><span>Demo 服务监听端口（容器内）</span>
           <input type="number" id="pub-cport" value="8080" min="1" max="65535" size="5"></label>
-        <label class="field"><span>镜像 tar 文件（可选；选择后先加密分片上传再发布）</span>
+        <label class="field"><span>镜像 tar 文件（可选；选择后先压缩再加密分片上传后发布）</span>
           <input type="file" id="pub-file"></label>
         <button type="submit">发布</button>
       </div>
@@ -208,11 +208,11 @@
     <p class="note">
       发布后访问地址恒为 <span class="mono" id="pub-url">/&lt;project&gt;/</span>。
       命名规则：<span class="mono">^[a-zA-Z0-9][a-zA-Z0-9-]{0,30}$</span>（随机名 8 位字母数字，降低被字典遍历发现的门槛），保留名 <span class="mono">v2 _api _bootstrap _console</span>；项目归属首个创建者。
-      未选择文件时直接发布（要求镜像已在 registry 中）；镜像文件应为 <span class="mono">docker save … | zstd &gt; x.tar.zst</span> 产物。
+      未选择文件时直接发布（要求镜像已在 registry 中）；镜像 tar 上传前自动经 <span class="mono">zstd-19</span> 压缩再加密（已是 <span class="mono">.tar.zst</span> 则原样上传）。
     </p>
 
     <fieldset style="margin-top:.8rem">
-      <legend>镜像分片上传（8MB/片 · 逐片独立签名 · 服务端拼接后解密导入 · 断点续传）</legend>
+      <legend>镜像分片上传（压缩后 8MB/片逐片加密 · 服务端拼接解密导入 · 断点续传）</legend>
       <div class="row">
         <button id="btn-resume">恢复 / 查询上传状态</button>
         <label class="field"><span>续传用的上传编号（upload_id）</span>
@@ -223,7 +223,7 @@
         <progress id="up-prog" max="1" value="0"></progress>
         <div id="up-status" class="note">等待上传</div>
       </div>
-      <p class="note">每片失败自动重试 3 次；中断后凭上传编号 + 本地会话记录续传（需重新选择同一文件）。陈旧会话由服务端清理。</p>
+      <p class="note">上传前先在本地压缩（zstd-19，已是压缩格式则跳过），再按 8MB 分片逐片加密上传——压缩后上传更省流量；每片失败自动重试 3 次；中断后凭上传编号 + 本地会话记录续传（需重新选择同一文件，恢复时会先重新压缩以重建产物）。陈旧会话由服务端清理。</p>
     </fieldset>
     <datalist id="dl-projects"></datalist>
     <datalist id="dl-mem"><option value="128m"></option><option value="256m"></option><option value="512m"></option><option value="1g"></option></datalist>
@@ -276,9 +276,9 @@
       <div id="db-prog-txt" class="note">（备份进度：等待发起）</div>
     </div>
     <p class="note">
-      备份：浏览器生成一次性 RSA-3072 密钥对，仅公钥上行；服务端后台导出加密信封后按 4MB 分片下发，
+      备份：浏览器生成一次性 RSA-3072 密钥对，仅公钥上行；服务端后台导出（zstd-19 压缩的 -Fc）加密信封后按 4MB 分片下发，
       控制台边下载边流式解密（内存占用恒定），服务器无法解密内容。
-      恢复：文件在本地用平台公钥加密后上传，服务端解密执行恢复——需要上方「平台公钥 PEM」已配置。
+      恢复：文件在本地压缩后上传（已是 zstd 的备份产物原样），用平台公钥加密，服务端按魔数自适应解密解压执行恢复——需要上方「平台公钥 PEM」已配置。
       重置：清空并重建数据库（凭据不变，数据不可恢复）。
     </p>
     <h3>操作输出（psql 原文）</h3>
@@ -932,13 +932,54 @@ async function postChunk(uploadId, seq, ptr, len, attempt = 1) {
     throw e;
   }
 }
-/** 从 startSeq 继续上传（fresh 与 resume 共用；已 push 过的分片由调用方先行重放）。 */
-async function uploadRest(uploadId, sid, file, startSeq, sent0, total) {
-  const slices = Math.ceil(file.size / CHUNK) || 1;
+
+// —— 上传压缩（全链路 zstd 统一）：先全量压缩成 Blob（两遍法第一遍），再从压缩 Blob 分片 seal ——
+const ZSTD_LEVEL = 19;
+const isZstdHead = (b) => b && b.length >= 4 && b[0] === 0x28 && b[1] === 0xb5 && b[2] === 0x2f && b[3] === 0xfd;
+function zPush(sid, bytes) { // 返回 [written, outPtr, outCap]（独立完整 zstd 帧；调用方负责 sr_free）
+  const [ip, il] = put(bytes);
+  const cap = bytes.length + (bytes.length >> 3) + 4096; // ≥ 垫片输出上界 len+len/256+64 的安全余量
+  const ob = alloc(cap);
+  const w = ex.sr_zstd_push(sid, ip, il, ob, cap);
+  unput(ip, il);
+  if (w < 0) { unput(ob, cap); throw { error: 'E_NET', msg: `压缩分片失败（${w}）` }; }
+  return [w, ob, cap];
+}
+/** 全量压缩为 Blob（两遍法第一遍）：逐 8MB 片压成独立完整 zstd 帧（服务端流式解码跨帧续解）。
+ *  压缩产物确定性（同输入 + 同 level ⇒ 逐字节相同）是断点续传重放的前提；每片输出立即
+ *  拷贝脱离 wasm 内存后交给 Blob（浏览器 Blob 由磁盘句柄支撑，不占 JS 堆——大文件压缩
+ *  阶段内存曲线仍平坦）。 */
+async function compressToBlob(file, note) {
+  const sid = ex.sr_zstd_begin(ZSTD_LEVEL);
+  if (sid <= 0) throw { error: 'E_NET', msg: `压缩会话创建失败（${sid}）` };
+  const parts = [];
+  try {
+    for (let o = 0; o < file.size; o += CHUNK) {
+      const end = Math.min(o + CHUNK, file.size);
+      const bytes = new Uint8Array(await file.slice(o, end).arrayBuffer());
+      const [w, ob, cap] = zPush(sid, bytes);
+      if (w > 0) parts.push(new Uint8Array(mem().subarray(ob, ob + w)));
+      unput(ob, cap);
+      if (note) note(end, file.size);
+    }
+  } finally { ex.sr_zstd_end(sid); }
+  return new Blob(parts);
+}
+/** 上传载荷统一入口：文件头已是 zstd 魔数 → 原样（避免二次压缩）；否则压缩后上传。
+ *  服务端按魔数自适应解包，两种形态都正确。返回 { blob, zstd }。 */
+async function uploadPayload(file, note) {
+  const head = new Uint8Array(await file.slice(0, 4).arrayBuffer());
+  if (isZstdHead(head)) return { blob: file, zstd: true };
+  return { blob: await compressToBlob(file, note), zstd: false };
+}
+/** 从 startSeq 继续上传（fresh 与 resume 共用；已 push 过的分片由调用方先行重放）。
+ *  blob 为压缩产物 Blob（或已是 zstd 的原文件——Blob/File 分片读法一致）。 */
+async function uploadRest(uploadId, sid, blob, startSeq, sent0, total) {
+  const slices = Math.ceil(blob.size / CHUNK) || 1;
   let sent = sent0;
   for (let i = startSeq; i < slices; i++) {
-    const blob = file.slice(i * CHUNK, Math.min((i + 1) * CHUNK, file.size));
-    const bytes = new Uint8Array(await blob.arrayBuffer());
+    const part = blob.slice(i * CHUNK, Math.min((i + 1) * CHUNK, blob.size));
+    const bytes = new Uint8Array(await part.arrayBuffer());
     const [w, ob, cap] = pushSlice(sid, bytes);
     try { await postChunk(uploadId, i, ob, w); } finally { unput(ob, cap); }
     sent += w; upProgress(sent, total);
@@ -957,15 +998,14 @@ async function uploadRest(uploadId, sid, file, startSeq, sent0, total) {
 async function uploadImage(file, project, tag) {
   const pem = platformPem();
   if (!pem.startsWith('-----BEGIN PUBLIC KEY-----')) throw { error: 'E_STATE', msg: '请先在页首配置平台公钥 PEM（管理员分发的 platform_rsa.pub）' };
-  { // zstd 魔数提示（服务端按 zstd 解压）
-    const head = new Uint8Array(await file.slice(0, 4).arrayBuffer());
-    if (!(head[0] === 0x28 && head[1] === 0xb5 && head[2] === 0x2f && head[3] === 0xfd)
-        && !confirm('文件头非 zstd 魔数（28 b5 2f fd）——服务端按 zstd 压缩的镜像 tar 解压，普通 tar 可能导入失败。仍要继续吗？')) {
-      throw { error: 'E_STATE', msg: '用户取消上传（文件非 zstd 格式）' };
-    }
-  }
-  const total = sealedTotal(file.size);
-  // 会话 seed 本地持久化：页面刷新后凭 upload_id 重放已传分片（§8.1 断点续传）
+  // 两遍法第一遍：全量压缩为 Blob（已是 zstd 的文件原样），total_bytes 按压缩后长度申报
+  const { blob: zb, zstd: pre } = await uploadPayload(file, (done, raw) => {
+    $('up-status').textContent = `压缩中 ${done} / ${raw} 字节（zstd-${ZSTD_LEVEL}）…`;
+  });
+  const total = sealedTotal(zb.size);
+  $('up-status').textContent = `压缩后上传：${zb.size} / 原 ${file.size} 字节${pre ? '（文件已是 zstd，原样上传）' : ''}`;
+  // 会话 seed 本地持久化：页面刷新后凭 upload_id 重放已传分片（§8.1 断点续传；
+  // 压缩产物确定性 ⇒ 重放只需重新压缩同一文件即可重建逐字节相同的信封输入）
   const sessSeed = new Uint8Array(32); crypto.getRandomValues(sessSeed);
   let uploadId;
   try {
@@ -975,14 +1015,14 @@ async function uploadImage(file, project, tag) {
     if (e.error === 'E_QUOTA') e.msg += `（信封总长 ${total} 字节）`;
     throw e;
   }
-  localStorage.setItem('sr.up.' + uploadId, JSON.stringify({ seed: toHex(sessSeed), project, tag, size: file.size, name: file.name }));
+  localStorage.setItem('sr.up.' + uploadId, JSON.stringify({ seed: toHex(sessSeed), project, tag, size: file.size, zsize: zb.size, name: file.name }));
   refreshUpIds();
   $('up-id').value = uploadId;
   const sid = sealBegin(pem, sessSeed);
   upProgress(0, total);
-  await uploadRest(uploadId, sid, file, 0, 0, total);
+  await uploadRest(uploadId, sid, zb, 0, 0, total);
   $('up-status').textContent = '镜像导入完成。';
-  $('pub-fb').textContent = `镜像上传完成（${project}:${tag}），正在发布…`;
+  $('pub-fb').textContent = `镜像上传完成（${project}:${tag}，${pre ? '原文已是 zstd' : `压缩后 ${zb.size} / 原 ${file.size} 字节`}），正在发布…`;
 }
 async function onResumeUpload() {
   if (upBusy) return showMsg('已有上传进行中');
@@ -993,7 +1033,7 @@ async function onResumeUpload() {
   catch (e) { return apiFail('上传状态查询', e); }
   const rec = (st.received || []).length;
   const saved = JSON.parse(localStorage.getItem('sr.up.' + id) || 'null');
-  $('up-status').textContent = `会话 ${id}：服务端已收 ${rec} 片 / 共 ${Math.ceil((saved?.size || 0) / CHUNK) + 1} 片`;
+  $('up-status').textContent = `会话 ${id}：服务端已收 ${rec} 片 / 共 ${Math.ceil((saved?.zsize ?? saved?.size ?? 0) / CHUNK) + 1} 片`;
   if (!saved) return showMsg('本地无该会话记录（浏览器数据被清则无法续传，请重新上传）');
   const file = $('pub-file').files[0];
   if (!file || file.size !== saved.size) return showMsg(`恢复需在发布表单重新选择同一文件（${saved.name}，${saved.size} 字节）`);
@@ -1001,19 +1041,26 @@ async function onResumeUpload() {
   if (!pem.startsWith('-----BEGIN PUBLIC KEY-----')) return showMsg('请先在页首配置平台公钥 PEM');
   upBusy = true;
   try {
-    const total = sealedTotal(file.size);
-    const slices = Math.ceil(file.size / CHUNK) || 1;
+    // 重建压缩产物（确定性 ⇒ 与原会话逐字节相同）；旧会话记录（无 zsize）按原样直传兼容
+    const { blob: zb, zstd: pre } = await uploadPayload(file, (done, raw) => {
+      $('up-status').textContent = `重新压缩中 ${done} / ${raw} 字节（恢复续传需先重建压缩产物）…`;
+    });
+    if (saved.zsize !== undefined && saved.zsize !== zb.size) {
+      throw { error: 'E_STATE', msg: `压缩产物长度与上次不符（${zb.size} ≠ ${saved.zsize}），请确认选择的是同一文件` };
+    }
+    const total = sealedTotal(zb.size);
+    const slices = Math.ceil(zb.size / CHUNK) || 1;
     const sid = sealBegin(pem, Buffer_fromHex(saved.seed));
-    // 重放已传分片（同 seed ⇒ 逐字节相同信封；只推进会话状态，不再上传）
+    // 重放已传分片（同 seed + 同压缩产物 ⇒ 逐字节相同信封；只推进会话状态，不再上传）
     let sent = 0;
     for (let i = 0; i < Math.min(rec, slices); i++) {
-      const blob = file.slice(i * CHUNK, Math.min((i + 1) * CHUNK, file.size));
-      const bytes = new Uint8Array(await blob.arrayBuffer());
+      const part = zb.slice(i * CHUNK, Math.min((i + 1) * CHUNK, zb.size));
+      const bytes = new Uint8Array(await part.arrayBuffer());
       const [w, ob, cap] = pushSlice(sid, bytes);
       sent += w; unput(ob, cap);
     }
     upProgress(sent, total);
-    const flushBytes = (file.size % SEG) ? (file.size % SEG) + NONCE + TAG : 0; // 尾段输出量（重放公式）
+    const flushBytes = (zb.size % SEG) ? (zb.size % SEG) + NONCE + TAG : 0; // 尾段输出量（重放公式）
     if (rec === slices) { // 数据片齐，仅缺 flush 片
       const [w, ob, cap] = pushFlush(sid);
       try { await postChunk(id, slices, ob, w); } finally { unput(ob, cap); }
@@ -1021,9 +1068,9 @@ async function onResumeUpload() {
     } else if (rec === slices + 1) {
       sent += flushBytes; // flush 片也已收到，未重放只补计数
     } else {
-      await uploadRest(id, sid, file, rec, sent, total);
+      await uploadRest(id, sid, zb, rec, sent, total);
       $('up-status').textContent = '恢复完成：镜像导入完成。';
-      $('proj-fb').textContent = `镜像续传完成（${saved.project}:${saved.tag}），可在发布表单直接发布。`;
+      $('proj-fb').textContent = `镜像续传完成（${saved.project}:${saved.tag}${pre ? '' : `，压缩后 ${zb.size} 字节`}），可在发布表单直接发布。`;
       return;
     }
     if (sent !== total) throw { error: 'E_STATE', msg: `重放长度不符（${sent}/${total}），请重新上传` };
@@ -1233,14 +1280,19 @@ async function onDbRestore() {
   const pem = platformPem();
   if (!pem.startsWith('-----BEGIN PUBLIC KEY-----')) return showMsg('恢复需先在页首配置平台公钥 PEM（管理员分发的 platform_rsa.pub）');
   if (!confirm(`确认将 ${file.name}（${file.size} 字节）恢复到 ${t.project}？当前数据将被替换。`)) return;
-  $('db-fb').textContent = '正在读取并加密文件…';
+  $('db-fb').textContent = '正在压缩并加密文件…';
   try {
-    const bytes = new Uint8Array(await file.arrayBuffer());
+    // 魔数分支：已是 zstd（备份下载产物即服务端 zstd-19 包裹的 -Fc）原样上传；
+    // 原生 -Fc / 其他未压缩形态先压缩——服务端按魔数自适应解包，两态都正确。
+    const { blob: payload, zstd: pre } = await uploadPayload(file, (done, raw) => {
+      $('db-fb').textContent = `压缩中 ${done} / ${raw} 字节（zstd-${ZSTD_LEVEL}）…`;
+    });
     const sid = sealBegin(pem, crypto.getRandomValues(new Uint8Array(32)));
     const parts = [];
     const CHUNK2 = 4 * 1024 * 1024;
-    for (let o = 0; o < bytes.length; o += CHUNK2) {
-      const [w, ob, cap] = pushSlice(sid, bytes.subarray(o, Math.min(o + CHUNK2, bytes.length)));
+    for (let o = 0; o < payload.size; o += CHUNK2) {
+      const bytes = new Uint8Array(await payload.slice(o, Math.min(o + CHUNK2, payload.size)).arrayBuffer());
+      const [w, ob, cap] = pushSlice(sid, bytes);
       parts.push(new Uint8Array(mem().subarray(ob, ob + w))); // 立即拷贝脱离 wasm 内存
       unput(ob, cap);
     }
@@ -1252,7 +1304,7 @@ async function onDbRestore() {
     const j = await api('POST',
       `/_api/db-restore?project=${encodeURIComponent(t.project)}&confirm=true`, envelope);
     $('db-fb').textContent = '恢复完成';
-    dbOut(j.out || `pg_restore --clean --if-exists 完成：信封 ${envelope.length} 字节（原文件 ${bytes.length} 字节）。`);
+    dbOut(j.out || `pg_restore --clean --if-exists 完成：信封 ${envelope.length} 字节（${pre ? `文件已是 zstd（${payload.size} 字节）原样上传` : `压缩后 ${payload.size} / 原文件 ${file.size} 字节`}）。`);
   } catch (e) { $('db-fb').textContent = ''; apiFail('恢复上传', e); }
 }
 async function onDbReset() {

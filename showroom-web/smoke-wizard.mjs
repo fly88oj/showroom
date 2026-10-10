@@ -9,13 +9,17 @@
 //   4) 「导入密钥种子」分支：非法 seed 拒绝；合法 seed 进入第 3 步
 //   5) §11 去版本字段：发布表单随机 8 位项目名 +「换一个」+ URL 恒 /<project>/
 //   6) §10.4 流式消费：日志实时流（ndjson 行缓冲/1000 行帽/时间戳/开关停流）、
-//      平台事件流（sr- 过滤/心跳忽略/20 条滚动/2s 去抖刷新/断线 5s 重连）、
+//      平台事件流（sr- 过滤/心跳忽略/20 条滚动/2s 去抖刷新/断线 5 秒重连）、
 //      三段式备份下载（begin → status 两轮轮询 → 两个 4MB chunk → wasm 流式解密 → Blob 落地）
-//   7) 静态断言：「内存上限」「槽位/slot」零残留 / §10.3 与 §10.4 端点已接入 / 旧单发 db-dump 已移除
+//   7) 上传压缩统一（zstd）：发布表单选普通镜像 tar → 自动 zstd-19 压缩 → import-begin
+//      的 total_bytes 按压缩后长度申报（与独立 wasm 实例同粒度重压缩逐字节对账）；
+//      恢复上传魔数两态（已是 zstd 原样 / 原生 -Fc 压缩后），信封长度按对应载荷核算
+//   8) 静态断言：「内存上限」「槽位/slot」零残留 / §10.3 与 §10.4 端点已接入 / 旧单发 db-dump 已移除
 import { readFileSync, writeFileSync, mkdtempSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { pathToFileURL } from 'node:url';
+import { generateKeyPairSync } from 'node:crypto';
 
 let failed = 0;
 const ok = (cond, msg) => { console.log(`${cond ? 'ok  -' : 'FAIL-'} ${msg}`); if (!cond) failed++; };
@@ -124,6 +128,32 @@ function sealFor(pubPem, plain) {
   return env;
 }
 
+// —— confirm 垫片：恢复/删除等二次确认一律放行 ——
+globalThis.confirm = () => true;
+
+// —— 独立 zstd 压缩（与页面同 wasm 字节的另一实例）：对账页面 compressToBlob 的产物 ——
+function zstdAll(chunks) {
+  const sid = exW.sr_zstd_begin(19);
+  if (!(sid > 0)) throw new Error(`smoke: sr_zstd_begin → ${sid}`);
+  const parts = [];
+  for (const c of chunks) {
+    const p = exW.sr_alloc(c.length); wmem().set(c, p);
+    const cap = c.length + (c.length >> 3) + 4096;
+    const ob = exW.sr_alloc(cap);
+    const w = exW.sr_zstd_push(sid, p, c.length, ob, cap);
+    exW.sr_free(p, c.length);
+    if (w < 0) { exW.sr_free(ob, cap); throw new Error(`smoke: sr_zstd_push → ${w}`); }
+    if (w > 0) parts.push(new Uint8Array(wmem().subarray(ob, ob + w)));
+    exW.sr_free(ob, cap);
+  }
+  exW.sr_zstd_end(sid);
+  const all = new Uint8Array(parts.reduce((n, x) => n + x.length, 0));
+  let o = 0; for (const x of parts) { all.set(x, o); o += x.length; }
+  return all;
+}
+/** 信封总长公式（与页面 sealedTotal 一致，用于 total_bytes/信封长度对账）。 */
+const sealedTotal = (n) => WRAP + n + Math.ceil(n / SEG) * (NONCE + TAG);
+
 // —— fetch 垫片：wasm 服务真实字节；/_api 按 mode 返回（unregistered → 404 E_AUTH） ——
 const resp = (status, obj) => ({ ok: status < 400, status, text: async () => JSON.stringify(obj) });
 const PROJECTS = { projects: [{ project: 'demo', owner: 'alice', tag: 'v1', url: '/demo/', status: 'running', port: 8100, mem: '256m', cpu: 0, updated: '2026-10-10T12:00:00' }] };
@@ -133,6 +163,10 @@ let projectsN = 0, eventsN = 0, logsN = 0, statusN = 0;
 let lastLogsUrl = '', lastLogsAuth = '', lastEventsAuth = '', beginBody = null;
 const chunkCalls = [];
 let dumpEnv = null; // { env: 信封字节 }
+// 场景 7 捕获：分片导入 / 恢复上传
+let importBeginBody = null, importEndN = 0, publishN = 0, uploadRec = null;
+const importChunkLens = [];
+const restoreLens = [];
 // ndjson 流响应：逐行 read；close=true 发完即 done（模拟服务端收流），否则长连挂起
 function streamResp(lines, opt = {}) {
   let i = 0, closed = false;
@@ -205,6 +239,22 @@ globalThis.fetch = async (url, init = {}) => {
       headers: { get: (k) => String(k).toLowerCase() === 'x-sr-total' ? String(dumpEnv.env.length) : null },
       arrayBuffer: async () => c.buffer,
     };
+  }
+  // —— 场景 7：分片导入（压缩后上传）与恢复上传 ——
+  if (u.includes('/_api/import-begin')) {
+    importBeginBody = JSON.parse(dec2.decode(init.body));
+    return resp(200, { upload_id: 'up-smoke-1' });
+  }
+  if (u.includes('/_api/import-chunk')) {
+    importChunkLens.push(init.body?.length ?? 0);
+    if (!uploadRec) uploadRec = JSON.parse(store.get('sr.up.up-smoke-1') || 'null'); // 首片时抓本地会话记录
+    return resp(200, { ok: true });
+  }
+  if (u.includes('/_api/import-end')) { importEndN++; return resp(200, { ok: true, digest: 'sha256:smoke' }); }
+  if (u.includes('/_api/publish')) { publishN++; return resp(200, { ok: true, url: '/demo2/', port: 8101 }); }
+  if (u.includes('/_api/db-restore')) {
+    restoreLens.push(init.body?.length ?? 0);
+    return resp(200, { ok: true });
   }
   throw new Error(`smoke: 未预期的请求 ${u}`);
 };
@@ -340,6 +390,63 @@ ok(blobs.length === 1, '产物经 Blob 下载（createObjectURL 一次）');
 }
 ok(($s('db-out').textContent || '').includes('三段式下载完成'), 'dbOut 记录三段式结果');
 
+// ═══ 场景 7：上传压缩统一（zstd）——发布表单压缩后上传 + 恢复上传魔数两态 ═══
+{
+  // 平台公钥（页面 seal 信封用）：node 生成 RSA-3072 SPKI PEM
+  const plat = generateKeyPairSync('rsa', { modulusLength: 3072 });
+  $s('hd-pempub').value = plat.publicKey.export({ type: 'spki', format: 'pem' }).toString();
+  // 伪镜像 tar：9MB+123（跨 8MB 分片边界）周期性内容（可压缩）；独立实例按页面同粒度重压缩对账
+  const CHUNK8 = 8 * 1024 * 1024;
+  const raw = new Uint8Array(CHUNK8 + 123456);
+  for (let i = 0; i < raw.length; i++) raw[i] = i % 251;
+  const zref = zstdAll([raw.slice(0, CHUNK8), raw.slice(CHUNK8)]);
+  ok(Buffer.from(zref.subarray(0, 4)).toString('hex') === '28b52ffd', 'compressToBlob 产物首 4 字节 = zstd 魔数（独立实例同产物）');
+  ok(zref.length < raw.length, `压缩率 > 1（${raw.length} → ${zref.length} 字节）`);
+  ok(zstdAll([raw.slice(0, CHUNK8), raw.slice(CHUNK8)]).every((b, i) => b === zref[i]), '压缩产物确定性（重算逐字节一致）');
+
+  // 7a. 发布表单提交普通 tar → 自动压缩 → 分片导入 → 发布
+  const fakeFile = (bytes, name) => ({
+    name, size: bytes.length,
+    slice: (a, b) => { const c = bytes.slice(a, Math.min(b, bytes.length)); return { arrayBuffer: async () => c.buffer }; },
+  });
+  $s('pub-project').value = 'demo2';
+  $s('pub-tag').value = 'v2';
+  $s('pub-file').files = [fakeFile(raw, 'demo-img.tar')];
+  fire($s('pub-form'), 'submit', { preventDefault() {} });
+  ok(await waitFor(() => publishN === 1, 30000), '压缩后分片上传完成并自动发布');
+  ok(importBeginBody && importBeginBody.project === 'demo2' && importBeginBody.tag === 'v2', 'import-begin 携带项目与标签');
+  ok(importBeginBody.total_bytes === sealedTotal(zref.length),
+    `import-begin total_bytes 按压缩后长度申报（${importBeginBody.total_bytes} = 信封化 ${zref.length}）`);
+  ok(uploadRec && uploadRec.zsize === zref.length && uploadRec.size === raw.length,
+    '本地会话记录 zsize=压缩后 / size=原文件（续传重压缩对账用）');
+  ok(importChunkLens.reduce((a, b) => a + b, 0) === importBeginBody.total_bytes, '分片字节总和 = 信封总长');
+  ok(importEndN === 1 && !store.has('sr.up.up-smoke-1'), 'import-end 完成：服务端会话消费、本地记录清除');
+  ok(($s('pub-fb').textContent || '').includes('发布成功'), '发布成功回显');
+
+  // 7b. 恢复上传魔数两态：已是 zstd（备份下载产物）原样；原生 -Fc 压缩后
+  const plain = new Uint8Array(5 * 1024 * 1024 + 77); // > 4MiB：恢复信封跨 seal 段
+  for (let i = 0; i < plain.length; i++) plain[i] = (i * 31 + 7) & 0xff;
+  const dumpZ = zstdAll([plain]); // 服务端 dump 形态：整体单帧 zstd 包裹
+  ok(dumpZ.length < plain.length, `已压缩态样本可压缩（${plain.length} → ${dumpZ.length}）`);
+  $s('db-project').value = 'demo';
+  $s('db-restore-file').files = [fakeFile(dumpZ, 'demo.dump')];
+  click('btn-db-restore');
+  ok(await waitFor(() => restoreLens.length === 1, 20000), '恢复上传（已压缩态）完成');
+  ok(restoreLens[0] === sealedTotal(dumpZ.length), `已压缩态：信封按原样字节核算（${restoreLens[0]}）`);
+  ok(($s('db-out').textContent || '').includes('原样上传'), '已压缩态回显「原样上传」');
+
+  // 未压缩态：原生 -Fc 形态（PGDMP 头，魔数非 zstd → 页面压缩后上传）
+  const fcAll = new Uint8Array(plain.length);
+  fcAll.set(plain); fcAll.set(enc2.encode('PGDMP'), 0);
+  const zrefB = zstdAll([fcAll.slice(0, CHUNK8), fcAll.slice(CHUNK8)]); // 与页面同压缩粒度
+  $s('db-restore-file').files = [fakeFile(fcAll, 'demo-fc.dump')];
+  click('btn-db-restore');
+  ok(await waitFor(() => restoreLens.length === 2, 20000), '恢复上传（未压缩态）完成');
+  ok(restoreLens[1] === sealedTotal(zrefB.length), `未压缩态：信封按压缩后字节核算（${restoreLens[1]}）`);
+  ok(restoreLens[1] < sealedTotal(fcAll.length), '未压缩态经压缩后上传（信封显著小于原样信封）');
+  ok(($s('db-out').textContent || '').includes('压缩后'), '未压缩态回显「压缩后」');
+}
+
 // ═══ 场景 2：同浏览器再访（账号+种子匹配）→ 直达第 3 步自动进入 ═══
 els.clear();
 await load(2);
@@ -397,6 +504,10 @@ ok(!html.includes("'/_api/db-dump'"), '旧单发 POST /_api/db-dump 无残留');
 for (const ep of ['redis-dbs', 'redis-keys', 'redis-get']) ok(html.includes(ep), `§10.3：${ep} 已接入`);
 for (const ep of ['/_api/logs-stream', '/_api/events', '/_api/db-dump-begin', '/_api/db-dump-status', '/_api/db-dump-chunk']) ok(html.includes(ep), `§10.4：${ep} 已接入`);
 ok(!/lg-keygen|lg-importkey|lg-login|renderLoginState|doLogin\b/.test(html), '旧登录区控件/函数无残留');
+// —— 上传压缩统一（zstd）：压缩助手 / wasm 会话接线 / 文案 ——
+ok(html.includes('compressToBlob') && html.includes('uploadPayload'), '上传压缩助手 compressToBlob/uploadPayload 已接入');
+ok(html.includes('sr_zstd_begin') && html.includes('sr_zstd_push') && html.includes('sr_zstd_end'), 'wasm zstd 压缩会话（sr_zstd_*）已接线');
+ok((html.match(/压缩后上传/g) || []).length >= 1, '上传进度文案标注「压缩后上传」');
 
 console.log(failed === 0 ? '\nWIZARD SMOKE PASS' : `\nWIZARD SMOKE FAIL (${failed})`);
 process.exit(failed === 0 ? 0 : 1);
