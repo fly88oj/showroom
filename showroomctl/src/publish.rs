@@ -153,11 +153,12 @@ pub fn publish(
     };
     dockerops::psql(&sql)?;
 
-    // env 文件（SPEC §6 全字段具体化；§11 无 SHOWROOM_SLOT，BASE_PATH 恒 /<project>/）
+    // env 文件（SPEC §6 全字段具体化；§11 无 SHOWROOM_SLOT；§15.2 禁用组不注入）
     fs::create_dir_all(state::projects_dir(root))?;
+    let mw = crate::middleware::HostEnv::load(root).middleware;
     fs::write(
         state::env_path(root, project),
-        state::env_file_contents(project, &db, &db_pass, redisdb),
+        state::env_file_contents(project, &db, &db_pass, redisdb, &mw),
     )?;
 
     // 容器：同项目唯一 host 端口 → 先停旧、以 -new 起新、健康后删旧改名

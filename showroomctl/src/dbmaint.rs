@@ -468,9 +468,11 @@ pub fn reset(root: &Path, p: &str, confirm: bool) -> R<()> {
         .filter(|v| !v.is_empty())
         .ok_or_else(|| ApiError::state("env 文件缺 DB_PASSWORD"))?
         .clone();
+    // §15.2：redis 禁用时 env 无 REDIS_* —— 库号回落 conf.redisdb（重发 env 用同一集合判定）
     let redisdb: u8 = env
         .get("REDIS_DB")
         .and_then(|v| v.parse().ok())
+        .or_else(|| state::Conf::load(root, p).ok().map(|c| c.redisdb))
         .ok_or_else(|| ApiError::state("env 文件缺 REDIS_DB"))?;
 
     let mut conf = state::Conf::load(root, p)
@@ -498,7 +500,8 @@ pub fn reset(root: &Path, p: &str, confirm: bool) -> R<()> {
     dockerops::psql(&sql)?;
     conf.legacyslot = None; // 归一化在此终结
     conf.save(root, p)?;
-    fs::write(state::env_path(root, p), state::env_file_contents(p, &new_db, &db_pass, redisdb))?;
+    let mw = crate::middleware::HostEnv::load(root).middleware;
+    fs::write(state::env_path(root, p), state::env_file_contents(p, &new_db, &db_pass, redisdb, &mw))?;
     Ok(())
 }
 

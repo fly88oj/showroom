@@ -305,8 +305,18 @@ fn dispatch(cli: &Cli) -> R<()> {
 
         Cmd::Ps => {
             let rows = ops::ps(&root);
+            let disabled = middleware::disabled_middleware(&root);
             if j {
-                let v: Vec<_> = rows.iter().map(|(p, c, st)| c.to_json(p, st)).collect();
+                let v: Vec<_> = rows
+                    .iter()
+                    .map(|(p, c, st)| {
+                        let mut row = c.to_json(p, st);
+                        if !disabled.is_empty() {
+                            row["middleware_disabled"] = json!(disabled);
+                        }
+                        row
+                    })
+                    .collect();
                 println!("{}", json!({"projects": v}));
             } else {
                 println!(
@@ -320,6 +330,9 @@ fn dispatch(cli: &Cli) -> R<()> {
                         state::public_url(&p)
                     );
                 }
+                if !disabled.is_empty() {
+                    println!("note: middleware 未启用: {}（对应 env 变量组不再注入）", disabled.join(", "));
+                }
             }
             Ok(())
         }
@@ -329,11 +342,19 @@ fn dispatch(cli: &Cli) -> R<()> {
         }
         Cmd::Env { project } => {
             let m = ops::env_of(&root, project)?;
+            let disabled = middleware::disabled_middleware(&root);
             if j {
-                println!("{}", json!({"env": m}));
+                let mut v = json!({"env": m});
+                if !disabled.is_empty() {
+                    v["middleware_disabled"] = json!(disabled);
+                }
+                println!("{v}");
             } else {
                 for (k, v) in m {
                     println!("{k}={v}");
+                }
+                if !disabled.is_empty() {
+                    println!("# middleware 未启用: {}（对应 env 变量组不再注入）", disabled.join(", "));
                 }
             }
             Ok(())

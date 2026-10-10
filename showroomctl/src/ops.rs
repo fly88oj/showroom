@@ -718,10 +718,13 @@ pub fn admin_status(root: &Path) -> R<Value> {
         .into_iter()
         .map(|(name, next)| json!({"name": name, "next": next}))
         .collect();
+    // §15.3：redis 池水位常驻（与 /_api/admin/host 同源）
+    let redis_pool = crate::middleware::redis_pool_snapshot(root);
     Ok(json!({
         "services": services, "disk": disk,
         "mem": {"available_mb": mem_mb},
         "containers": containers, "timers": timers,
+        "redis_pool": redis_pool,
     }))
 }
 

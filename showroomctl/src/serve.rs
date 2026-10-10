@@ -238,9 +238,17 @@ async fn dispatch(
         ("GET", "/_api/projects", _) => {
             let root = s.root.clone();
             blk(move || {
+                // §15.2：禁用中间件的行附 middleware_disabled 标注「未启用」
+                let disabled = middleware::disabled_middleware(&root);
                 let v: Vec<_> = ops::ps(&root)
                     .into_iter()
-                    .map(|(p, c, st)| c.to_json(&p, &st))
+                    .map(|(p, c, st)| {
+                        let mut row = c.to_json(&p, &st);
+                        if !disabled.is_empty() {
+                            row["middleware_disabled"] = json!(disabled);
+                        }
+                        row
+                    })
                     .collect();
                 Ok(Json(json!({"projects": v})))
             })
@@ -496,8 +504,15 @@ async fn dispatch(
             let project = qget(&q, "project")?;
             user_check(&s.root, &project, &user)?;
             let root = s.root.clone();
-            let env = blk(move || ops::env_of(&root, &project)).await?;
-            Ok(Json(json!({"env": env})))
+            let (env, disabled) = blk(move || {
+                Ok((ops::env_of(&root, &project)?, middleware::disabled_middleware(&root)))
+            })
+            .await?;
+            let mut v = json!({"env": env});
+            if !disabled.is_empty() {
+                v["middleware_disabled"] = json!(disabled); // §15.2 标注「未启用」
+            }
+            Ok(Json(v))
         }
 
         _ => Err(ApiError::new("E_NOTFOUND", "no such endpoint")),

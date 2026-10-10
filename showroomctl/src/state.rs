@@ -276,7 +276,18 @@ pub fn public_url(p: &str) -> String {
 
 /// env 文件内容（db 传**已解析**的库名：归一化新名，或沿用的 legacy 旧名）。
 /// §11：无 SHOWROOM_SLOT，SHOWROOM_BASE_PATH 恒 /<project>/。
-pub fn env_file_contents(p: &str, db: &str, db_pass: &str, redis_db: u8) -> String {
+/// §15.2 env 自适应：mw 为启用的中间件集合——redis ∉ 集合时不再注入 REDIS_* 组（publish 照常）。
+pub fn env_file_contents(p: &str, db: &str, db_pass: &str, redis_db: u8, mw: &BTreeSet<String>) -> String {
+    let redis = if mw.contains("redis") {
+        format!(
+            "REDIS_HOST=sr-redis\n\
+             REDIS_PORT=6379\n\
+             REDIS_DB={redis_db}\n\
+             REDIS_URL=redis://sr-redis:6379/{redis_db}\n"
+        )
+    } else {
+        String::new()
+    };
     format!(
         "DB_HOST=sr-postgres\n\
          DB_PORT=5432\n\
@@ -284,10 +295,7 @@ pub fn env_file_contents(p: &str, db: &str, db_pass: &str, redis_db: u8) -> Stri
          DB_USER={db}\n\
          DB_PASSWORD={db_pass}\n\
          DATABASE_URL=postgresql://{db}:{db_pass}@sr-postgres:5432/{db}\n\
-         REDIS_HOST=sr-redis\n\
-         REDIS_PORT=6379\n\
-         REDIS_DB={redis_db}\n\
-         REDIS_URL=redis://sr-redis:6379/{redis_db}\n\
+         {redis}\
          SHOWROOM_PROJECT={p}\n\
          SHOWROOM_BASE_PATH={bp}\n",
         bp = base_path(p),
@@ -512,7 +520,15 @@ pub fn alloc_redisdb(root: &Path, policy: &Policy) -> R<u8> {
     (0..cap)
         .map(|d| d as u8)
         .find(|d| !used.contains(d))
-        .ok_or_else(|| ApiError::new("E_QUOTA", format!("redis db pool exhausted: {}/{} in use", used.len(), cap)))
+        .ok_or_else(|| {
+            // §15.3：池耗尽消息直接给扩容命令建议（池已至 u8 上限时如实说明）
+            let hint = if cap < 256 {
+                format!("；建议扩容：showroomctl middleware set redis databases={}", (cap * 2).min(256))
+            } else {
+                "；池已至上限 256（Conf.redisdb u8 承载）：请控制项目数".to_string()
+            };
+            ApiError::new("E_QUOTA", format!("redis db pool exhausted: {}/{} in use{hint}", used.len(), cap))
+        })
 }
 
 /// 用户名下项目的 redisdb 集合（§13.2 浏览隔离）：扫全部项目 conf 按 conf.user 聚合，升序去重。
@@ -1092,10 +1108,11 @@ mod tests {
         assert_eq!(Conf::parse(&c4.to_conf()).unwrap(), c4);
     }
 
-    // 2b. env 文件往返（§6 全字段具体化；§11 无 SHOWROOM_SLOT，BASE_PATH 恒 /<project>/）
+    // 2b. env 文件往返（§6 全字段具体化；§11 无 SHOWROOM_SLOT；§15.2 mw 自适应注入）
     #[test]
     fn env_file_roundtrip() {
-        let txt = env_file_contents("demo", &db_ident("demo"), "s3cret", 3);
+        let full_mw: BTreeSet<String> = ["postgres", "redis", "registry"].iter().map(|s| s.to_string()).collect();
+        let txt = env_file_contents("demo", &db_ident("demo"), "s3cret", 3, &full_mw);
         let m = parse_kv(&txt);
         assert_eq!(m["DB_HOST"], "sr-postgres");
         assert_eq!(m["DB_PORT"], "5432");
@@ -1111,11 +1128,11 @@ mod tests {
         assert_eq!(m["SHOWROOM_BASE_PATH"], "/demo/");
         assert!(!m.contains_key("SHOWROOM_SLOT"), "§11 移除 SHOWROOM_SLOT");
         // 大写/连字符项目：库名归一化，BASE_PATH 原样
-        let up = parse_kv(&env_file_contents("Demo-9", &db_ident("Demo-9"), "pw", 0));
+        let up = parse_kv(&env_file_contents("Demo-9", &db_ident("Demo-9"), "pw", 0, &full_mw));
         assert_eq!(up["DB_NAME"], "sr_Demo_9");
         assert_eq!(up["SHOWROOM_BASE_PATH"], "/Demo-9/");
         // legacy 库名沿用时 env 同样指向旧名（§9→§11 过渡期）
-        let lg = parse_kv(&env_file_contents("skill-demo", "sr_skill-demo_stable", "pw", 1));
+        let lg = parse_kv(&env_file_contents("skill-demo", "sr_skill-demo_stable", "pw", 1, &full_mw));
         assert_eq!(lg["DB_NAME"], "sr_skill-demo_stable");
         for k in [
             "DB_HOST", "DB_PORT", "DB_NAME", "DB_USER", "DB_PASSWORD", "DATABASE_URL",
@@ -1124,6 +1141,15 @@ mod tests {
         ] {
             assert!(up.contains_key(k) || m.contains_key(k), "missing {k}");
         }
+
+        // §15.2：redis 禁用 → REDIS_* 组不再注入（DB_* 照常，publish 照常）
+        let no_redis: BTreeSet<String> = ["postgres", "registry"].iter().map(|s| s.to_string()).collect();
+        let nr = env_file_contents("demo", &db_ident("demo"), "s3cret", 3, &no_redis);
+        assert!(!nr.contains("REDIS_"), "{nr}");
+        let nrm = parse_kv(&nr);
+        assert_eq!(nrm["DB_NAME"], "sr_demo");
+        assert_eq!(nrm["SHOWROOM_BASE_PATH"], "/demo/");
+        assert_eq!(nrm.len(), 8, "§15.2 缺 REDIS_* 后恰 8 键");
     }
 
     // 2c. 库名归一化 + legacy 检测沿用（§9→§11：候选按优先级，纯函数裁决）
@@ -1286,6 +1312,7 @@ mod tests {
         assert_eq!(alloc_redisdb(&root, &Policy::default()).unwrap(), 2);
 
         // 小池耗尽（§13.3）：池 4 → 依次分 2、3；占满 0-3 后 E_QUOTA，msg 含 已用/总量（4/4）
+        // 与 §15.3 扩容命令建议（池 <256 时给 databases=<cap*2>）
         let small = Policy { redis_dbs: 4, ..Policy::default() };
         assert_eq!(alloc_redisdb(&root, &small).unwrap(), 2);
         let save = |p: &str, db: u8| {
@@ -1299,11 +1326,24 @@ mod tests {
         let e = alloc_redisdb(&root, &small).unwrap_err();
         assert_eq!(e.code, "E_QUOTA", "{}", e.msg);
         assert!(e.msg.contains("4/4"), "msg 须含 已用/总量: {}", e.msg);
+        assert!(
+            e.msg.contains("showroomctl middleware set redis databases=8"),
+            "§15.3 建议: {}",
+            e.msg
+        );
         // 池收窄（REDIS_DBS=2）后 0/1 均被占 → 本池如实报耗尽（已用 4 > 总量 2 也如实带出）
         let tiny = Policy { redis_dbs: 2, ..Policy::default() };
         let e2 = alloc_redisdb(&root, &tiny).unwrap_err();
         assert_eq!(e2.code, "E_QUOTA");
         assert!(e2.msg.contains("4/2"), "{}", e2.msg);
+        // 池已至 256 上限：建议改提示 u8 承载（无扩容命令）——填满 0-255
+        for i in 4..256u16 {
+            let mut c = base_conf(1);
+            c.redisdb = i as u8;
+            c.save(&root, &format!("fill{i}")).unwrap();
+        }
+        let e3 = alloc_redisdb(&root, &Policy::default()).unwrap_err();
+        assert!(e3.msg.contains("u8"), "{}", e3.msg);
     }
 
     // 附带 b：user_redis_dbs 聚合（§13.2 浏览隔离）——按 conf.user 收集，升序去重；无项目空表

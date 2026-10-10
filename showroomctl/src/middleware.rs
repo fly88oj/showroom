@@ -576,6 +576,17 @@ pub fn redis_pool_suggestion(pool: &Value) -> Option<String> {
     ))
 }
 
+/// 禁用的中间件名单（§15.2：publish env 注入与 ps/env 标注「未启用」用）。
+pub fn disabled_middleware(root: &Path) -> Vec<String> {
+    let host = HostEnv::load(root);
+    MW_NAMES
+        .iter()
+        .copied()
+        .filter(|m| !host.middleware.contains(*m))
+        .map(str::to_string)
+        .collect()
+}
+
 // —— GET /_api/admin/host 视图（plan-15 §4）——
 
 /// host_view 纯核（drift 来源：mw 实况 + redis 漂移 + caddy/单元存在性 via observe）。
@@ -1032,15 +1043,15 @@ mod tests {
         assert!(mw_dependents(&root, "mysql").is_empty());
     }
 
-    // disabled_middleware（步5 publish/env 自适应引入）：此处经 HostEnv 断言同一语义
+    // disabled_middleware：全集启用 → 空；去 redis → ["redis"]（§15.2 标注数据源）
     #[test]
-    fn disabled_set_semantics_via_hostenv() {
+    fn disabled_middleware_list() {
         let root = troot("disabled");
         HostEnv::default_for("10.0.0.1").save(&root).unwrap();
-        assert!(HostEnv::load(&root).middleware.contains("redis"));
+        assert!(disabled_middleware(&root).is_empty());
         let mut h = HostEnv::load(&root);
         h.middleware.remove("redis");
         h.save(&root).unwrap();
-        assert!(!HostEnv::load(&root).middleware.contains("redis"));
+        assert_eq!(disabled_middleware(&root), vec!["redis".to_string()]);
     }
 }
