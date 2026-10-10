@@ -74,8 +74,10 @@ enum Cmd {
     Reconcile,
     /// 自愈：容器缺失重建 / 退出拉起 / unhealthy 重启（systemd timer）
     Autoheal,
-    /// docker 镜像/构建缓存/悬空卷清理（systemd timer）
+    /// docker 镜像/构建缓存/悬空卷清理 + _tmp 陈旧会话（>24h）清理（systemd timer）
     GcImages,
+    /// btrfs 快照 /@showroom（systemd timer）：hourly 保留 24 / daily 保留 7（SPEC §8.2）
+    Snapshot { kind: String },
     /// registry 每 repo 字典序降序保留前 5 个 tag，其余 DELETE
     GcRegistry,
     /// registry:2 garbage-collect --delete-untagged（停-扫-启）
@@ -232,7 +234,16 @@ fn dispatch(cli: &Cli) -> R<()> {
             Ok(())
         }
         Cmd::GcImages => {
-            let o = ops::gc_images()?;
+            let o = ops::gc_images(&root)?;
+            if j {
+                println!("{}", json!({"ok": true, "output": o}));
+            } else {
+                print!("{o}");
+            }
+            Ok(())
+        }
+        Cmd::Snapshot { kind } => {
+            let o = ops::snapshot(kind)?;
             if j {
                 println!("{}", json!({"ok": true, "output": o}));
             } else {

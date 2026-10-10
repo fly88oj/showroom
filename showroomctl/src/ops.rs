@@ -187,12 +187,82 @@ pub fn autoheal(root: &Path) -> Vec<String> {
     log
 }
 
-/// 本地镜像/构建缓存/悬空卷清理（systemd timer 调用）。
-pub fn gc_images() -> R<String> {
+/// 本地镜像/构建缓存/悬空卷清理（systemd timer 调用），末尾顺带清 _tmp 陈旧会话（SPEC §8.1）。
+pub fn gc_images(root: &Path) -> R<String> {
     let a = dockerops::docker(&["image", "prune", "-a", "--force"])?;
     let b = dockerops::docker(&["builder", "prune", "-f"])?;
     let c = dockerops::docker(&["volume", "prune", "-f"])?;
-    Ok(format!("{a}{b}{c}"))
+    Ok(format!("{a}{b}{c}{}", gc_tmp(root)))
+}
+
+/// 删 _tmp 下 mtime>24h 的 *.bin/*.meta（分片会话残留 + 单发 import 落盘残留 + 孤儿，含验签失败泄留）。
+fn gc_tmp(root: &Path) -> String {
+    let dir = root.join("_tmp");
+    let Ok(rd) = fs::read_dir(&dir) else { return String::new() };
+    let now = state::unix_now();
+    let mut pairs = vec![];
+    for e in rd.flatten() {
+        let p = e.path();
+        if !matches!(p.extension().and_then(|o| o.to_str()), Some("bin") | Some("meta")) {
+            continue;
+        }
+        let Some(name) = p.file_name().and_then(|o| o.to_str()).map(str::to_string) else { continue };
+        let mtime = e
+            .metadata()
+            .ok()
+            .and_then(|md| md.modified().ok())
+            .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+            .map(|d| d.as_secs())
+            .unwrap_or(0);
+        pairs.push((name, mtime));
+    }
+    let mut log = String::new();
+    for name in state::stale_tmp(&pairs, now) {
+        match fs::remove_file(dir.join(&name)) {
+            Ok(()) => log.push_str(&format!("removed stale _tmp/{name}\n")),
+            Err(e) => log.push_str(&format!("stale _tmp/{name}: {e}\n")),
+        }
+    }
+    log
+}
+
+/// btrfs 只读快照 /@showroom → /@showroom-snaps/<前缀>YYYYMMDD-HHMM，按名排序裁掉超保留数的最旧（SPEC §8.2）。
+/// btrfs 失败经 dockerops::run 带原始 stderr 返回非零，不 panic。
+pub fn snapshot(kind: &str) -> R<String> {
+    let (prefix, keep) = match kind {
+        "hourly" => ("h-", 24usize),
+        "daily" => ("d-", 7usize),
+        _ => return Err(ApiError::new("E_NAME", format!("kind must be hourly|daily, got '{kind}'"))),
+    };
+    if !Path::new("/@showroom-snaps").is_dir() {
+        dockerops::run("btrfs", &["subvolume", "create", "/@showroom-snaps"])?; // 已存在由上面的 is_dir 跳过
+    }
+    // 本地时间戳经 date 子进程（免引 chrono；本工具本就 subprocess 密集）
+    let stamp = dockerops::run("date", &["+%Y%m%d-%H%M"])?.trim().to_string();
+    let name = format!("{prefix}{stamp}");
+    dockerops::run(
+        "btrfs",
+        &["subvolume", "snapshot", "-r", "/@showroom", &format!("/@showroom-snaps/{name}")],
+    )?;
+    let mut out = format!("created /@showroom-snaps/{name}\n");
+
+    let mut names = vec![];
+    if let Ok(rd) = fs::read_dir("/@showroom-snaps") {
+        for e in rd.flatten() {
+            if let Some(n) = e.file_name().to_str() {
+                if n.starts_with(prefix) {
+                    names.push(n.to_string());
+                }
+            }
+        }
+    }
+    for old in state::prune_snapshots(&names, keep) {
+        match dockerops::run("btrfs", &["subvolume", "delete", &format!("/@showroom-snaps/{old}")]) {
+            Ok(_) => out.push_str(&format!("pruned /@showroom-snaps/{old}\n")),
+            Err(e) => eprintln!("showroomctl: prune /@showroom-snaps/{old}: {e}"),
+        }
+    }
+    Ok(out)
 }
 
 /// gc-registry：每个 repo 字典序降序保留前 5 个 tag，其余按 digest DELETE。

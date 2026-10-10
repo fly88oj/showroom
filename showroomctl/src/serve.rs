@@ -3,7 +3,7 @@
 //! 零信息暴露（SPEC §3）：/_api 下所有端点（含 health/projects）一律要求 SR-SIG1 签名；
 //! 未认证或验签失败的任何请求——无论路径是否存在、方法是否支持——统一返回
 //! 404 + {"error":"E_AUTH"}，无 msg、与路径不存在不可区分。实现为一个统一 fallback：
-//! 先收 body 算哈希（import 流式落盘、其余留内存 1MB；超限后丢弃只算哈希，硬上限 2x 截断），
+//! 先收 body 算哈希（import/import-chunk 流式落盘、其余留内存 1MB；超限后丢弃只算哈希，硬上限 2x 截断），
 //! 验签通过后才按 (method, path) 分发，不认识的报 404 E_NOTFOUND。
 
 use std::collections::HashMap;
@@ -90,7 +90,7 @@ async fn api(
 
 async fn api_inner(s: &S, method: &Method, uri: &OriginalUri, headers: &HeaderMap, body: Body) -> Result<Response, ApiError> {
     let path = uri.path().to_string();
-    let to_file = method == Method::POST && path == "/_api/import";
+    let to_file = method == Method::POST && matches!(path.as_str(), "/_api/import" | "/_api/import-chunk");
     let (sha, collected) = collect_body(&s.root, body, to_file).await?;
     // 一切端点先验签（含未知路径/方法；SPEC §3 零信息暴露）
     let owner = auth(s, method.as_str(), &uri_str(uri), &sha, headers).await?;
@@ -188,6 +188,48 @@ async fn api_inner(s: &S, method: &Method, uri: &OriginalUri, headers: &HeaderMa
             let req: IdReq = jbody(&b)?;
             let present = blk(move || Ok(ops::import_check(&req.image_id))).await?;
             Ok(Json(json!({"present": present})))
+        }
+
+        // —— 分片导入（SPEC §8.1；控制台用，CLI 单发不变）——
+
+        ("POST", "/_api/import-begin", Collected::Mem(b)) => {
+            let req: BeginReq = jbody(&b)?;
+            state::check_name("project", &req.project)?;
+            state::check_name("slot", &req.slot)?;
+            publish::check_tag(&req.tag)?;
+            publish::check_ownership(&s.root, &req.project, &owner)?;
+            let root = s.root.clone();
+            let o = owner.clone();
+            let id = blk(move || {
+                publish::import_begin(&root, &o, &req.project, &req.slot, &req.tag, &req.image_id, req.total_bytes)
+            })
+            .await?;
+            Ok(Json(json!({"upload_id": id})))
+        }
+
+        ("POST", "/_api/import-chunk", Collected::File(tmp)) => {
+            let id = qget(&q, "upload")?;
+            let seq: u64 = qget(&q, "seq")?
+                .parse()
+                .map_err(|_| ApiError::new("E_NAME", "bad seq"))?;
+            let root = s.root.clone();
+            let o = owner.clone();
+            let n = blk(move || publish::import_chunk(&root, &o, &id, seq, &tmp)).await?;
+            Ok(Json(json!({"ok": true, "received": n})))
+        }
+
+        ("GET", "/_api/import-status", _) => {
+            let id = qget(&q, "upload")?;
+            let m = publish::load_meta_owned(&s.root, &id, &owner)?;
+            Ok(Json(json!({"received": m.received, "total": m.total})))
+        }
+
+        ("POST", "/_api/import-end", _) => {
+            let id = qget(&q, "upload")?;
+            let root = s.root.clone();
+            let o = owner.clone();
+            let digest = blk(move || publish::import_end(&root, &o, &id)).await?;
+            Ok(Json(json!({"ok": true, "digest": digest})))
         }
 
         ("GET", "/_api/logs", _) => {
@@ -429,6 +471,15 @@ struct SlotReq {
 #[derive(Deserialize)]
 struct IdReq {
     image_id: String,
+}
+
+#[derive(Deserialize)]
+struct BeginReq {
+    project: String,
+    slot: String,
+    tag: String,
+    image_id: String,
+    total_bytes: u64,
 }
 
 #[cfg(test)]

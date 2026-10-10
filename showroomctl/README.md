@@ -19,8 +19,9 @@ Showroom 主机侧唯一管理工具：HTTP 控制面（`serve`）+ 全部运维
 | `owner-key-rm <owner> <kid>` / `owner-revoke <owner>` | 删公钥 / 整体吊销（展项不动） |
 | `publish <owner> <project> <slot> <tag> [--mem --cpu --container-port]` | 管理员直发通道（与 `/_api/publish` 同一内核） |
 | `stop` / `start` / `rm` / `rollback` / `ps` / `logs` / `env` | 槽位生命周期与查看（均带 `--json`） |
-| `reconcile` / `autoheal` / `gc-images` / `gc-registry` / `registry-gc` | systemd timer 运维（见 deploy/*.timer） |
-| `import <owner> <project> <slot> <tag>`（stdin=信封） | 内部镜像导入通道（`/_api/import` 复用） |
+| `reconcile` / `autoheal` / `gc-images` / `gc-registry` / `registry-gc` | systemd timer 运维（见 deploy/*.timer）；gc-images 末尾顺带清 `_tmp` 下 >24h 的 `*.bin`/`*.meta`（分片导入陈旧会话与孤儿） |
+| `snapshot hourly|daily` | btrfs 只读快照 `/@showroom` → `/@showroom-snaps/<h-|d->YYYYMMDD-HHMM`，同前缀按名排序保留最新 hourly 24 / daily 7 个（SPEC §8.2） |
+| `import <owner> <project> <slot> <tag>`（stdin=信封） | 内部镜像导入通道（`/_api/import` 复用）；大文件分片走 `/_api/import-begin|-chunk|-status|-end`（SPEC §8.1） |
 | `import-check <image_id>` | 本机 docker 是否已有该镜像 |
 | `init-keys` | 生成平台 RSA 对（已存在不覆盖；serve 启动缺失自动生成） |
 

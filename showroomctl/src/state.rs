@@ -478,6 +478,29 @@ pub fn caddy_route(project: &str, slot: &str, port: u16) -> String {
     )
 }
 
+// —— _tmp 陈旧会话筛选（SPEC §8.1：>24h 由 gc-images 顺带删）——
+
+pub const TMP_STALE_SECS: u64 = 24 * 3600;
+
+/// 陈旧 _tmp 文件筛选：给定 (名字, mtime) 与 now，返回 age>24h 应删的名字。
+/// 纯函数——mtime 由调用方喂（gc 走文件系统，测试喂 fake）。
+pub fn stale_tmp(names_mtimes: &[(String, u64)], now: u64) -> Vec<String> {
+    names_mtimes
+        .iter()
+        .filter(|(_, mt)| now.saturating_sub(*mt) > TMP_STALE_SECS)
+        .map(|(n, _)| n.clone())
+        .collect()
+}
+
+/// 快照保留裁剪（SPEC §8.2）：名字按字典序（<前缀>YYYYMMDD-HHMM 即时间序）排序，
+/// 保留最新 keep 个，返回应删的最旧列表。
+pub fn prune_snapshots(names: &[String], keep: usize) -> Vec<String> {
+    let mut v = names.to_vec();
+    v.sort();
+    let del = v.len().saturating_sub(keep);
+    v.into_iter().take(del).collect()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -654,5 +677,43 @@ mod tests {
         n.redisdb = 1;
         n.save(&root, "demo", "next").unwrap();
         assert_eq!(alloc_redisdb(&root).unwrap(), 2);
+    }
+
+    // 6. _tmp 陈旧筛选：age>24h 才删；恰 24h / 未来 mtime（时钟偏移）不删
+    #[test]
+    fn stale_tmp_filter() {
+        let now = 1_000_000u64;
+        let h = 3600u64;
+        let files = vec![
+            ("a.bin".to_string(), now - 25 * h),
+            ("b.bin".to_string(), now - 24 * h),
+            ("c.meta".to_string(), now - 23 * h),
+            ("d.bin".to_string(), now),
+            ("e.bin".to_string(), now + 100),
+        ];
+        assert_eq!(stale_tmp(&files, now), vec!["a.bin".to_string()]);
+        assert!(stale_tmp(&[], now).is_empty());
+    }
+
+    // 7. 快照保留裁剪：按名（=时间序）保最新 keep 个，删最旧的超出部分
+    #[test]
+    fn snapshot_prune() {
+        let names: Vec<String> =
+            (0..30u32).map(|i| format!("h-202601{:02}-{:02}00", 1 + i / 24, i % 24)).collect();
+        let mut sorted = names.clone();
+        sorted.sort();
+        let del = prune_snapshots(&names, 24);
+        assert_eq!(del, sorted[..6].to_vec());
+        assert_eq!(del.first().unwrap(), "h-20260101-0000");
+
+        let daily: Vec<String> = (1..=10).map(|i| format!("d-2026010{i}-1200")).collect();
+        assert_eq!(prune_snapshots(&daily, 7).len(), 3);
+
+        assert!(prune_snapshots(&names, 100).is_empty(), "不足保留数不删");
+        assert!(prune_snapshots(&[], 24).is_empty());
+        // 乱序输入同样正确（内部排序）
+        let mut shuf = names.clone();
+        shuf.reverse();
+        assert_eq!(prune_snapshots(&shuf, 24), del);
     }
 }

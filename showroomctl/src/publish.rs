@@ -2,12 +2,13 @@
 //! publish：校验→归属→配额→registry 存在→端口/redisdb→DB 重建→env→容器（-new 滚动）→路由→conf/last2。
 
 use std::fs;
-use std::io::Read;
-use std::io::Write;
+use std::io::{self, Read, Write};
 use std::net::{SocketAddr, TcpStream};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::time::Duration;
+
+use serde::{Deserialize, Serialize};
 
 use sha2::{Digest, Sha256};
 
@@ -31,6 +32,15 @@ pub fn container_name(p: &str, s: &str) -> String {
 
 pub fn image_ref(owner: &str, p: &str, tag: &str) -> String {
     format!("127.0.0.1:5000/{owner}/{p}:{tag}")
+}
+
+/// tag 非空且不含空白与 '/'（镜像 tag 语法）。
+pub fn check_tag(tag: &str) -> R<()> {
+    if tag.is_empty() || tag.chars().any(|c| c.is_whitespace() || c == '/') {
+        Err(ApiError::new("E_NAME", format!("bad tag '{tag}'")))
+    } else {
+        Ok(())
+    }
 }
 
 /// project 归属首个创建者：任一现存 slot.conf 的 owner 必须等于本次发布者。
@@ -71,9 +81,7 @@ pub fn publish(
 ) -> R<PublishOut> {
     state::check_name("project", project)?;
     state::check_name("slot", slot)?;
-    if tag.is_empty() || tag.chars().any(|c| c.is_whitespace() || c == '/') {
-        return Err(ApiError::new("E_NAME", format!("bad tag '{tag}'")));
-    }
+    check_tag(tag)?;
     check_ownership(root, project, owner)?;
     let policy = state::Policy::load(root);
     let old = state::SlotConf::load(root, project, slot).ok();
@@ -239,9 +247,7 @@ pub fn import_from_file(
 ) -> R<String> {
     state::check_name("project", project)?;
     state::check_name("slot", slot)?;
-    if tag.is_empty() || tag.chars().any(|c| c.is_whitespace() || c == '/') {
-        return Err(ApiError::new("E_NAME", format!("bad tag '{tag}'")));
-    }
+    check_tag(tag)?;
     let res = import_inner(root, owner, project, slot, tag, sealed);
     let _ = fs::remove_file(sealed);
     res
@@ -300,4 +306,216 @@ fn import_inner(root: &Path, owner: &str, project: &str, _slot: &str, tag: &str,
     dockerops::docker(&["tag", src, &target])?;
     dockerops::docker(&["push", &target])?; // 主机 root 已 docker login 127.0.0.1:5000
     dockerops::manifest_digest(root, &format!("{owner}/{project}"), tag)
+}
+
+// —— 分片导入会话（SPEC §8.1；_tmp/<id>.bin 追加 + <id>.meta JSON；陈旧 >24h 由 gc-images 清）——
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ImportMeta {
+    pub owner: String,
+    pub project: String,
+    pub slot: String,
+    pub tag: String,
+    pub image_id: String,
+    pub total: u64,
+    pub received: Vec<u64>,
+    pub created: u64,
+}
+
+/// upload_id = rand_hex(16)；只认 32 位 hex，防路径穿越。
+fn valid_upload_id(id: &str) -> bool {
+    id.len() == 32 && id.bytes().all(|b| b.is_ascii_hexdigit())
+}
+
+pub fn upload_bin(root: &Path, id: &str) -> PathBuf {
+    root.join("_tmp").join(format!("{id}.bin"))
+}
+
+pub fn upload_meta(root: &Path, id: &str) -> PathBuf {
+    root.join("_tmp").join(format!("{id}.meta"))
+}
+
+/// 读会话 meta；id 非法或不存在 → E_NOTFOUND（不泄露会话内情）。
+pub fn load_meta(root: &Path, id: &str) -> R<ImportMeta> {
+    if !valid_upload_id(id) {
+        return Err(ApiError::new("E_NOTFOUND", "no such upload"));
+    }
+    let text = fs::read_to_string(upload_meta(root, id))
+        .map_err(|_| ApiError::new("E_NOTFOUND", "no such upload"))?;
+    serde_json::from_str(&text).map_err(|e| ApiError::state(format!("upload meta parse: {e}")))
+}
+
+/// 会话归属：签名 owner 必须等于 begin 时的 owner。
+pub fn load_meta_owned(root: &Path, id: &str, owner: &str) -> R<ImportMeta> {
+    let m = load_meta(root, id)?;
+    if m.owner != owner {
+        return Err(ApiError::new("E_AUTH", format!("upload '{id}' belongs to {}", m.owner)));
+    }
+    Ok(m)
+}
+
+fn save_meta(root: &Path, id: &str, m: &ImportMeta) -> R<()> {
+    let j = serde_json::to_string(m).map_err(|e| ApiError::state(format!("meta serialize: {e}")))?;
+    fs::write(upload_meta(root, id), j)?;
+    Ok(())
+}
+
+/// begin：名字/归属/tag 已由 serve 校验；限 total ≤ IMPORT_MAX_GB → 建 .meta + 空 .bin，返回 upload_id。
+pub fn import_begin(
+    root: &Path,
+    owner: &str,
+    project: &str,
+    slot: &str,
+    tag: &str,
+    image_id: &str,
+    total_bytes: u64,
+) -> R<String> {
+    let cap = state::Policy::load(root).import_cap_bytes();
+    if total_bytes > cap {
+        return Err(ApiError::new(
+            "E_QUOTA",
+            format!("total_bytes exceeds IMPORT_MAX_GB={}GB", cap >> 30),
+        ));
+    }
+    if image_id.is_empty() {
+        return Err(ApiError::new("E_NAME", "empty image_id"));
+    }
+    check_tag(tag)?;
+    fs::create_dir_all(root.join("_tmp"))?;
+    let id = state::rand_hex(16);
+    let m = ImportMeta {
+        owner: owner.to_string(),
+        project: project.to_string(),
+        slot: slot.to_string(),
+        tag: tag.to_string(),
+        image_id: image_id.to_string(),
+        total: total_bytes,
+        received: vec![],
+        created: state::unix_now(),
+    };
+    save_meta(root, &id, &m)?;
+    fs::File::create(upload_bin(root, &id))?;
+    Ok(id)
+}
+
+/// chunk：seq 必须连续（==received.len()）→ 追加 .bin、push seq、写回 meta；返回已收片数。
+/// ponytail: 追加成功与 meta 写回之间崩溃会留多余字节，end 的 total 相等校验兜底（gc 清尸）。
+pub fn import_chunk(root: &Path, owner: &str, id: &str, seq: u64, chunk: &Path) -> R<usize> {
+    let res = import_chunk_inner(root, owner, id, seq, chunk);
+    let _ = fs::remove_file(chunk); // 落盘切片用完即删，拒绝路径也不留
+    res
+}
+
+fn import_chunk_inner(root: &Path, owner: &str, id: &str, seq: u64, chunk: &Path) -> R<usize> {
+    let mut m = load_meta_owned(root, id, owner)?;
+    if seq != m.received.len() as u64 {
+        return Err(ApiError::new(
+            "E_NAME",
+            format!("expected seq {}, got {}", m.received.len(), seq),
+        ));
+    }
+    let bin = upload_bin(root, id);
+    let have = fs::metadata(&bin).map(|s| s.len()).unwrap_or(0);
+    let n = fs::metadata(chunk).map(|s| s.len()).unwrap_or(0);
+    // begin 已限 total ≤ IMPORT_MAX_GB，故对 total 的累计帽即 IMPORT_MAX_GB 帽
+    if have + n > m.total {
+        return Err(ApiError::new("E_QUOTA", format!("chunk overflow: {have}+{n} > total {}", m.total)));
+    }
+    let mut out = fs::OpenOptions::new().append(true).open(&bin)?;
+    io::copy(&mut fs::File::open(chunk)?, &mut out)?;
+    m.received.push(seq);
+    save_meta(root, id, &m)?;
+    Ok(m.received.len())
+}
+
+/// end：归属复核 + bin 字节数必须等于 total → 复用单发 import 管道 → 删会话。
+pub fn import_end(root: &Path, owner: &str, id: &str) -> R<String> {
+    let m = load_meta_owned(root, id, owner)?;
+    check_ownership(root, &m.project, owner)?;
+    let bin = upload_bin(root, id);
+    let have = fs::metadata(&bin).map(|s| s.len()).unwrap_or(0);
+    if have != m.total {
+        return Err(ApiError::new("E_QUOTA", format!("upload incomplete: {have}/{} bytes", m.total)));
+    }
+    // import_from_file 自删 .bin（成败都删）；meta 随后删（bin 已亡，会话一次性）
+    let d = import_from_file(root, owner, &m.project, &m.slot, &m.tag, &bin)?;
+    let _ = fs::remove_file(upload_meta(root, id));
+    Ok(d)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn troot(name: &str) -> PathBuf {
+        let d = std::env::temp_dir().join(format!("srctl-pub-test-{}-{name}", std::process::id()));
+        let _ = fs::remove_dir_all(&d);
+        fs::create_dir_all(&d).unwrap();
+        d
+    }
+
+    fn chunk_file(root: &Path, bytes: &[u8]) -> PathBuf {
+        let p = root.join(format!("{}.chunk", state::rand_hex(4)));
+        fs::write(&p, bytes).unwrap();
+        p
+    }
+
+    // 分片会话：meta 往返 / id 防穿越 / seq 顺序 / 超帽 / 归属 / end 字节校验（不碰网络与 docker）
+    #[test]
+    fn import_session_flow() {
+        let root = troot("session");
+        let id = import_begin(&root, "alice", "demo", "stable", "v1", "sha256:abcd", 10).unwrap();
+        assert_eq!(id.len(), 32);
+
+        // meta 读写往返
+        let m = load_meta(&root, &id).unwrap();
+        assert_eq!(
+            (m.owner.as_str(), m.project.as_str(), m.slot.as_str(), m.tag.as_str(), m.image_id.as_str(), m.total),
+            ("alice", "demo", "stable", "v1", "sha256:abcd", 10)
+        );
+        assert_eq!(m.received, Vec::<u64>::new());
+        assert!(m.created > 0);
+
+        // 归属：他人 owner 拒绝
+        assert_eq!(load_meta_owned(&root, &id, "bob").unwrap_err().code, "E_AUTH");
+
+        // 非法 id（空 / 路径穿越 / 长度不符 / 非 hex）一律 E_NOTFOUND
+        for bad in ["", "..", "../../etc/passwd", &"x".repeat(31), &"z".repeat(32)] {
+            assert_eq!(load_meta(&root, bad).unwrap_err().code, "E_NOTFOUND", "{bad:?}");
+        }
+
+        // seq 顺序：0 → 1 通过；重复 0 与跳跃 2 拒绝
+        let c0 = chunk_file(&root, b"1234");
+        assert_eq!(import_chunk(&root, "alice", &id, 0, &c0).unwrap(), 1);
+        assert_eq!(load_meta(&root, &id).unwrap().received, vec![0u64]);
+        let c0b = chunk_file(&root, b"xxxx");
+        assert_eq!(import_chunk(&root, "alice", &id, 0, &c0b).unwrap_err().code, "E_NAME");
+        assert_eq!(import_chunk(&root, "alice", &id, 2, &c0b).unwrap_err().code, "E_NAME");
+        assert!(!c0b.exists(), "rejected chunk tmp cleaned");
+        assert_eq!(import_chunk(&root, "bob", &id, 1, &chunk_file(&root, b"xx")).unwrap_err().code, "E_AUTH");
+
+        // 超帽：累计 6+5 > total 10
+        let c1 = chunk_file(&root, b"56");
+        assert_eq!(import_chunk(&root, "alice", &id, 1, &c1).unwrap(), 2);
+        let c2 = chunk_file(&root, b"78901");
+        assert_eq!(import_chunk(&root, "alice", &id, 2, &c2).unwrap_err().code, "E_QUOTA");
+        assert_eq!(fs::read(upload_bin(&root, &id)).unwrap(), b"123456");
+        assert_eq!(load_meta(&root, &id).unwrap().received, vec![0u64, 1]);
+
+        // end：字节不等 total → E_QUOTA（在触 docker 前返回）；他人 end → E_AUTH
+        assert_eq!(import_end(&root, "alice", &id).unwrap_err().code, "E_QUOTA");
+        assert_eq!(import_end(&root, "bob", &id).unwrap_err().code, "E_AUTH");
+    }
+
+    // begin 上限与字段校验（默认 IMPORT_MAX_GB=8）
+    #[test]
+    fn import_begin_limits() {
+        let root = troot("begin");
+        assert_eq!(import_begin(&root, "alice", "demo", "stable", "v1", "sha256:x", 9 << 30).unwrap_err().code, "E_QUOTA");
+        assert_eq!(import_begin(&root, "alice", "demo", "stable", "v1", "", 10).unwrap_err().code, "E_NAME");
+        assert_eq!(import_begin(&root, "alice", "demo", "stable", "a b", "i", 10).unwrap_err().code, "E_NAME");
+        assert_eq!(import_begin(&root, "alice", "demo", "stable", "a/b", "i", 10).unwrap_err().code, "E_NAME");
+        // 8GB 边界通过
+        assert!(import_begin(&root, "alice", "demo", "stable", "v1", "i", 8 << 30).is_ok());
+    }
 }
