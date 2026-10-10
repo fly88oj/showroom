@@ -98,7 +98,7 @@ POST /_api/import-end?upload=<id>             → 拼接后走单发 import 同�
 ### 8.3 WASM 控制台（showroom-web）
 - Caddy 两站点新增 `handle_path /_console/* { root * /srv/showroom/_console; file_server }`（静态壳不含任何实例数据，登录前不暴露管理信息）。
 - 密码学层：showroom-common 增加 `crate-type=cdylib` + `#[no_mangle] extern "C"` 的 wasm32 垫片（keygen/sign_header/seal 会话式 push/finish，指针+长度进出），**不用 wasm-bindgen/wasm-pack**（零新工具链，rustup target 即可）；JS 侧直接 instantiate 调用。
-- 登录=密钥即身份（P1 档）：首访生成/导入 Ed25519（存 localStorage，页面明确告知属试验性存储），公钥串展示给管理员登记；OPAQUE 属后续。
+- 登录=账号+密码一步（§16，OPAQUE 已落）：页面自动生成/复用本机密钥（localStorage，页面明确告知属试验性存储）；密码登录自动绑定本机钥匙，公钥串登记降级为折叠的专家路径（CLI/机器用户）。
 - 功能对齐 CLI 只读+发布：列表/发布/停止/启动/删除/回滚/env/logs；镜像上传走 8.1 分片（File.slice 流式 seal，8MB/片，进度条+断点续传）。
 
 ## 9. 数据库维护（v1.2）：发布者自助管理 Schema 与数据
@@ -123,8 +123,8 @@ CLI 对应：`showroom db sql|tables|preview|dump|restore|reset`。公网全可�
 - publish 供给 DB：库不存在才建（CREATE DATABASE 不存在时）；不再幂等重建。
 
 ## 10. v1.3 修订：登录向导 / 内存准入 / Redis 查看
-### 10.1 登录改为单一向导（线性三步，替代自由表单）
-步骤1「你是谁」：输入账号名（唯一输入）。步骤2「密钥」：自动判断——浏览器已有本账号密钥→默认「使用本机已有密钥」；否则二选一按钮「新设备生成密钥」（推荐）/「从其他设备导入密钥种子」。步骤3「验证」：自动签名自测；未登记→展示公钥串+「已发给管理员，点此重试」循环；通过→进入管理界面。不再并排出现生成/导入/账号三组控件。
+### 10.1 登录向导（v1.9 起被 §16 一步登录取代，原文存档）
+原线性三步（账号→密钥选择→验证自测）自 §16 落地后不再是主路径：控制台一步登录（账号+密码，密钥生成/绑定全程无感）；旧三步流程收进「钥匙登录（CLI/机器用户）」折叠区保留（本机已有/导入种子/公钥串交管理员+重检循环），供无密码的 CI 专家账号使用。
 ### 10.2 内存需求与准入（原「内存上限」更名「内存需求」）
 - UI/CLI 文案统一为「内存需求」；语义不变（容器 --memory 硬限）。
 - publish 增加准入判断：读 /proc/meminfo 的 MemAvailable，policy 新增 RESERVE_MEM_MB（默认 1536）；`MemAvailable - RESERVE < 需求内存` → E_QUOTA，msg 给出「可用 X MB（已预留 Y MB）＜ 需求 Z MB」。policy.env 样例同步。
@@ -162,11 +162,12 @@ CLI 对应：`showroom db sql|tables|preview|dump|restore|reset`。公网全可�
 - 控制台：发布表单「一键部署」按钮——选 tar → 前端压缩 → 分片上传 → 自动 publish → 展示 URL；分步状态条（压缩中/上传 x%/发布中/完成）。
 ### 12.2 管理员（标记在 Key 上）
 - state：`tokens/<user>/<kid>.pub` 旁增加 `tokens/<user>/<kid>.admin`（空文件存在=管理员钥匙）。
-- 引导：主机 CLI `showroomctl user-add <名> --pubkey <…> --admin` 首个管理员；此后管理员可远程授权。
+- 引导：主机 CLI `showroomctl user-add <名> --gen-password --admin`（或 --pubkey，§16 起密码为主路径）首个管理员；此后管理员可远程授权。
 - 身份接口：`GET /_api/whoami`（签名）→ `{"user","kid","admin":bool}`——控制台据此显示/隐藏「管理」标签。
 - 管理接口（全部签名+管理员钥匙校验，非管理员=404 E_AUTH 与未登记不可区分；公网可用）：
-  - `GET /_api/admin/users` → 账号/钥匙(kid,admin,登记时间)/项目数
-  - `POST /_api/admin/user-add {user,pubkey,admin?}` → 返回 registry 密码（远程发卡）
+  - `GET /_api/admin/users` → 账号/钥匙(kid,admin,登记时间)/项目数/has_password（§16 未设密码徽标）
+  - `POST /_api/admin/user-add {user,pubkey?,admin?,password?|gen_password:true}` → 一次性返回 `{kid?,login_password,registry_password}` 两把密码分开发放（§16 §1.3；pubkey 与 password 至少其一）
+  - `POST /_api/admin/passwd-set {user,password?|gen:true}` → `{password}` 一次性（§16 重置/补发；不动既有钥匙）
   - `POST /_api/admin/user-revoke {user}`、`POST /_api/admin/key-rm {user,kid}`
   - `POST /_api/admin/key-admin {user,kid,admin}`（授权/收权）
   - `GET /_api/admin/status` → 服务状态(systemd is-active 四服务)、磁盘(根+@showroom)、内存(MemAvailable)、容器列表(名/状态)、timers 下次触发
@@ -230,3 +231,58 @@ CLI 对应：`showroom db sql|tables|preview|dump|restore|reset`。公网全可�
 - 项目数逼近池上限时 publish 的 redisdb 分配 E_QUOTA 消息直接给扩容命令建议。
 ### 15.4 分发
 - release 二进制经 GitHub Releases（CI 产物）+ 主机 `_bootstrap`；docs/deployment.md 改写为 setup 单命令流程（旧手工步骤降级为附录/原理说明）。
+
+## 16. v1.9：认证重设计（密码为主 / 密钥无感）
+目标体验：控制台一步登录（账号+密码），密钥生成/绑定/签名全程无感；管理员发账号时设初始密码；
+CLI `showroom login` 一次后全部子命令免密码（gh/ssh 模型）。公钥登记降级为机器对机器专家路径。
+
+### 16.1 登录协议：OPAQUE（RFC 9380，opaque-ke 3.x，Ristretto255 suite）
+- **选型**：OPAQUE——密码经盲化 OPRF 永不上线；服务端只存注册记录（信封），无离线可验证哈希；
+  每次 KE 全新临时份额天然防重放。非 PAKE 的挑战/签名方案（H(pw,挑战) 上网线即可被离线字典）
+  与 HKDF(pw) 对称凭证（可重放 bearer）均被否决。实现收口 showroom-common（两端同 crate 同
+  Suite，无互操作缝隙；argon2id 硬化由 rwd() 在盲化前外部承担——参数 m=19456KiB/t=2/p=1（OWASP），
+  盐=b"showroom-opaque-v1"+user，native/wasm 固定向量测试防漂移）。
+- **存储**（§5 增补）：`state/opaque.key`（服务端 OPRF key，b64 0600，serve 启动缺失自动生成）；
+  `state/users/<u>/pass.opaque`（注册记录 b64 0600；user-revoke 连 users 目录整删）；
+  `state/tokens/<u>/<kid>.bound`（空文件=密码绑定钥匙，受 keep-N GC）；policy.env `BOUND_KEYS_MAX`
+  （默认 5）。**两把密码分开发放**：登录密码（OPAQUE 保护）与 registry 密码（bcrypt，随 docker
+  push 以 basic-auth 走线，不可与登录密码合并——零暴露前提与轮换独立性论证见 plan-16 §1.3）。
+- **报文序列**（C=浏览器或 CLI，均走 common 同一客户端）：
+```
+C→S POST /_api/auth/login-begin  {"user":u,"ke1":b64}          # 未签名
+S→C 200 {"ke2":b64}   # 未知用户/未设密码 → crate 原生 dummy 假记录路径，仍 200（防枚举）；
+                      # 密码错误：客户端本地 finish 即失败，不产生第三请求（无线上差异）
+C→S POST /_api/auth/login-finish {"user":u,"ke3":b64}          # ke3=客户端 MAC
+S→C 200 {"bind_token":hex}   # 60s 有效、单次使用（内存）
+C→S POST /_api/auth/key-bind {"user":u,"pubkey":串}
+     Authorization: SR-SIG1 …  # 用候选钥匙签名、服务端按 body 内公钥验签（非已登记钥匙）
+     X-Sr-Bind: <bind_token>
+S→C 200 {"kid","admin"}   # 写 <kid>.pub+.bound；账号已有任一 admin 钥匙 → 新钥匙继承 admin
+                          #（密码即账号级最高凭证，控制台显式提示）；GC 旧 .bound 钥匙
+                          #（按 .pub mtime 保最近 BOUND_KEYS_MAX 把，无 .bound 的 CI 公钥不受 GC）；
+                          # 幂等（同钥匙重绑=ok）
+# 改密码（登录态，旧密码免输——已绑定钥匙即会话证明）：
+C→S POST /_api/auth/pw-begin  {"user":u,"m1":b64}    [SR-SIG1 常规]
+S→C 200 {"m2":b64}                                  # 在途注册态内存保存，60s
+C→S POST /_api/auth/pw-commit {"user":u,"record":b64} [SR-SIG1 常规]  # 原子替换记录
+# 自助下线（CLI logout --purge / 控制台「忘记此设备」）：
+C→S POST /_api/key-selfrm {"kid":k} [SR-SIG1]   # 仅允许删除请求签名所用 kid 自己
+# 登录后信任通道下发 registry 凭据（CLI login 免手工 config）：
+C→S GET  /_api/reg-cred [SR-SIG1] → {"user","registry_password"}  # 暴露面=已绑定钥匙=账号主人
+```
+- **零信息与防滥用**：/_api/auth/* 是唯一应答未签名请求的端点族；畸形/限流/ke3 拒绝/族内未知
+  路径一律 404 `{"error":"E_AUTH"}`（与未知路径逐字节一致）；login-begin 按 user（10 次/10 分）
+  +全局（120 次/10 分）双令牌桶（内存，超限同 404）；服务重启丢在途登录态，重试即可。
+- **CLI**：`showroom login [账号] [--server-lan URL] [--ephemeral]`（rpassword 交互读密码，不回显
+  不进 argv/env/ps）→ 上述序列 → 默认持久化（seed 落 key_path 0600、config 写 user/server_lan/
+  registry 凭据）；`--ephemeral` 不落任何盘（服务端 keep-N GC 收尾）。`showroom logout [--purge]`
+  清本地（--purge 追加 key-selfrm）。keygen 降为隐藏专家路径（CI 机器对机器：user-add --pubkey
+  登记，无 .bound=人工生命周期不受 GC）。doctor：未登录/自测 E_AUTH → 提示 showroom login。
+
+### 16.2 迁移与边界
+- 存量 users 无 pass.opaque → 密码登录不可用（login-begin 走 UnknownUser 同形态）；控制台文案
+  指路联系管理员（passwd-set 补发）；已有 localStorage seed / CLI 存量钥匙用户零变化。
+- **风险边界（如实声明）**：明文 HTTP 首登无信任锚——PAKE 只保证密码不泄露，主动 MITM 可中继
+  login-finish 并在 key-bind 登记自己的公钥接管账号（缓解：公网站点 B 经 Caddy TLS；LAN 不可信
+  时用 CLI 钥匙路径）；UnknownUser 假记录在响应长度/时序上有统计残差（枚举成本从一次请求升到
+  时序分析）；限流按 user 计（代理后取不到可信 IP），全局桶+rwd 计算成本抬高单价。
