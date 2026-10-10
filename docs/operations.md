@@ -1,6 +1,6 @@
 # Showroom 运维手册
 
-面向已部署主机（见 [deployment.md](deployment.md)）的日常运维：服务与 timer 清单、快照与垃圾回收、容量调整、备份恢复、故障排查与安全事件响应。命令中的 `your-host` / `<OWNER>` / `<PROJECT>` 为占位符。
+面向已部署主机（见 [deployment.md](deployment.md)）的日常运维：服务与 timer 清单、快照与垃圾回收、容量调整、备份恢复、故障排查与安全事件响应。命令中的 `your-host` / `<USER>` / `<PROJECT>` 为占位符。
 
 ## 1. 服务与 timer 清单
 
@@ -83,7 +83,7 @@ sudo vi /srv/showroom/state/policy.env
 |---|---|
 | 全量状态（conf/env/密钥/路由） | btrfs 快照（hourly/daily）+ 必要时异地同步快照子卷 |
 | 某项目的数据库 | 发布者：`showroom db dump <PROJECT> -o backup.bin.zst`（端到端加密，主机无法解密） |
-| 灾难重建 | 新主机按 [deployment.md](deployment.md) 重部署；恢复 `/srv/showroom/state`（tokens/owners/projects）与 `_middleware/` 数据卷，`showroomctl reconcile` 重建全部容器与路由 |
+| 灾难重建 | 新主机按 [deployment.md](deployment.md) 重部署；恢复 `/srv/showroom/state`（tokens/users/projects）与 `_middleware/` 数据卷，`showroomctl reconcile` 重建全部容器与路由 |
 | 单项目误删 | `state/projects/<PROJECT>.*` 删了即彻底删除；如有快照可从 `@showroom-snaps` 拷回 conf 后 `reconcile` |
 
 > `state/` 含全部公钥与 registry 凭据——快照异地存储需按密钥材料对待（加密传输与保存）。
@@ -96,11 +96,11 @@ sudo vi /srv/showroom/state/policy.env
 | 展项漂移（容器/路由被误删） | `systemctl start showroom-reconcile.service` | reconcile 幂等重建；确认 timer 在跑 |
 | publish 报 `E_QUOTA`（内存） | `grep MemAvailable /proc/meminfo` | 对比 `RESERVE_MEM_MB`；扩内存或调低需求 `--mem` |
 | publish 报 `E_QUOTA`（no free port） | `cat /srv/showroom/state/ports.reg \| wc -l` | 端口池 8100–8199 满：`showroom rm` 清理旧项目 |
-| publish 报 `E_NET` | `docker pull 127.0.0.1:5000/<OWNER>/<PROJECT>:<TAG>` | 镜像不在本机 registry：发布者重新 push；检查 registry 容器与 htpasswd |
+| publish 报 `E_NET` | `docker pull 127.0.0.1:5000/<USER>/<PROJECT>:<TAG>` | 镜像不在本机 registry：发布者重新 push；检查 registry 容器与 htpasswd |
 | import 卡住 / `_tmp` 涨 | `ls -lh /srv/showroom/_tmp/` | 分片会话 >24h 由 gc-images 清；急用手动删（确认无进行中上传） |
 | CLI 全部命令 404 E_AUTH | `journalctl -u showroom-api \| grep E_AUTH` | 公钥未登记 / 时钟偏差 >300s（NTP）/ Caddy 改写了 path；journal 里有具体原因 |
 | 磁盘告急 | `df -h / /srv/showroom`；`docker system df` | 见 §2 回收顺序 |
-| registry push 401 | `cat /srv/showroom/state/owners/<OWNER>/reg.cred`（0600） | 凭据过期/吊销：重新 owner-add 发卡 |
+| registry push 401 | `cat /srv/showroom/state/users/<USER>/reg.cred`（0600） | 凭据过期/吊销：重新 user-add 发卡 |
 | 快照失败 | `systemctl status showroom-snapshot-hourly.service` | 子卷满 / 非只读父卷；报错原文在 unit 输出 |
 | 控制台打不开 | `ls /srv/showroom/_console/` | 静态资源未部署（见 deployment §5） |
 
@@ -109,20 +109,20 @@ sudo vi /srv/showroom/state/policy.env
 详细策略见 [SECURITY.md](../SECURITY.md)。速查：
 
 ```sh
-# 1. 删除泄露的那把钥匙（kid 从清单查：showroomctl admin owners）
-sudo showroomctl owner-key-rm <OWNER> <KID>
+# 1. 删除泄露的那把钥匙（kid 从清单查：showroomctl admin users）
+sudo showroomctl user-key-rm <USER> <KID>
 
 # 2. 整账号失能（签名 + registry 登录全失效，展项不动）
-sudo showroomctl owner-revoke <OWNER>
+sudo showroomctl user-revoke <USER>
 
 # 3. 管理员权限收/授
-sudo showroomctl key-admin <OWNER> <KID> --admin false|true
+sudo showroomctl key-admin <USER> <KID> --admin false|true
 
 # 4. 重新发卡（返回一次性展示的 registry 密码）
-sudo showroomctl owner-add <OWNER> --pubkey 'ed25519:<新公钥串>'
+sudo showroomctl user-add <USER> --pubkey 'ed25519:<新公钥串>'
 
 # 管理员钥匙远程操作等价 API（任何管理员钥匙签名，公网可用）：
-#   POST /_api/admin/key-rm | owner-revoke | key-admin | owner-add ；GET /_api/admin/owners
+#   POST /_api/admin/key-rm | user-revoke | key-admin | user-add ；GET /_api/admin/users
 ```
 
 事后检查：`journalctl -u showroom-api --since "<时间>" | grep -E 'E_AUTH|admin'` 评估泄露窗口内的管理面调用痕迹。

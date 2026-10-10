@@ -23,7 +23,7 @@
 //! wasm-bindgen），熵由 JS 侧 crypto.getRandomValues 生成后经 `sr_entropy()` 注入，
 //! 驱动全局 StdRng（ChaCha12，CSPRNG）。seal 会话另支持确定性 seed（sr_seal_begin_seed）：
 //! 同 seed + 同 push 序列 ⇒ 逐字节相同的信封，供 §8.1 断点续传在页面刷新后重放已传分片
-//! （安全等级与 localStorage 存 owner seed 的 P1 试验档一致）。
+//! （安全等级与 localStorage 存 user seed 的 P1 试验档一致）。
 //!
 //! zstd 压缩会话（sr_zstd_begin/push/end，与 seal 会话同构）——浏览器上传压缩统一走 zstd：
 //! 每次 push 把输入压成**一个独立完整的 zstd 帧**（帧边界即 push 边界），输出按调用顺序
@@ -218,7 +218,7 @@ pub extern "C" fn sr_generate(seed_out: *mut u8) -> i32 {
     })
 }
 
-/// 由 32B seed 导出公钥串 "ed25519:<b64-nopad>"（与 common::OwnerKey::pub_string 逐字节一致）。
+/// 由 32B seed 导出公钥串 "ed25519:<b64-nopad>"（与 common::UserKey::pub_string 逐字节一致）。
 #[no_mangle]
 pub extern "C" fn sr_pub_string(seed: *const u8, pub_out: *mut u8, cap: usize) -> i32 {
     guarded(|| {
@@ -230,13 +230,13 @@ pub extern "C" fn sr_pub_string(seed: *const u8, pub_out: *mut u8, cap: usize) -
 }
 
 /// 生成完整 Authorization 头（与 common::sign 逐字节一致）：
-/// `SR-SIG1 <owner>:<ts>:<nonce>:<sig_b64url>`；body 取原始字节（sha256 在内部计算）。
+/// `SR-SIG1 <user>:<ts>:<nonce>:<sig_b64url>`；body 取原始字节（sha256 在内部计算）。
 #[no_mangle]
 #[allow(clippy::too_many_arguments)]
 pub extern "C" fn sr_sign_header(
     seed: *const u8,
-    owner: *const u8,
-    owner_len: usize,
+    user: *const u8,
+    user_len: usize,
     method: *const u8,
     method_len: usize,
     path_q: *const u8,
@@ -251,20 +251,20 @@ pub extern "C" fn sr_sign_header(
 ) -> i32 {
     guarded(|| {
         let arr = seed32(seed)?;
-        let owner = utf8(owner, owner_len)?;
+        let user = utf8(user, user_len)?;
         let method = utf8(method, method_len)?;
         let path = utf8(path_q, path_len)?;
         let nonce = utf8(nonce, nonce_len)?;
         let body = unsafe { slice_const(body, body_len)?};
-        if owner.is_empty() || nonce.is_empty() || method.is_empty() || path.is_empty() {
+        if user.is_empty() || nonce.is_empty() || method.is_empty() || path.is_empty() {
             return Err(E_ARGS);
         }
         let sk = SigningKey::from_bytes(&arr);
         let canonical =
-            build_canonical(&owner, ts, &nonce, &method, &path, &sha256_hex(body));
+            build_canonical(&user, ts, &nonce, &method, &path, &sha256_hex(body));
         let sig = sk.sign(canonical.as_bytes());
         let header =
-            format!("SR-SIG1 {owner}:{ts}:{nonce}:{}", URL_SAFE_NO_PAD.encode(sig.to_bytes()));
+            format!("SR-SIG1 {user}:{ts}:{nonce}:{}", URL_SAFE_NO_PAD.encode(sig.to_bytes()));
         write_cstr(&header, out, cap)
     })
 }

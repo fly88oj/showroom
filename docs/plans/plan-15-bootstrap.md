@@ -1,11 +1,11 @@
 # Plan 15：主机自举（setup）与中间件编排 — 实施方案（SPEC §15）
 
-> 状态：待实施。词汇约定：owner→user 更名已落地，本文一律用 user（现符号 `owner_add/own_check` 等按更名后 `user_add/user_check` 书写）。
+> 状态：待实施。词汇约定：owner→user 更名已落地，本文一律用 user（符号按更名后 `user_add/user_check` 书写）。
 > 基准：HEAD d5de35c。§13.3（policy REDIS_DBS）已实现；§14 仅 spec 提交（image-rm/space 端点未落）。
 
 ## 0. 主机现状事实（提炼自 deploy/ 与 docs/deployment.md，SSH 不通的兜底基线）
 
-- 根：`/srv/showroom`（btrfs `@showroom` 子卷，fstab 挂载）；目录 `state/{tokens,owners,projects,routes}`、`_middleware/{postgres,redis,registry}`、`_console`、`_tmp`、`_bootstrap`；`state/registry.htpasswd`。
+- 根：`/srv/showroom`（btrfs `@showroom` 子卷，fstab 挂载）；目录 `state/{tokens,users,projects,routes}`、`_middleware/{postgres,redis,registry}`、`_console`、`_tmp`、`_bootstrap`；`state/registry.htpasswd`。
 - 容器（手工 docker run，无代码编排）：`sr-postgres`(postgres:16-alpine + 5 个 `-c` 调优参数 + 超级用户密码 env)、`sr-redis`(redis:7-alpine，appendonly+maxmemory 512mb+allkeys-lru，**现网未带 `--databases`**=默认 16)、`sr-registry`(registry:2，127.0.0.1:5000、htpasswd、delete.enabled)。网络 `showroom-net`。
 - 单元：`showroom-api.service`（root、`SHOWROOM_BASE_URL` env、Restart=always、WorkingDirectory=/srv/showroom）+ 7 个 timer + dedup timer（`/usr/local/bin/showroom-dedup` 主机脚本，仓库内无源）。
 - Caddy：`/etc/caddy/Caddyfile`（常量），snippet `showroom-app` + site A（/v2、/_bootstrap 仅此面）+ site B（公网面，frp 时用）；`deploy/showroom-api.service` 与 `deploy/install.sh` 仍含真实 IP（开源卫生遗留）。

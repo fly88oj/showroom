@@ -15,7 +15,7 @@ cp target/release/showroom ~/.local/bin/   # 或任意 PATH 目录
 
 ```sh
 showroom keygen                                            # 生成密钥，把打印的公钥串发给管理员登记
-showroom config --owner alice --server-lan http://<内网地址> \
+showroom config --user alice --server-lan http://<内网地址> \
     --server-public http://<公网地址:端口> \
     --registry-user alice --registry-password <registry密码>  # 写 ~/.showroom/config.toml（0600）
 showroom push demo v1                                      # 推镜像：lan 可达走 registry，否则加密 import 通道

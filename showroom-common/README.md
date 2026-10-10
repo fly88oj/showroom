@@ -10,8 +10,8 @@ SPEC.md §1（SR-SIG1 签名认证）与 §2（加密信封 v1）的契约实现
 pub const SIG_WINDOW_SECS: i64 = 300;
 pub type Result<T> = std::result::Result<T, Box<dyn std::error::Error>>;
 
-pub struct OwnerKey(/* ed25519_dalek::SigningKey */);
-impl OwnerKey {
+pub struct UserKey(/* ed25519_dalek::SigningKey */);
+impl UserKey {
     pub fn generate() -> Self;
     pub fn from_seed_file(path: &Path) -> Result<Self>;   // 裸 32B seed 文件
     pub fn save_seed(&self, path: &Path) -> Result<()>;    // 裸 32B seed，权限 0600
@@ -19,11 +19,11 @@ impl OwnerKey {
     pub fn from_pub_string(s: &str) -> Result<ed25519_dalek::VerifyingKey>;
 }
 
-pub fn build_canonical(owner: &str, ts: i64, nonce: &str, method: &str,
+pub fn build_canonical(user: &str, ts: i64, nonce: &str, method: &str,
                        path_with_query: &str, body_sha256_hex: &str) -> String;
-pub fn sign(owner: &str, key: &OwnerKey, method: &str, path_with_query: &str,
+pub fn sign(user: &str, key: &UserKey, method: &str, path_with_query: &str,
             body: &[u8], now_unix: i64, nonce: &str) -> String; // 完整 Authorization 值
-pub struct Verified { pub owner: String, pub ts: i64, pub nonce: String }
+pub struct Verified { pub user: String, pub ts: i64, pub nonce: String }
 pub fn verify(auth_value: &str, pubkeys: &[ed25519_dalek::VerifyingKey], method: &str,
               path_with_query: &str, body: &[u8], now_unix: i64)
     -> std::result::Result<Verified, AuthError>; // nonce 查重由调用方做
@@ -53,14 +53,14 @@ use showroom_common::*; // 含重导出的 ed25519_dalek / rsa
 use std::io::Cursor;
 
 // —— 签名请求（CLI 端）——
-let key = OwnerKey::from_seed_file(home.join(".showroom/id_ed25519").as_path())?;
+let key = UserKey::from_seed_file(home.join(".showroom/id_ed25519").as_path())?;
 let nonce = "0f1e2d3c4b5a6978"; // 8 随机字节 hex16，调用方生成
 let auth = sign("alice", &key, "POST", "/_api/publish", body, now_unix, nonce);
 // 请求头：Authorization: <auth>
 
 // —— 验签（服务端）——
-let v = verify(&auth, &[OwnerKey::from_pub_string(&pub_str)?], "POST", path_q, body, now)?;
-// 之后用 v.nonce 做 per-owner 查重（LRU）
+let v = verify(&auth, &[UserKey::from_pub_string(&pub_str)?], "POST", path_q, body, now)?;
+// 之后用 v.nonce 做 per-user 查重（LRU）
 
 // —— 加密信封（import 通道）——
 let pub_pem = std::fs::read_to_string("/srv/showroom/state/platform_rsa.pub")?;

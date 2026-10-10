@@ -77,7 +77,7 @@
   .wz-step.skip { opacity: .45; }
   #dp-bar.err #dp-text { color: #ff9aa5; }
   .dp-url { font-size: 20px; font-weight: 700; color: #7fd88f; word-break: break-all; }
-  .ad-owner-row td { background: #14161a; border-bottom: 1px solid #343b47; }
+  .ad-user-row td { background: #14161a; border-bottom: 1px solid #343b47; }
   a { color: #79b8ff; }
   fieldset { border: 1px solid #2a2f39; border-radius: 6px; margin: 0 0 .6rem; }
   legend { color: #8fa0b5; font-size: 12px; padding: 0 .3rem; }
@@ -126,16 +126,16 @@
 
   <!-- 步骤 1「你是谁」：唯一控件 = 账号输入 + 下一步 -->
   <div class="wz-pane" id="wz-p1">
-    <label class="field" for="wz-owner"><span>账号（发布者账号）</span>
-      <input type="text" id="wz-owner" placeholder="如 alice…" size="14" pattern="[a-z0-9][a-z0-9-]{0,30}" autocomplete="username" aria-describedby="wz-owner-err"></label>
-    <p class="ferr" id="wz-owner-err" aria-live="polite"></p>
+    <label class="field" for="wz-user"><span>账号（发布者账号）</span>
+      <input type="text" id="wz-user" placeholder="如 alice…" size="14" pattern="[a-z0-9][a-z0-9-]{0,30}" autocomplete="username" aria-describedby="wz-user-err"></label>
+    <p class="ferr" id="wz-user-err" aria-live="polite"></p>
     <div class="row" style="margin-top:.6rem"><button id="wz-next1">下一步</button></div>
   </div>
 
   <!-- 步骤 2「选择密钥」：自动检测本机存量，单选三选一（导入时才出现粘贴框） -->
   <div class="wz-pane hidden" id="wz-p2">
     <fieldset>
-      <legend>为账号 <span class="mono" id="wz-ownerEcho"></span> 选择密钥</legend>
+      <legend>为账号 <span class="mono" id="wz-userEcho"></span> 选择密钥</legend>
       <div id="wz-key-choices">
         <label class="row" id="wz-l-use" for="wz-r-use" style="gap:.4rem"><input type="radio" name="wz-key" id="wz-r-use"><span>使用本机已有密钥（指纹 <span class="mono" id="wz-fp"></span>）</span></label>
         <label class="row" for="wz-r-new" style="gap:.4rem"><input type="radio" name="wz-key" id="wz-r-new"><span id="wz-new-text">生成新密钥</span></label>
@@ -154,10 +154,10 @@
 
   <!-- 步骤 3「验证」：自动签名自测；未登记 → 展示公钥串等待登记，点【重新检测】循环；通过 → 自动进入管理界面 -->
   <div class="wz-pane hidden" id="wz-p3">
-    <p class="note">账号 <span class="mono" id="wz-v-owner"></span> · 密钥指纹 <span class="mono" id="wz-v-fp"></span></p>
+    <p class="note">账号 <span class="mono" id="wz-v-user"></span> · 密钥指纹 <span class="mono" id="wz-v-fp"></span></p>
     <p class="fb" id="wz-v-fb" aria-live="polite"></p>
     <div id="wz-pubbox" class="hidden">
-      <p class="note">尚未登记：把下方公钥串发给管理员登记（<span class="mono">showroomctl owner-add &lt;账号&gt; --pubkey &lt;公钥串&gt;</span>），登记后点【重新检测】。</p>
+      <p class="note">尚未登记：把下方公钥串发给管理员登记（<span class="mono">showroomctl user-add &lt;账号&gt; --pubkey &lt;公钥串&gt;</span>），登记后点【重新检测】。</p>
       <div class="row" style="align-items:center;gap:.6rem;flex-wrap:nowrap">
         <code id="wz-pub" class="pub"></code>
         <button id="wz-copypub">复制公钥</button>
@@ -175,7 +175,7 @@
     <div class="row" style="justify-content:space-between">
       <h1>Showroom 控制台</h1>
       <span class="row" style="gap:.8rem">
-        <span class="note">账号 <span class="mono" id="hd-owner"></span></span>
+        <span class="note">账号 <span class="mono" id="hd-user"></span></span>
         <span class="note">服务器 <span class="mono" id="hd-srv"></span></span>
         <button id="btn-logout">退出登录</button>
       </span>
@@ -443,7 +443,7 @@
       <thead><tr><th>控制台功能</th><th>CLI 等价命令</th></tr></thead>
       <tbody>
         <tr><td>生成密钥</td><td class="mono">showroom keygen</td></tr>
-        <tr><td>登记公钥（管理员）</td><td class="mono">showroomctl owner-add &lt;账号&gt; --pubkey &lt;公钥串&gt;</td></tr>
+        <tr><td>登记公钥（管理员）</td><td class="mono">showroomctl user-add &lt;账号&gt; --pubkey &lt;公钥串&gt;</td></tr>
         <tr><td>展项列表</td><td class="mono">showroom ps</td></tr>
         <tr><td>一键部署 / 仅上传 / 部署（选镜像）</td><td class="mono">showroom deploy / push / publish</td></tr>
         <tr><td>启动 / 停止 / 回滚 / 删除</td><td class="mono">showroom start / stop / rollback / rm</td></tr>
@@ -486,11 +486,11 @@
       <h2>账号与钥匙</h2>
       <div class="row" style="margin-bottom:.4rem">
         <button id="ad-refresh">刷新</button>
-        <button id="ad-owner-add">发放新账号</button>
+        <button id="ad-user-add">发放新账号</button>
         <span class="fb" id="ad-fb" aria-live="polite" style="margin:0"></span>
       </div>
       <div class="tbl-wrap">
-        <table id="ad-owners-tbl">
+        <table id="ad-users-tbl">
           <thead><tr><th>钥匙 kid</th><th>管理员</th><th>登记时间</th><th>操作</th></tr></thead>
           <tbody><tr><td colspan="4" class="note">未加载</td></tr></tbody>
         </table>
@@ -508,12 +508,12 @@
     </section>
 
     <!-- 发放新账号（远程发卡）：账号名 + 公钥粘贴 + 管理员勾选 → registry 密码仅显示一次 -->
-    <dialog id="dlg-owner-add" aria-labelledby="dlg-owner-add-title">
-      <h2 style="display:inline" id="dlg-owner-add-title">发放新账号</h2>
+    <dialog id="dlg-user-add" aria-labelledby="dlg-user-add-title">
+      <h2 style="display:inline" id="dlg-user-add-title">发放新账号</h2>
       <button type="button" id="ad-na-close" style="float:right">关闭</button>
-      <label class="field" for="ad-na-owner"><span>账号名（<span class="mono">^[a-z0-9][a-z0-9-]{0,30}$</span>）</span>
-        <input type="text" id="ad-na-owner" size="14" pattern="[a-z0-9][a-z0-9-]{0,30}" aria-describedby="ad-na-owner-err"></label>
-      <p class="ferr" id="ad-na-owner-err" aria-live="polite"></p>
+      <label class="field" for="ad-na-user"><span>账号名（<span class="mono">^[a-z0-9][a-z0-9-]{0,30}$</span>）</span>
+        <input type="text" id="ad-na-user" size="14" pattern="[a-z0-9][a-z0-9-]{0,30}" aria-describedby="ad-na-user-err"></label>
+      <p class="ferr" id="ad-na-user-err" aria-live="polite"></p>
       <label class="field" style="margin-top:.5rem" for="ad-na-pub"><span>公钥串（粘贴 <span class="mono">showroom keygen</span> 产物，<span class="mono">ed25519:…</span>）</span>
         <textarea id="ad-na-pub" class="mono" spellcheck="false" placeholder="ed25519:…" aria-describedby="ad-na-pub-err"></textarea></label>
       <p class="ferr" id="ad-na-pub-err" aria-live="polite"></p>
@@ -545,7 +545,7 @@ const WRAP = 384;                  // RSA-3072 wrap 头
 const NONCE = 12, TAG = 16;
 const CHUNK = 8 * 1024 * 1024;    // 上传分片粒度（§8.1）
 const DUMP_CHUNK = 4 * 1024 * 1024; // 备份下载分片粒度（§10.4，服务端上限 4MB）
-const NAME_RE = /^[a-z0-9][a-z0-9-]{0,30}$/;        // 账号（owner）
+const NAME_RE = /^[a-z0-9][a-z0-9-]{0,30}$/;        // 账号（user）
 const PROJ_RE = /^[a-zA-Z0-9][a-zA-Z0-9-]{0,30}$/;  // 项目（§11 放宽：允许大写）
 const RESERVED = new Set(['v2', '_api', '_bootstrap', '_console']);
 
@@ -643,8 +643,8 @@ const STATUS_CN = { running: '运行中', exited: '已退出', paused: '已暂�
 const statusCn = (s) => STATUS_CN[s] || s || '未知';
 const statusCls = (s) => s === 'running' ? 'status-ok' : (s === 'missing' ? 'status-bad' : 'status-mid');
 
-// —— 密钥状态（localStorage：sr.seed hex64 / sr.owner / sr.pempub）——
-const state = { seed: null, pub: '', owner: '', loggedIn: false, projects: [], kid: '', admin: false };
+// —— 密钥状态（localStorage：sr.seed hex64 / sr.user / sr.pempub）——
+const state = { seed: null, pub: '', user: '', loggedIn: false, projects: [], kid: '', admin: false };
 function Buffer_fromHex(hex) {
   const b = new Uint8Array(hex.length / 2);
   for (let i = 0; i < b.length; i++) b[i] = parseInt(hex.substr(i * 2, 2), 16);
@@ -684,7 +684,7 @@ function pickKeyChoice(v) {
   $('wz-seed-err').classList.toggle('hidden', v !== 'import');
 }
 function setupStep2() { // 自动检测：本机已有种子 → 默认「使用已有」；否则默认「生成」
-  $('wz-ownerEcho').textContent = state.owner;
+  $('wz-userEcho').textContent = state.user;
   loadSeed();
   const has = !!state.seed;
   $('wz-l-use').classList.toggle('hidden', !has);
@@ -695,7 +695,7 @@ function setupStep2() { // 自动检测：本机已有种子 → 默认「使用
 }
 function enterStep3(auto) {
   gotoStep(3);
-  $('wz-v-owner').textContent = state.owner;
+  $('wz-v-user').textContent = state.user;
   $('wz-v-fp').textContent = pubFp();
   $('wz-pub').textContent = state.pub;
   $('wz-pubbox').classList.add('hidden');
@@ -703,7 +703,7 @@ function enterStep3(auto) {
   if (auto) verifyLogin();
 }
 async function verifyLogin() { // 步骤 3：签名自测；E_AUTH → 公钥展示 + 手动重检循环
-  if (!state.seed || !state.owner) return;
+  if (!state.seed || !state.user) return;
   $('wz-v-fb').textContent = '正在自动验证密钥（签名自测）…';
   $('wz-recheck').disabled = true;
   try {
@@ -723,12 +723,12 @@ async function verifyLogin() { // 步骤 3：签名自测；E_AUTH → 公钥展
 
 // —— 向导事件 ——
 $('lg-srv').textContent = location.origin + '/_api';
-$('wz-owner').addEventListener('keydown', (ev) => { if (ev.key === 'Enter') { ev.preventDefault(); $('wz-next1').click(); } });
-$('wz-owner').addEventListener('input', () => fieldErr('wz-owner', ''));
+$('wz-user').addEventListener('keydown', (ev) => { if (ev.key === 'Enter') { ev.preventDefault(); $('wz-next1').click(); } });
+$('wz-user').addEventListener('input', () => fieldErr('wz-user', ''));
 $('wz-next1').addEventListener('click', () => {
-  const v = $('wz-owner').value.trim();
-  if (!NAME_RE.test(v)) return fieldErr('wz-owner', `账号「${v}」不合法（须匹配 ^[a-z0-9][a-z0-9-]{0,30}$），请修改后重试`);
-  state.owner = v;
+  const v = $('wz-user').value.trim();
+  if (!NAME_RE.test(v)) return fieldErr('wz-user', `账号「${v}」不合法（须匹配 ^[a-z0-9][a-z0-9-]{0,30}$），请修改后重试`);
+  state.user = v;
   setupStep2();
   gotoStep(2);
 });
@@ -752,7 +752,7 @@ $('wz-next2').addEventListener('click', () => {
     showMsg('密钥已导入本机（试验性存储）。', 'ok');
   }
   loadSeed();
-  localStorage.setItem('sr.owner', state.owner); // 账号与种子一起记忆：下次直达第 3 步
+  localStorage.setItem('sr.user', state.user); // 账号与种子一起记忆：下次直达第 3 步
   enterStep3(true);
 });
 $('wz-recheck').addEventListener('click', () => verifyLogin());
@@ -779,7 +779,7 @@ function signHeaderPtr(method, pathQ, bodyPtr, bodyLen) {
   const nonce = nonceHex();
   const ts = BigInt(Math.floor(Date.now() / 1000));
   const [sp, spl] = put(Buffer_fromHex(state.seed));
-  const [op, ol] = put(enc.encode(state.owner)), [mp, ml] = put(enc.encode(method));
+  const [op, ol] = put(enc.encode(state.user)), [mp, ml] = put(enc.encode(method));
   const [pp, pl] = put(enc.encode(pathQ)), [np, nl] = put(enc.encode(nonce));
   const auth = shimCStr((out, cap) =>
     ex.sr_sign_header(sp, op, ol, mp, ml, pp, pl, ts, np, nl, bodyPtr, bodyLen, out, cap), 640);
@@ -788,7 +788,7 @@ function signHeaderPtr(method, pathQ, bodyPtr, bodyLen) {
 }
 /** 统一 API 调用：json 传对象 → JSON body；Uint8Array → 原始 body；null → 空 body。signal 供流式 GET 中止。 */
 async function apiDo(method, pathQ, body, signal) {
-  if (!state.seed || !state.owner) throw { error: 'E_STATE', msg: '未配置密钥或账号' };
+  if (!state.seed || !state.user) throw { error: 'E_STATE', msg: '未配置密钥或账号' };
   let bodyBytes = new Uint8Array(0), isJson = false;
   if (body && typeof body === 'object' && !(body instanceof Uint8Array)) {
     bodyBytes = enc.encode(JSON.stringify(body)); isJson = true;
@@ -861,7 +861,7 @@ function logout() {
   clearInterval(stTimer); stTimer = null; $('st-auto').checked = false;
   if (adminBuilt) { // 管理页定时器与发卡对话框随登录态收尾
     clearInterval(adTimer); adTimer = null; $('ad-st-auto').checked = false;
-    if ($('dlg-owner-add').open) $('dlg-owner-add').close();
+    if ($('dlg-user-add').open) $('dlg-user-add').close();
   }
   stopLogsStream('已退出登录');      // 日志实时流随登录态终止
   logsLive.project = null; logsLive.lines = [];
@@ -889,7 +889,7 @@ const updatePubUrl = () => {
 };
 function buildApp() {
   $('app').append($('app-tpl').content.cloneNode(true));
-  $('hd-owner').textContent = state.owner;
+  $('hd-user').textContent = state.user;
   $('hd-srv').textContent = location.origin + '/_api';
   $('hd-pempub').value = localStorage.getItem('sr.pempub') || '';
   $('hd-pempub').addEventListener('input', () => localStorage.setItem('sr.pempub', $('hd-pempub').value));
@@ -921,7 +921,7 @@ function activateTab(name) {
     ensureRedisDbs(); // Redis 浏览区：首次进入状态页时拉取库编号（§13.2 按用户过滤）
   } else stopEventsStream();         // 离开即断开（服务端随之收尸 docker events 子进程）
   if (name === 'db') fillDbTargets();
-  if (name === 'admin') { loadAdminOwners(); refreshAdminStatus(); } // 管理页：进入即拉取
+  if (name === 'admin') { loadAdminUsers(); refreshAdminStatus(); } // 管理页：进入即拉取
 }
 function wireTabs() {
   $('tabs').addEventListener('click', (ev) => {
@@ -978,93 +978,93 @@ function teardownAdmin() {
   $('admin-root')?.remove?.();
 }
 function wireAdminTab() {
-  $('ad-refresh').addEventListener('click', loadAdminOwners);
+  $('ad-refresh').addEventListener('click', loadAdminUsers);
   $('ad-st-refresh').addEventListener('click', refreshAdminStatus);
   $('ad-st-auto').addEventListener('change', () => { // 30 秒自动刷新开关
     clearInterval(adTimer); adTimer = null;
     if ($('ad-st-auto').checked) { refreshAdminStatus(); adTimer = setInterval(refreshAdminStatus, 30000); }
   });
-  $('ad-owner-add').addEventListener('click', () => { // 远程发卡对话框（打开即聚焦首字段；Esc/关闭焦点自动归还）
-    $('ad-na-owner').value = ''; $('ad-na-pub').value = '';
+  $('ad-user-add').addEventListener('click', () => { // 远程发卡对话框（打开即聚焦首字段；Esc/关闭焦点自动归还）
+    $('ad-na-user').value = ''; $('ad-na-pub').value = '';
     $('ad-na-admin').checked = false;
     $('ad-na-result').classList.add('hidden');
     $('ad-na-pw').textContent = '';
-    clearErrs('ad-na-owner', 'ad-na-pub');
-    $('dlg-owner-add').showModal();
-    $('ad-na-owner').focus();
+    clearErrs('ad-na-user', 'ad-na-pub');
+    $('dlg-user-add').showModal();
+    $('ad-na-user').focus();
   });
-  $('ad-na-close').addEventListener('click', () => $('dlg-owner-add').close());
-  $('ad-na-submit').addEventListener('click', onOwnerAdd);
-  $('ad-na-owner').addEventListener('input', () => fieldErr('ad-na-owner', ''));
+  $('ad-na-close').addEventListener('click', () => $('dlg-user-add').close());
+  $('ad-na-submit').addEventListener('click', onUserAdd);
+  $('ad-na-user').addEventListener('input', () => fieldErr('ad-na-user', ''));
   $('ad-na-pub').addEventListener('input', () => fieldErr('ad-na-pub', ''));
   $('ad-na-copy').addEventListener('click', () => copyText($('ad-na-pw').textContent, 'registry 密码'));
-  $('ad-owners-tbl').addEventListener('click', onAdminKeyAction);
+  $('ad-users-tbl').addEventListener('click', onAdminKeyAction);
 }
-async function loadAdminOwners() { // 账号与钥匙表（§12.2：账号/钥匙 kid/管理员/登记时间/项目数）
-  const tb = $('ad-owners-tbl').querySelector('tbody');
+async function loadAdminUsers() { // 账号与钥匙表（§12.2：账号/钥匙 kid/管理员/登记时间/项目数）
+  const tb = $('ad-users-tbl').querySelector('tbody');
   tb.innerHTML = '<tr><td colspan="4" class="note">加载中…</td></tr>';
   try {
-    const j = await api('GET', '/_api/admin/owners');
-    const owners = j.owners || [];
-    tb.innerHTML = owners.length ? owners.map((o) => {
+    const j = await api('GET', '/_api/admin/users');
+    const users = j.users || [];
+    tb.innerHTML = users.length ? users.map((o) => {
       const keys = o.keys || [];
-      return `<tr class="ad-owner-row"><td colspan="4">
-          <span class="mono">${esc(o.owner)}</span>
+      return `<tr class="ad-user-row"><td colspan="4">
+          <span class="mono">${esc(o.user)}</span>
           <span class="note">· 项目数 ${esc(String(o.projects ?? '—'))} · 钥匙 ${keys.length} 把</span>
-          <button class="act danger" data-act="revoke" data-owner="${esc(o.owner)}" style="margin-left:.4rem">吊销整个账号</button>
+          <button class="act danger" data-act="revoke" data-user="${esc(o.user)}" style="margin-left:.4rem">吊销整个账号</button>
         </td></tr>` + (keys.map((k) => `<tr>
           <td class="mono wrap">${esc(k.kid)}</td>
           <td>${k.admin ? '<span class="status-ok">管理员</span>' : '<span class="note">普通</span>'}</td>
           <td class="mono">${esc(k.created || '—')}</td>
           <td>${k.admin
-            ? `<button class="act" data-act="unadmin" data-owner="${esc(o.owner)}" data-kid="${esc(k.kid)}">取消管理员</button>`
-            : `<button class="act" data-act="admin" data-owner="${esc(o.owner)}" data-kid="${esc(k.kid)}">设为管理员</button>`}
-            <button class="act danger" data-act="keyrm" data-owner="${esc(o.owner)}" data-kid="${esc(k.kid)}">删除钥匙</button></td>
+            ? `<button class="act" data-act="unadmin" data-user="${esc(o.user)}" data-kid="${esc(k.kid)}">取消管理员</button>`
+            : `<button class="act" data-act="admin" data-user="${esc(o.user)}" data-kid="${esc(k.kid)}">设为管理员</button>`}
+            <button class="act danger" data-act="keyrm" data-user="${esc(o.user)}" data-kid="${esc(k.kid)}">删除钥匙</button></td>
         </tr>`).join('') || '<tr><td colspan="4" class="note">（该账号没有钥匙）</td></tr>');
     }).join('') : '<tr><td colspan="4" class="note">暂无账号</td></tr>';
-    $('ad-fb').textContent = `已加载 ${owners.length} 个账号（${new Date().toLocaleTimeString()}）`;
+    $('ad-fb').textContent = `已加载 ${users.length} 个账号（${new Date().toLocaleTimeString()}）`;
   } catch (e) { tb.innerHTML = ''; apiFail('账号与钥匙加载', e); } // 非管理员 404 E_AUTH 也走顶部条
 }
 // 管理动作：全部中文 confirm 写明影响（§12.2）
 const ADMIN_ACT = {
-  admin: { ep: 'key-admin', cn: '设为管理员', body: (o, k) => ({ owner: o, kid: k, admin: true }),
+  admin: { ep: 'key-admin', cn: '设为管理员', body: (o, k) => ({ user: o, kid: k, admin: true }),
     ask: (o, k) => `确认将账号 ${o} 的钥匙 ${k} 设为管理员钥匙？持该钥匙者即可管理全部账号、钥匙与平台状态。` },
-  unadmin: { ep: 'key-admin', cn: '取消管理员', body: (o, k) => ({ owner: o, kid: k, admin: false }),
+  unadmin: { ep: 'key-admin', cn: '取消管理员', body: (o, k) => ({ user: o, kid: k, admin: false }),
     ask: (o, k) => `确认取消账号 ${o} 钥匙 ${k} 的管理员权限？此后该钥匙无法再访问管理功能。` },
-  keyrm: { ep: 'key-rm', cn: '删除钥匙', body: (o, k) => ({ owner: o, kid: k }),
+  keyrm: { ep: 'key-rm', cn: '删除钥匙', body: (o, k) => ({ user: o, kid: k }),
     ask: (o, k) => `确认删除账号 ${o} 的钥匙 ${k}？该钥匙即刻失效（持有它的设备立即无法登录），不可恢复。` },
-  revoke: { ep: 'owner-revoke', cn: '吊销整个账号', body: (o) => ({ owner: o }),
+  revoke: { ep: 'user-revoke', cn: '吊销整个账号', body: (o) => ({ user: o }),
     ask: (o) => `确认吊销整个账号 ${o}？其名下全部钥匙与 registry 访问凭据将一并删除，该账号即刻无法登录。` },
 };
 async function onAdminKeyAction(ev) {
   const btn = ev.target.closest('button[data-act]');
   if (!btn || btn.disabled) return;
-  const { act, owner, kid } = btn.dataset;
+  const { act, user, kid } = btn.dataset;
   const def = ADMIN_ACT[act];
   if (!def) return;
-  if (!confirm(def.ask(owner, kid))) return;
+  if (!confirm(def.ask(user, kid))) return;
   btn.disabled = true;
   try {
-    await api('POST', `/_api/admin/${def.ep}`, def.body(owner, kid));
-    $('ad-fb').textContent = `已执行「${def.cn}」${kid ? `（${owner} · ${kid}）` : `（${owner}）`}`;
-    loadAdminOwners();
+    await api('POST', `/_api/admin/${def.ep}`, def.body(user, kid));
+    $('ad-fb').textContent = `已执行「${def.cn}」${kid ? `（${user} · ${kid}）` : `（${user}）`}`;
+    loadAdminUsers();
   } catch (e) { apiFail(def.cn, e); }
   btn.disabled = false;
 }
-async function onOwnerAdd() { // 远程发卡：账号 + 公钥 + 可选管理员 → registry 密码（仅显示一次）
-  const owner = $('ad-na-owner').value.trim();
-  if (!NAME_RE.test(owner)) return fieldErr('ad-na-owner', `账号名「${owner}」不合法（须匹配 ^[a-z0-9][a-z0-9-]{0,30}$），请修改后重试`);
+async function onUserAdd() { // 远程发卡：账号 + 公钥 + 可选管理员 → registry 密码（仅显示一次）
+  const user = $('ad-na-user').value.trim();
+  if (!NAME_RE.test(user)) return fieldErr('ad-na-user', `账号名「${user}」不合法（须匹配 ^[a-z0-9][a-z0-9-]{0,30}$），请修改后重试`);
   const pubkey = $('ad-na-pub').value.trim();
   if (!/^ed25519:[A-Za-z0-9+/]{43}$/.test(pubkey)) return fieldErr('ad-na-pub', '公钥串格式应为 ed25519:<43 位 Base64>（showroom keygen 产物），请粘贴完整公钥串');
-  const body = { owner, pubkey };
+  const body = { user, pubkey };
   if ($('ad-na-admin').checked) body.admin = true; // 「同时授予管理员」勾选才携带
   busy($('ad-na-submit'), true, '发放中…');
   try {
-    const j = await api('POST', '/_api/admin/owner-add', body);
+    const j = await api('POST', '/_api/admin/user-add', body);
     $('ad-na-result').classList.remove('hidden');
     $('ad-na-pw').textContent = j.registry_password || j.password || j.cred || '（响应未携带密码，请联系主机管理员）';
-    $('ad-na-fb').textContent = `已发放账号 ${owner}${body.admin ? '（含管理员）' : ''}`;
-    loadAdminOwners();
+    $('ad-na-fb').textContent = `已发放账号 ${user}${body.admin ? '（含管理员）' : ''}`;
+    loadAdminUsers();
   } catch (e) { apiFail('发放新账号', e); }
   busy($('ad-na-submit'), false);
 }
@@ -1152,7 +1152,7 @@ async function ensureImages(force = false) {
     apiFail('镜像清单加载', e); // 下一步动作在错误码文案中给出
   }
 }
-// —— 选中镜像 → 自动带出项目与标签（形如 owner/project:tag；可手改） ——
+// —— 选中镜像 → 自动带出项目与标签（形如 user/project:tag；可手改） ——
 function onImagePick() {
   fieldErr('dep-image', '');
   const m = $('dep-image').value.trim().match(/^[^\/\s]+\/([^\/\s:]+):(\S+)$/);
@@ -2051,10 +2051,10 @@ async function onRedisKeyPick() {
 }
 
 // —— 初始化（SPEC §10.1）：本机已有「账号+种子」→ 直达第 3 步自测；否则从第 1 步走完整向导 ——
-state.owner = localStorage.getItem('sr.owner') || '';
+state.user = localStorage.getItem('sr.user') || '';
 loadSeed();
-$('wz-owner').value = state.owner;
-if (state.seed && NAME_RE.test(state.owner)) enterStep3(true);
+$('wz-user').value = state.user;
+if (state.seed && NAME_RE.test(state.user)) enterStep3(true);
 else gotoStep(1);
 </script>
 </body>

@@ -31,11 +31,11 @@ pub fn container_name(p: &str) -> String {
     format!("sr-{p}")
 }
 
-/// 镜像引用（§11）：`127.0.0.1:5000/<owner>/<project>:<tag>`。
+/// 镜像引用（§11）：`127.0.0.1:5000/<user>/<project>:<tag>`。
 /// project 正则已放宽允许大写（§11），但 docker 仓库名强制小写 → repo 路径转小写
-/// （同 owner 下 "Demo" 与 "demo" 共享 registry 命名空间，容器/DB/conf 仍各自独立）。
-pub fn image_ref(owner: &str, p: &str, tag: &str) -> String {
-    format!("127.0.0.1:5000/{owner}/{}:{tag}", p.to_ascii_lowercase())
+/// （同 user 下 "Demo" 与 "demo" 共享 registry 命名空间，容器/DB/conf 仍各自独立）。
+pub fn image_ref(user: &str, p: &str, tag: &str) -> String {
+    format!("127.0.0.1:5000/{user}/{}:{tag}", p.to_ascii_lowercase())
 }
 
 /// docker tag 规则（转发 common::names：首字符字母/数字/_，余 [A-Za-z0-9_.-]，≤128）。
@@ -43,14 +43,14 @@ pub fn check_tag(tag: &str) -> R<()> {
     showroom_common::names::check_tag(tag).map_err(|e| ApiError::new("E_NAME", e))
 }
 
-/// project 归属首个创建者：现存项目 conf 的 owner 必须等于本次发布者。
-pub fn check_ownership(root: &Path, project: &str, owner: &str) -> R<()> {
+/// project 归属首个创建者：现存项目 conf 的 user 必须等于本次发布者。
+pub fn check_ownership(root: &Path, project: &str, user: &str) -> R<()> {
     for (pj, c) in state::all_confs(root) {
         if pj == project {
-            if c.owner != owner {
+            if c.user != user {
                 return Err(ApiError::new(
                     "E_AUTH",
-                    format!("project '{project}' belongs to {}", c.owner),
+                    format!("project '{project}' belongs to {}", c.user),
                 ));
             }
             return Ok(());
@@ -81,14 +81,14 @@ fn mem_available_kb() -> R<u64> {
 
 pub fn publish(
     root: &Path,
-    owner: &str,
+    user: &str,
     project: &str,
     tag: &str,
     opts: PublishOpts,
 ) -> R<PublishOut> {
     state::check_name("project", project)?;
     check_tag(tag)?;
-    check_ownership(root, project, owner)?;
+    check_ownership(root, project, user)?;
     let policy = state::Policy::load(root);
     let old = state::Conf::load(root, project).ok();
     // ponytail: MAX_SLOTS 按全平台项目 conf 总数计（§11 语义=项目数上限；键名沿用存量 policy.env）
@@ -114,11 +114,11 @@ pub fn publish(
         None => state::alloc_redisdb(root, &policy)?,
     };
 
-    let repo = format!("{owner}/{}", project.to_ascii_lowercase());
+    let repo = format!("{user}/{}", project.to_ascii_lowercase());
     if !dockerops::image_exists(root, &repo, tag)? {
         return Err(ApiError::new(
             "E_NOTFOUND",
-            format!("image {} not in registry", image_ref(owner, project, tag)),
+            format!("image {} not in registry", image_ref(user, project, tag)),
         ));
     }
 
@@ -160,7 +160,7 @@ pub fn publish(
     let publish_port = format!("{bind}:{port}:{cport}");
     let cpu_s = cpu.to_string();
     let net = dockerops::DOCKER_NET;
-    let image = image_ref(owner, project, tag);
+    let image = image_ref(user, project, tag);
     let run_res = dockerops::docker(&[
         "run", "-d", "--name", &newname, "--network", net, "--restart", "unless-stopped",
         "--memory", &mem, "--cpus", &cpu_s, "--env-file", env_file, "-p", &publish_port, &image,
@@ -181,7 +181,7 @@ pub fn publish(
         let _ = fs::write(state::last2_path(root, project), &o.tag);
     }
     let conf = state::Conf {
-        owner: owner.to_string(),
+        user: user.to_string(),
         tag: tag.to_string(),
         port,
         cport,
@@ -259,19 +259,19 @@ pub fn receive_envelope(root: &Path, mut r: impl Read) -> R<(PathBuf, String)> {
 /// 无论成败删除临时文件。common::PlatformKeys 未暴露私钥，这里经重导出的 rsa crate 直接读 PEM（同版本无类型分裂）。
 pub fn import_from_file(
     root: &Path,
-    owner: &str,
+    user: &str,
     project: &str,
     tag: &str,
     sealed: &Path,
 ) -> R<String> {
     state::check_name("project", project)?;
     check_tag(tag)?;
-    let res = import_inner(root, owner, project, tag, sealed);
+    let res = import_inner(root, user, project, tag, sealed);
     let _ = fs::remove_file(sealed);
     res
 }
 
-fn import_inner(root: &Path, owner: &str, project: &str, tag: &str, sealed: &Path) -> R<String> {
+fn import_inner(root: &Path, user: &str, project: &str, tag: &str, sealed: &Path) -> R<String> {
     use showroom_common::rsa::pkcs8::DecodePrivateKey;
 
     let cap = state::Policy::load(root).import_cap_bytes();
@@ -338,17 +338,17 @@ fn import_inner(root: &Path, owner: &str, project: &str, tag: &str, sealed: &Pat
         .map(str::trim)
         .ok_or_else(|| ApiError::state(format!("docker load: no image ref in output: {}", stdout.trim())))?;
 
-    let target = image_ref(owner, project, tag);
+    let target = image_ref(user, project, tag);
     dockerops::docker(&["tag", src, &target])?;
     dockerops::docker(&["push", &target])?; // 主机 root 已 docker login 127.0.0.1:5000
-    dockerops::manifest_digest(root, &format!("{owner}/{project}"), tag)
+    dockerops::manifest_digest(root, &format!("{user}/{project}"), tag)
 }
 
 // —— 分片导入会话（SPEC §8.1；_tmp/<id>.bin 追加 + <id>.meta JSON；陈旧 >24h 由 gc-images 清）——
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ImportMeta {
-    pub owner: String,
+    pub user: String,
     pub project: String,
     pub tag: String,
     pub image_id: String,
@@ -376,11 +376,11 @@ pub fn load_meta(root: &Path, id: &str) -> R<ImportMeta> {
     serde_json::from_str(&text).map_err(|e| ApiError::state(format!("upload meta parse: {e}")))
 }
 
-/// 会话归属：签名 owner 必须等于 begin 时的 owner。
-pub fn load_meta_owned(root: &Path, id: &str, owner: &str) -> R<ImportMeta> {
+/// 会话归属：签名 user 必须等于 begin 时的 user。
+pub fn load_meta_owned(root: &Path, id: &str, user: &str) -> R<ImportMeta> {
     let m = load_meta(root, id)?;
-    if m.owner != owner {
-        return Err(ApiError::new("E_AUTH", format!("upload '{id}' belongs to {}", m.owner)));
+    if m.user != user {
+        return Err(ApiError::new("E_AUTH", format!("upload '{id}' belongs to {}", m.user)));
     }
     Ok(m)
 }
@@ -394,7 +394,7 @@ fn save_meta(root: &Path, id: &str, m: &ImportMeta) -> R<()> {
 /// begin：名字/归属/tag 已由 serve 校验；限 total ≤ IMPORT_MAX_GB → 建 .meta + 空 .bin，返回 upload_id。
 pub fn import_begin(
     root: &Path,
-    owner: &str,
+    user: &str,
     project: &str,
     tag: &str,
     image_id: &str,
@@ -414,7 +414,7 @@ pub fn import_begin(
     fs::create_dir_all(root.join("_tmp"))?;
     let id = state::rand_hex(16);
     let m = ImportMeta {
-        owner: owner.to_string(),
+        user: user.to_string(),
         project: project.to_string(),
         tag: tag.to_string(),
         image_id: image_id.to_string(),
@@ -429,14 +429,14 @@ pub fn import_begin(
 
 /// chunk：seq 必须连续（==received.len()）→ 追加 .bin、push seq、写回 meta；返回已收片数。
 /// ponytail: 追加成功与 meta 写回之间崩溃会留多余字节，end 的 total 相等校验兜底（gc 清尸）。
-pub fn import_chunk(root: &Path, owner: &str, id: &str, seq: u64, chunk: &Path) -> R<usize> {
-    let res = import_chunk_inner(root, owner, id, seq, chunk);
+pub fn import_chunk(root: &Path, user: &str, id: &str, seq: u64, chunk: &Path) -> R<usize> {
+    let res = import_chunk_inner(root, user, id, seq, chunk);
     let _ = fs::remove_file(chunk); // 落盘切片用完即删，拒绝路径也不留
     res
 }
 
-fn import_chunk_inner(root: &Path, owner: &str, id: &str, seq: u64, chunk: &Path) -> R<usize> {
-    let mut m = load_meta_owned(root, id, owner)?;
+fn import_chunk_inner(root: &Path, user: &str, id: &str, seq: u64, chunk: &Path) -> R<usize> {
+    let mut m = load_meta_owned(root, id, user)?;
     if seq != m.received.len() as u64 {
         return Err(ApiError::new(
             "E_NAME",
@@ -460,15 +460,15 @@ fn import_chunk_inner(root: &Path, owner: &str, id: &str, seq: u64, chunk: &Path
 /// end：归属复核 + bin 字节数必须等于 total → 复用单发 import 管道 → 删会话。
 /// .bin 一旦进入 import_from_file 即被消费（成败都删），.meta 随之无论成败一并清；
 /// 字节不足（E_QUOTA）保留会话供续传（SPEC §8.1），归属不符（E_AUTH）不动他人会话。
-pub fn import_end(root: &Path, owner: &str, id: &str) -> R<String> {
-    let m = load_meta_owned(root, id, owner)?;
-    check_ownership(root, &m.project, owner)?;
+pub fn import_end(root: &Path, user: &str, id: &str) -> R<String> {
+    let m = load_meta_owned(root, id, user)?;
+    check_ownership(root, &m.project, user)?;
     let bin = upload_bin(root, id);
     let have = fs::metadata(&bin).map(|s| s.len()).unwrap_or(0);
     if have != m.total {
         return Err(ApiError::new("E_QUOTA", format!("upload incomplete: {have}/{} bytes", m.total)));
     }
-    let d = match import_from_file(root, owner, &m.project, &m.tag, &bin) {
+    let d = match import_from_file(root, user, &m.project, &m.tag, &bin) {
         Ok(d) => d,
         Err(e) => {
             let _ = fs::remove_file(upload_meta(root, id));
@@ -506,13 +506,13 @@ mod tests {
         // meta 读写往返
         let m = load_meta(&root, &id).unwrap();
         assert_eq!(
-            (m.owner.as_str(), m.project.as_str(), m.tag.as_str(), m.image_id.as_str(), m.total),
+            (m.user.as_str(), m.project.as_str(), m.tag.as_str(), m.image_id.as_str(), m.total),
             ("alice", "demo", "v1", "sha256:abcd", 10)
         );
         assert_eq!(m.received, Vec::<u64>::new());
         assert!(m.created > 0);
 
-        // 归属：他人 owner 拒绝
+        // 归属：他人 user 拒绝
         assert_eq!(load_meta_owned(&root, &id, "bob").unwrap_err().code, "E_AUTH");
 
         // 非法 id（空 / 路径穿越 / 长度不符 / 非 hex）一律 E_NOTFOUND

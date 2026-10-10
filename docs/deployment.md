@@ -2,7 +2,7 @@
 
 目标：在一台 Linux 主机（假设已有 Docker、root 权限、一块 btrfs 文件系统）上部署完整的 Showroom 控制面。完成后你将拥有：Caddy 双面入口、控制面 API、共享 PostgreSQL/Redis/registry、systemd timers 自愈、首把管理员钥匙。
 
-> 本文所有 `your-host`、`<OWNER>`、`<PROJECT>`、`<…>` 均为占位符，替换为你的实际值。协议与安全背景见 [security.md](security.md)；日常运维见 [operations.md](operations.md)。
+> 本文所有 `your-host`、`<USER>`、`<PROJECT>`、`<…>` 均为占位符，替换为你的实际值。协议与安全背景见 [security.md](security.md)；日常运维见 [operations.md](operations.md)。
 
 ## 0. 前置要求
 
@@ -24,11 +24,11 @@ sudo mkdir -p /srv/showroom
 echo '/dev/disk/by-uuid/<你的-btrfs-UUID> /srv/showroom btrfs subvol=@showroom,defaults 0 0' | sudo tee -a /etc/fstab
 sudo mount /srv/showroom
 
-sudo mkdir -p /srv/showroom/state/{tokens,owners,projects,routes} \
+sudo mkdir -p /srv/showroom/state/{tokens,users,projects,routes} \
              /srv/showroom/_middleware/{postgres,redis,registry} \
              /srv/showroom/_console \
              /srv/showroom/_tmp
-sudo chmod 700 /srv/showroom/state /srv/showroom/state/tokens /srv/showroom/state/owners
+sudo chmod 700 /srv/showroom/state /srv/showroom/state/tokens /srv/showroom/state/users
 ```
 
 写入初始策略（`/srv/showroom/state/policy.env`，键含义与默认值）：
@@ -65,8 +65,8 @@ sudo docker run -d --name sr-redis --network showroom-net --restart unless-stopp
   -v /srv/showroom/_middleware/redis:/data \
   redis:7-alpine --appendonly yes --maxmemory 512mb --maxmemory-policy allkeys-lru
 
-# registry（先做第 4 步 owner-add 生成 htpasswd，再启动本容器；
-# 或先 touch 空文件占位、owner-add 后 restart）
+# registry（先做第 4 步 user-add 生成 htpasswd，再启动本容器；
+# 或先 touch 空文件占位、user-add 后 restart）
 sudo touch /srv/showroom/state/registry.htpasswd
 sudo docker run -d --name sr-registry --network showroom-net --restart unless-stopped \
   -p 127.0.0.1:5000:5000 \
@@ -128,8 +128,8 @@ showroom keygen        # 打印：密钥路径 + 公钥串（ed25519:<base64>）
 # 平台 RSA 对（serve 启动缺失也会自动生成；显式执行可提前拿到公钥分发给发布者）
 sudo showroomctl init-keys
 
-sudo showroomctl owner-add <OWNER> --pubkey 'ed25519:<发布者公钥串>' --admin
-# 输出 registry 凭据：<OWNER> 的 basic auth 密码（state/owners/<OWNER>/reg.cred 明文留存）
+sudo showroomctl user-add <USER> --pubkey 'ed25519:<发布者公钥串>' --admin
+# 输出 registry 凭据：<USER> 的 basic auth 密码（state/users/<USER>/reg.cred 明文留存）
 
 sudo docker restart sr-registry     # 若启动 registry 时 htpasswd 还是空的
 ```

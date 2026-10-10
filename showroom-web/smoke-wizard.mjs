@@ -18,7 +18,7 @@
 //      四段流转；发布失败标红重试（项目留空自动生成回填）；上传失败断点续传重试
 //   9) §12.2 管理员：whoami 两态（admin=false 管理 DOM 不存在 / true 第五标签渲染）、
 //      账号与钥匙表、发卡对话框提交体校验（registry 密码仅显示一次）、行内管理动作
-//      （key-admin/key-rm/owner-revoke + 中文 confirm 文案）、平台状态面板、30s 自动刷新、
+//      （key-admin/key-rm/user-revoke + 中文 confirm 文案）、平台状态面板、30s 自动刷新、
 //      admin 接口 404 E_AUTH 顶部条报错、whoami 失败顶部条报错
 //  10) §13 发布三入口并存：一键部署 / 仅上传（无 publish 调用，③④ skip，镜像已入库提示）/
 //      部署表单（/_api/images 惰性加载+刷新+选择自动带出项目标签+发布）；
@@ -178,7 +178,7 @@ const sealedTotal = (n) => WRAP + n + Math.ceil(n / SEG) * (NONCE + TAG);
 
 // —— fetch 垫片：wasm 服务真实字节；/_api 按 mode 返回（unregistered → 404 E_AUTH） ——
 const resp = (status, obj) => ({ ok: status < 400, status, text: async () => JSON.stringify(obj) });
-const PROJECTS = { projects: [{ project: 'demo', owner: 'alice', tag: 'v1', url: '/demo/', status: 'running', port: 8100, mem: '256m', cpu: 0, updated: '2026-10-10T12:00:00' }] };
+const PROJECTS = { projects: [{ project: 'demo', user: 'alice', tag: 'v1', url: '/demo/', status: 'running', port: 8100, mem: '256m', cpu: 0, updated: '2026-10-10T12:00:00' }] };
 let mode = 'unregistered'; // unregistered | ok
 // 观测计数 / 捕获（场景 6 断言用）
 let projectsN = 0, eventsN = 0, logsN = 0, statusN = 0;
@@ -191,8 +191,8 @@ const importChunkLens = [];
 const restoreLens = [];
 // 场景 8/9 捕获（§12）：whoami 两态 / 管理接口 / 一键部署状态条快照 / 失败重试
 let whoamiAdmin = false, whoamiFail = false, adminFail404 = false;
-let adminOwnersN = 0, adminStatusN = 0, importStatusN = 0, publishAttempts = 0;
-let ownerAddBody = null, lastPublishBody = null, publishFailOnce = false, chunkFailN = 0;
+let adminUsersN = 0, adminStatusN = 0, importStatusN = 0, publishAttempts = 0;
+let userAddBody = null, lastPublishBody = null, publishFailOnce = false, chunkFailN = 0;
 const keyAdminBodies = [], keyRmBodies = [], revokeBodies = [];
 const dpSnaps = [], compSnaps = [];
 let dpBeginSnap = null, dpPublishSnap = null;
@@ -202,11 +202,11 @@ let curUploadId = null;
 let imagesN = 0, imagesAdminView = false; // imagesAdminView：模拟服务端按 admin 钥匙返回全量
 const IMAGES_ALL = ['alice/demo:v1', 'alice/demo2:v2', 'bob/other:v1'];
 const IMAGES_SELF = ['alice/demo:v1', 'alice/demo2:v2'];
-const ADM_OWNERS = { owners: [
-  { owner: 'alice', projects: 2, keys: [
+const ADM_USERS = { users: [
+  { user: 'alice', projects: 2, keys: [
     { kid: 'kid-a1', admin: true, created: '2026-09-01T10:00:00' },
     { kid: 'kid-a2', admin: false, created: '2026-09-02T11:00:00' } ] },
-  { owner: 'bob', projects: 0, keys: [ { kid: 'kid-b1', admin: false, created: '2026-10-01T09:00:00' } ] },
+  { user: 'bob', projects: 0, keys: [ { kid: 'kid-b1', admin: false, created: '2026-10-01T09:00:00' } ] },
 ] };
 const ADM_STATUS = {
   services: { 'showroom-caddy': 'active', 'showroom-registry': 'active', 'showroom-postgres': 'active', 'showroom-redis': 'inactive' },
@@ -325,13 +325,13 @@ globalThis.fetch = async (url, init = {}) => {
   // —— §12.2 身份与管理端点（非管理员/故障 → 404 E_AUTH 不可区分） ——
   if (u.includes('/_api/whoami')) {
     if (whoamiFail) return resp(404, { error: 'E_AUTH' });
-    return resp(200, { owner: 'alice', kid: 'kid-self', admin: whoamiAdmin });
+    return resp(200, { user: 'alice', kid: 'kid-self', admin: whoamiAdmin });
   }
-  if (u.includes('/_api/admin/owner-add')) { ownerAddBody = JSON.parse(dec2.decode(init.body)); return resp(200, { ok: true, kid: 'kid-new', registry_password: 'reg-pw-smoke' }); }
-  if (u.includes('/_api/admin/owner-revoke')) { revokeBodies.push(JSON.parse(dec2.decode(init.body))); return resp(200, { ok: true }); }
+  if (u.includes('/_api/admin/user-add')) { userAddBody = JSON.parse(dec2.decode(init.body)); return resp(200, { ok: true, kid: 'kid-new', registry_password: 'reg-pw-smoke' }); }
+  if (u.includes('/_api/admin/user-revoke')) { revokeBodies.push(JSON.parse(dec2.decode(init.body))); return resp(200, { ok: true }); }
   if (u.includes('/_api/admin/key-admin')) { keyAdminBodies.push(JSON.parse(dec2.decode(init.body))); return resp(200, { ok: true }); }
   if (u.includes('/_api/admin/key-rm')) { keyRmBodies.push(JSON.parse(dec2.decode(init.body))); return resp(200, { ok: true }); }
-  if (u.includes('/_api/admin/owners')) { adminOwnersN++; if (adminFail404) return resp(404, { error: 'E_AUTH' }); return resp(200, ADM_OWNERS); }
+  if (u.includes('/_api/admin/users')) { adminUsersN++; if (adminFail404) return resp(404, { error: 'E_AUTH' }); return resp(200, ADM_USERS); }
   if (u.includes('/_api/admin/status')) { adminStatusN++; if (adminFail404) return resp(404, { error: 'E_AUTH' }); return resp(200, ADM_STATUS); }
   if (u.includes('/_api/db-restore')) {
     restoreLens.push(init.body?.length ?? 0);
@@ -356,17 +356,17 @@ armBtnText(); // 按钮初始文案（busy 恢复断言用）
 await sleep(40);
 ok(shown('wz-p1') && hidden('wz-p2') && hidden('wz-p3'), '全新访问：仅第 1 步可见');
 ok($s('wz-s1').classList.contains('on') && !$s('wz-s2').classList.contains('on'), '步骤条指示 1/3');
-ok(shown('login') && !els.has('hd-owner'), '登录前：只有登录向导，管理壳未构建（零管理信息）');
-$s('wz-owner').value = 'alice';
-typeIn('wz-owner'); // 回车 = 下一步
+ok(shown('login') && !els.has('hd-user'), '登录前：只有登录向导，管理壳未构建（零管理信息）');
+$s('wz-user').value = 'alice';
+typeIn('wz-user'); // 回车 = 下一步
 ok(shown('wz-p2') && hidden('wz-p1'), '回车提交：进入第 2 步「选择密钥」');
 ok(hidden('wz-l-use'), '无存量密钥：「使用本机已有密钥」不出现');
 ok($s('wz-r-new').checked && !$s('wz-r-import').checked && hidden('wz-import-box'), '无存量：默认「生成新密钥」，导入粘贴框隐藏');
-ok($s('wz-ownerEcho').textContent === 'alice', '第 2 步回显账号');
+ok($s('wz-userEcho').textContent === 'alice', '第 2 步回显账号');
 click('wz-next2');
 const seed1 = store.get('sr.seed');
 ok(/^[0-9a-f]{64}$/.test(seed1 || ''), `生成 seed 写入 localStorage（${(seed1 || '').slice(0, 8)}…）`);
-ok(store.get('sr.owner') === 'alice', '账号与种子一起记忆（sr.owner）');
+ok(store.get('sr.user') === 'alice', '账号与种子一起记忆（sr.user）');
 ok(shown('wz-p3'), '进入第 3 步「验证」');
 await sleep(60);
 ok(shown('wz-pubbox'), 'E_AUTH：展示公钥串区块');
@@ -376,14 +376,14 @@ ok(shown('login'), '未登记：停留在登录向导');
 click('wz-recheck');
 await sleep(40);
 ok(shown('wz-pubbox') && shown('login'), '重新检测：仍未登记 → 公钥展示循环');
-mode = 'ok'; // 模拟管理员完成 owner-add 登记
+mode = 'ok'; // 模拟管理员完成 user-add 登记
 click('wz-recheck');
 await sleep(80);
-ok(hidden('login') && shown('app') && els.has('hd-owner'), '登记后重检：自动进入管理壳');
-ok($s('hd-owner').textContent === 'alice', '管理壳回显账号');
+ok(hidden('login') && shown('app') && els.has('hd-user'), '登记后重检：自动进入管理壳');
+ok($s('hd-user').textContent === 'alice', '管理壳回显账号');
 ok(($s('proj-fb').textContent || '').includes('已加载 1 个展项'), '展项列表已请求并渲染');
 await sleep(60); // whoami 异步返回（§12.2）
-ok(!els.has('tab-admin') && !els.has('ad-owners-tbl') && !els.has('dlg-owner-add') && !els.has('ad-st-auto'),
+ok(!els.has('tab-admin') && !els.has('ad-users-tbl') && !els.has('dlg-user-add') && !els.has('ad-st-auto'),
   'whoami admin=false：管理标签与全部管理 DOM 不存在（第五标签不渲染）');
 
 // —— 登录后 Redis 浏览（§10.3 三端点 + 交互；§13.2 普通用户视图） ——
@@ -406,7 +406,7 @@ ok($s('rd-val').textContent.length === 5000, '值以等宽 pre 原样展示');
 ok(imagesN === 1, '进入管理壳（发布区）：/_api/images 惰性加载一次');
 ok(($s('dl-images').innerHTML || '').includes('alice/demo:v1') && ($s('dl-images').innerHTML || '').includes('alice/demo2:v2'),
   '镜像清单填充 ComboBox（datalist）');
-ok(!($s('dl-images').innerHTML || '').includes('bob/other'), '普通用户：清单不含他人镜像（服务端按 owner 过滤）');
+ok(!($s('dl-images').innerHTML || '').includes('bob/other'), '普通用户：清单不含他人镜像（服务端按 user 过滤）');
 ok(($s('dep-images-fb').textContent || '').includes('您名下的镜像 2 个'), '普通用户：清单计数提示「您名下」');
 click('dep-images-refresh');
 await sleep(60);
@@ -602,7 +602,7 @@ ok(($s('db-out').textContent || '').includes('三段式下载完成'), 'dbOut �
   // 7c. §13.1 入口三「部署」表单：镜像 ComboBox 选择自动带出项目/标签 → 发布（旧版本单独部署路径）
   $s('dep-image').value = 'alice/demo:v1';
   fire($s('dep-image'), 'input');
-  ok($s('dep-project').value === 'demo' && $s('dep-tag').value === 'v1', '选中镜像：项目与标签自动带出（owner/project:tag 解析）');
+  ok($s('dep-project').value === 'demo' && $s('dep-tag').value === 'v1', '选中镜像：项目与标签自动带出（user/project:tag 解析）');
   $s('dep-mem').value = '512m'; $s('dep-cport').value = '9090';
   fire($s('dep-form'), 'submit', { preventDefault() {} });
   ok(await waitFor(() => ($s('dep-fb').textContent || '').includes('部署成功'), 8000), '部署表单：发布完成');
@@ -647,9 +647,9 @@ await load(2);
 armBtnText(); // 发卡按钮初始文案（busy 恢复断言用）
 await sleep(80);
 ok(hidden('wz-p1') && hidden('wz-p2') && hidden('login') && shown('app'), '再访匹配账号：跳过 1/2 步直达验证并自动进入');
-ok(store.get('sr.seed') === seed1 && store.get('sr.owner') === 'alice', '种子与账号未被改动');
+ok(store.get('sr.seed') === seed1 && store.get('sr.user') === 'alice', '种子与账号未被改动');
 await sleep(60); // whoami 异步返回
-ok(els.has('ad-owners-tbl') && els.has('ad-st-auto') && els.has('ad-refresh'),
+ok(els.has('ad-users-tbl') && els.has('ad-st-auto') && els.has('ad-refresh'),
   'whoami admin=true：管理区 DOM 渲染（第五「管理」标签随 whoami 构建）');
 
 // —— §13.1/§13.2 管理员视图：镜像清单（whoami 回退标注）+ Redis 浏览（admin_view 标注） ——
@@ -661,8 +661,8 @@ ok(($s('dl-images').innerHTML || '').includes('bob/other'), 'admin 钥匙：镜�
 clickTab('admin');
 await sleep(80);
 ok(els.has('tab-admin'), '第五标签面板（tab-admin）已进入渲染');
-ok(adminOwnersN === 1 && adminStatusN === 1, '进入管理页：owners 与 status 各自动拉取一次');
-const otbl = $s('ad-owners-tbl:q').innerHTML || '';
+ok(adminUsersN === 1 && adminStatusN === 1, '进入管理页：users 与 status 各自动拉取一次');
+const otbl = $s('ad-users-tbl:q').innerHTML || '';
 ok(otbl.includes('alice') && otbl.includes('kid-a1') && otbl.includes('kid-b1'), '账号与钥匙表：账号 + 钥匙 kid 渲染');
 ok(otbl.includes('管理员') && otbl.includes('普通'), '管理员标记两态渲染');
 ok(otbl.includes('2026-09-01') && otbl.includes('项目数 2'), '登记时间与项目数展示');
@@ -683,35 +683,35 @@ $s('ad-st-auto').checked = false;
 fire($s('ad-st-auto'), 'change');
 
 // —— 发卡对话框（远程发卡）：提交体校验（字段内联错误+聚焦首错）+ registry 密码仅显示一次 ——
-click('ad-owner-add');
-ok($s('dlg-owner-add').open === true, '发卡对话框打开');
+click('ad-user-add');
+ok($s('dlg-user-add').open === true, '发卡对话框打开');
 click('ad-na-submit'); // 全空 → 账号名校验
-ok(ownerAddBody === null && ($s('ad-na-owner-err').textContent || '').includes('账号名'), '发卡校验：账号名不合法即内联拒绝（未发请求）');
-$s('ad-na-owner').value = 'newbie';
+ok(userAddBody === null && ($s('ad-na-user-err').textContent || '').includes('账号名'), '发卡校验：账号名不合法即内联拒绝（未发请求）');
+$s('ad-na-user').value = 'newbie';
 $s('ad-na-pub').value = 'not-a-pubkey';
 click('ad-na-submit');
-ok(ownerAddBody === null && ($s('ad-na-pub-err').textContent || '').includes('ed25519:'), '发卡校验：公钥串格式内联拒绝（未发请求）');
+ok(userAddBody === null && ($s('ad-na-pub-err').textContent || '').includes('ed25519:'), '发卡校验：公钥串格式内联拒绝（未发请求）');
 $s('ad-na-pub').value = 'ed25519:' + 'A'.repeat(43);
 click('ad-na-submit');
 await sleep(60);
-ok(ownerAddBody && ownerAddBody.owner === 'newbie' && ownerAddBody.pubkey.startsWith('ed25519:') && !('admin' in ownerAddBody),
+ok(userAddBody && userAddBody.user === 'newbie' && userAddBody.pubkey.startsWith('ed25519:') && !('admin' in userAddBody),
   '发卡提交体：账号 + 公钥（未勾选管理员则不带 admin 字段）');
 ok($s('ad-na-pw').textContent === 'reg-pw-smoke', '发卡结果：registry_password 字段展示为一次性密码');
 ok(!$s('ad-na-submit').disabled && $s('ad-na-submit').textContent === '发放', '发卡请求结束：按钮恢复原文与可用');
-$s('ad-na-owner').value = 'newbie2';
+$s('ad-na-user').value = 'newbie2';
 $s('ad-na-admin').checked = true;
 click('ad-na-submit');
 await sleep(60);
-ok(ownerAddBody.admin === true, '勾选「同时授予管理员」→ 提交体 admin:true');
+ok(userAddBody.admin === true, '勾选「同时授予管理员」→ 提交体 admin:true');
 click('ad-na-close');
-ok($s('dlg-owner-add').open === false, '发卡对话框关闭');
+ok($s('dlg-user-add').open === false, '发卡对话框关闭');
 
-// —— 行内管理动作：中文 confirm 文案 + 提交体（key-admin / key-rm / owner-revoke） ——
+// —— 行内管理动作：中文 confirm 文案 + 提交体（key-admin / key-rm / user-revoke） ——
 confirmMsgs.length = 0;
-const act = (a, owner, kid) => fire($s('ad-owners-tbl'), 'click', { target: { closest: () => ({ dataset: { act: a, owner, kid } }) } });
+const act = (a, user, kid) => fire($s('ad-users-tbl'), 'click', { target: { closest: () => ({ dataset: { act: a, user, kid } }) } });
 act('keyrm', 'bob', 'kid-b1');
 await sleep(60);
-ok(keyRmBodies.length === 1 && keyRmBodies[0].owner === 'bob' && keyRmBodies[0].kid === 'kid-b1', '删除钥匙：key-rm 提交体 {owner,kid}');
+ok(keyRmBodies.length === 1 && keyRmBodies[0].user === 'bob' && keyRmBodies[0].kid === 'kid-b1', '删除钥匙：key-rm 提交体 {user,kid}');
 ok((confirmMsgs.at(-1) || '').includes('删除') && (confirmMsgs.at(-1) || '').includes('失效'), '删除钥匙：confirm 中文文案写明影响');
 act('unadmin', 'alice', 'kid-a1');
 await sleep(60);
@@ -721,7 +721,7 @@ await sleep(60);
 ok(keyAdminBodies.some((b) => b.admin === true && b.kid === 'kid-b1'), '设为管理员：key-admin 提交体 admin:true');
 act('revoke', 'bob');
 await sleep(60);
-ok(revokeBodies.length === 1 && revokeBodies[0].owner === 'bob', '吊销整个账号：owner-revoke 提交体 {owner}');
+ok(revokeBodies.length === 1 && revokeBodies[0].user === 'bob', '吊销整个账号：user-revoke 提交体 {user}');
 confirmRet = false; // confirm 拒绝：动作不得提交
 act('keyrm', 'bob', 'kid-b1');
 await sleep(60);
@@ -745,12 +745,12 @@ whoamiAdmin = false;
 // ═══ 场景 3：种子在、账号缺（换了账号走完整向导；第 2 步默认「使用已有」）；whoami 失败 ═══
 mode = 'ok';
 whoamiFail = true; // §12.2：whoami 404 E_AUTH → 顶部条报错、管理标签不渲染
-store.delete('sr.owner');
+store.delete('sr.user');
 els.clear();
 await load(3);
 await sleep(40);
 ok(shown('wz-p1') && hidden('wz-p3'), '无记忆账号：从第 1 步走完整向导');
-$s('wz-owner').value = 'bob';
+$s('wz-user').value = 'bob';
 click('wz-next1');
 ok(shown('wz-l-use') && $s('wz-r-use').checked, '有存量种子：默认「使用本机已有密钥」');
 ok($s('wz-fp').textContent === pubOf(seed1).replace('ed25519:', '').slice(0, 8), '指纹 = 公钥载荷前 8 位');
@@ -760,11 +760,11 @@ ok(shown('wz-p1'), '第 2 步「上一步」可回退');
 click('wz-next1');
 click('wz-next2'); // 维持默认「使用已有」
 await sleep(80);
-ok(store.get('sr.seed') === seed1 && store.get('sr.owner') === 'bob', '沿用已有种子，记忆新账号');
+ok(store.get('sr.seed') === seed1 && store.get('sr.user') === 'bob', '沿用已有种子，记忆新账号');
 ok(hidden('login') && shown('app'), '验证通过进入管理壳');
 await sleep(60); // whoami 失败异步返回
 ok(($s('msg').textContent || '').includes('身份查询'), 'whoami 失败（404 E_AUTH）：顶部条报错');
-ok(!els.has('tab-admin') && !els.has('ad-owners-tbl'), 'whoami 失败：管理标签不渲染');
+ok(!els.has('tab-admin') && !els.has('ad-users-tbl'), 'whoami 失败：管理标签不渲染');
 whoamiFail = false;
 
 // ═══ 场景 4：「导入密钥种子」分支 ═══
@@ -773,7 +773,7 @@ store.clear();
 els.clear();
 await load(4);
 await sleep(40);
-$s('wz-owner').value = 'carl';
+$s('wz-user').value = 'carl';
 click('wz-next1');
 fire($s('wz-r-import'), 'change'); // 选导入 → 出现粘贴框
 ok(shown('wz-import-box') && $s('wz-r-import').checked, '选「导入」：粘贴框出现');
@@ -783,7 +783,7 @@ ok(shown('wz-p2') && ($s('wz-seed-err').textContent || '').includes('64 位十�
 $s('wz-seed').value = seed1;
 click('wz-next2');
 await sleep(80);
-ok(store.get('sr.seed') === seed1 && store.get('sr.owner') === 'carl', '合法 seed 导入并记忆');
+ok(store.get('sr.seed') === seed1 && store.get('sr.user') === 'carl', '合法 seed 导入并记忆');
 ok(hidden('login') && shown('app'), '导入后验证通过进入管理壳');
 
 // ═══ 场景 5：静态断言（§10.2 更名 / §10.3+§10.4 端点 / §11 零残留 / §12+§13 接入 / 界面规范） ═══
@@ -809,8 +809,8 @@ ok(html.includes('自动生成随机项目名') || html.includes('留空自动�
 ok(html.includes('重试'), '§12.1：失败可重试按钮');
 // —— §12.2 管理员 ——
 ok(html.includes('/_api/whoami'), '§12.2：whoami 已接入');
-for (const ep of ['/_api/admin/owners', '/_api/admin/owner-add', '/_api/admin/status', "'key-rm'", "'owner-revoke'", "'key-admin'"]) {
-  ok(html.includes(ep), `§12.2：${ep} 已接线（owner-revoke/key-rm/key-admin 经 ep 表驱动）`);
+for (const ep of ['/_api/admin/users', '/_api/admin/user-add', '/_api/admin/status', "'key-rm'", "'user-revoke'", "'key-admin'"]) {
+  ok(html.includes(ep), `§12.2：${ep} 已接线（user-revoke/key-rm/key-admin 经 ep 表驱动）`);
 }
 for (const s of ['发放新账号', '同时授予管理员', '仅显示一次', '吊销整个账号', '设为管理员', '取消管理员', '删除钥匙', '每 30 秒自动刷新', '平台状态', '管理']) {
   ok(html.includes(s), `§12.2 新增文案全中文：${s}`);
@@ -842,7 +842,7 @@ ok(html.includes('select option {'), '规范：select option 显式配色');
   const ph = [...html.matchAll(/placeholder="([^"]*)"/g)].map((x) => x[1]);
   ok(ph.length > 0 && ph.every((p) => p.endsWith('…')), `规范：占位符全部以 … 结尾（${ph.length} 处）`);
 }
-for (const id of ['wz-owner', 'pub-project', 'dep-image', 'db-project', 'rd-db', 'ad-na-owner']) {
+for (const id of ['wz-user', 'pub-project', 'dep-image', 'db-project', 'rd-db', 'ad-na-user']) {
   ok(html.includes(`for="${id}"`), `规范：表单控件 label for="${id}"`);
 }
 ok(html.includes('showModal'), '规范：dialog 用 showModal（Esc/焦点圈闭/inert）');

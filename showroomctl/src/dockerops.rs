@@ -12,7 +12,7 @@ use base64::engine::Engine as _;
 
 use crate::state::{self, ApiError, R};
 
-pub const REGISTRY: &str = "127.0.0.1:5000"; // SPEC §4：镜像 127.0.0.1:5000/<owner>/<project>:<tag>
+pub const REGISTRY: &str = "127.0.0.1:5000"; // SPEC §4：镜像 127.0.0.1:5000/<user>/<project>:<tag>
 pub const MANIFEST_ACCEPT: &str = "application/vnd.docker.distribution.manifest.v2+json, application/vnd.oci.image.manifest.v1+json, application/vnd.docker.distribution.manifest.list.v2+json, application/vnd.oci.image.index.v1+json";
 pub const CADDY_FILE: &str = "/etc/caddy/Caddyfile";
 pub const DOCKER_NET: &str = "showroom-net";

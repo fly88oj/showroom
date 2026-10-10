@@ -51,9 +51,9 @@ ok(/^ed25519:[A-Za-z0-9+/]{43}$/.test(pubStr), `公钥串格式 (${pubStr.slice(
 ex.sr_free(pp, 128);
 
 // —— 2) sign_header + node 独立验签 ——
-const owner = 'alice', method = 'POST', path = '/_api/publish', nonce = '0123456789abcdef', ts = 1000000n;
+const user = 'alice', method = 'POST', path = '/_api/publish', nonce = '0123456789abcdef', ts = 1000000n;
 const body = Buffer.from('{"project":"demo"}');
-const [op, ol] = put(enc.encode(owner)), [mp, ml] = put(enc.encode(method)),
+const [op, ol] = put(enc.encode(user)), [mp, ml] = put(enc.encode(method)),
       [pp2, pl] = put(enc.encode(path)), [np, nl] = put(enc.encode(nonce)),
       [bp, bl] = put(body);
 const hp = alloc(512);
@@ -62,13 +62,13 @@ ok(r2 > 0, `sr_sign_header → ${r2}`);
 const auth = readCStr(hp, r2);
 const parts = auth.replace('SR-SIG1 ', '').split(':');
 ok(auth.startsWith('SR-SIG1 ') && parts.length === 4 && parts[0] === 'alice' && parts[1] === '1000000' && parts[2] === nonce,
-  '头四字段 owner/ts/nonce');
+  '头四字段 user/ts/nonce');
 const sig = Buffer.from(parts[3], 'base64url');
 ok(sig.length === 64, '签名 64B（b64url 无 padding）');
 // node 侧以独立实现验证：PKCS8(Ed25519) = 固定前缀 || 32B seed
 const DER_PKCS8_ED25519 = Buffer.from('302e020100300506032b657004220420', 'hex');
 const priv = createPrivateKey({ key: Buffer.concat([DER_PKCS8_ED25519, seed]), format: 'der', type: 'pkcs8' });
-const canonical = `SR-SIG1\n${owner}\n1000000\n${nonce}\n${method}\n${path}\n${createHash('sha256').update(body).digest('hex')}`;
+const canonical = `SR-SIG1\n${user}\n1000000\n${nonce}\n${method}\n${path}\n${createHash('sha256').update(body).digest('hex')}`;
 ok(edVerify(null, Buffer.from(canonical), createPublicKey(priv), sig), 'node Ed25519 验签通过（canonical 兼容）');
 for (const [p, l] of [[op, ol], [mp, ml], [pp2, pl], [np, nl], [bp, bl]]) ex.sr_free(p, l);
 ex.sr_free(hp, 512);

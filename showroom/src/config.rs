@@ -1,4 +1,4 @@
-//! ~/.showroom/config.toml（0600）：owner、密钥路径、双服务端地址、registry 凭据。
+//! ~/.showroom/config.toml（0600）：user（账号）、密钥路径、双服务端地址、registry 凭据。
 
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -33,8 +33,9 @@ pub struct Registry {
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Config {
-    #[serde(default)]
-    pub owner: String,
+    /// 发布者账号。磁盘键更名前为 `owner =`（serde alias 兼容读取旧配置；保存一律写 `user =`）。
+    #[serde(default, alias = "owner")]
+    pub user: String,
     #[serde(default = "default_key_path")]
     pub key_path: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -48,7 +49,7 @@ pub struct Config {
 impl Default for Config {
     fn default() -> Self {
         Config {
-            owner: String::new(),
+            user: String::new(),
             key_path: default_key_path(),
             server_lan: None,
             server_public: None,
@@ -100,10 +101,11 @@ mod tests {
     fn roundtrip_and_0600() {
         let d = tmpdir();
         let p = d.join("config.toml");
-        let mut c = Config::default();
-        c.owner = "alice".into();
-        c.server_lan = Some("http://your-host.example.com/".into());
-        c.server_public = None;
+        let mut c = Config {
+            user: "alice".into(),
+            server_lan: Some("http://your-host.example.com/".into()),
+            ..Config::default()
+        };
         c.registry.user = "alice".into();
         c.registry.password = "s3cret".into();
         c.save_to(&p).unwrap();
@@ -116,7 +118,7 @@ mod tests {
     #[test]
     fn missing_file_gives_defaults() {
         let c = Config::load_from(Path::new("/nonexistent/showroom-test-config.toml")).unwrap();
-        assert_eq!(c.owner, "");
+        assert_eq!(c.user, "");
         assert_eq!(c.key_path, "~/.showroom/id_ed25519");
         assert_eq!(c.server_lan, None);
         assert_eq!(c.registry, Registry::default());
@@ -125,7 +127,7 @@ mod tests {
     #[test]
     fn parses_spec_example() {
         let raw = r#"
-owner = "alice"
+user = "alice"
 key_path = "~/.showroom/id_ed25519"
 server_lan = "http://your-host.example.com"
 server_public = ""
@@ -135,9 +137,22 @@ user = "alice"
 password = "pw"
 "#;
         let c: Config = toml::from_str(raw).unwrap();
-        assert_eq!(c.owner, "alice");
+        assert_eq!(c.user, "alice");
         assert_eq!(c.server_lan.as_deref(), Some("http://your-host.example.com"));
         assert_eq!(c.server_public.as_deref(), Some(""));
         assert_eq!(c.registry.password, "pw");
+    }
+
+    // owner→user 更名兼容：旧配置文件的 `owner =` 键仍可读（serde alias）；保存后翻写为 `user =`
+    #[test]
+    fn legacy_owner_key_still_parses() {
+        let c: Config = toml::from_str("owner = \"alice\"\n").unwrap();
+        assert_eq!(c.user, "alice");
+        let d = tmpdir();
+        let p = d.join("legacy-config.toml");
+        c.save_to(&p).unwrap();
+        let text = fs::read_to_string(&p).unwrap();
+        assert!(text.contains("user = \"alice\"") && !text.contains("owner ="), "{text}");
+        let _ = fs::remove_dir_all(&d);
     }
 }

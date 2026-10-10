@@ -1,7 +1,7 @@
 # §14 实施方案：镜像删除 + 上传磁盘准入（v1.7）
 
 依据 SPEC §14（573ce01）/§13.3/§10.2；行号锚定 HEAD=d5de35c。词汇按「owner→user 更名已完成」约定：
-行文用**用户**；代码符号暂按 HEAD 写 `owner`/`own_check`，更名落地后同步替换（如 `user_check`），语义不变。
+行文用**用户**；代码符号按更名后写 `user`/`user_check`（owner→user 更名已落地），语义不变。
 纪律：ponytail——复用现有 df 解析、manifest HTTP 客户端、registry-gc 函数体，不引新依赖、不加后台任务。
 
 ## 1. 接口定格
@@ -34,7 +34,7 @@
 ```
 showroom space                       # 人读三行：可用/预留/总量（含已扣预留值）；--json 原样
 showroom images [--json]             # §13.1 端点既有，本方案补 CLI 展示（如 §13 已带则跳过）
-showroom rm-image <owner/project:tag># 删除+内联GC，打印「已删除 <image>，回收约 N MB」
+showroom rm-image <user/project:tag># 删除+内联GC，打印「已删除 <image>，回收约 N MB」
 ```
 
 ## 2. 文件级改动清单
@@ -81,14 +81,14 @@ showroom rm-image <owner/project:tag># 删除+内联GC，打印「已删除 <ima
   ("GET", "/_api/space", _) => { let v = blk(move || ops::space_snapshot(&s.root)).await?; Ok(Json(v)) }
   ("POST", "/_api/image-rm", Collected::Mem(b)) => {
       let req: ImageRmReq = jbody(b)?;
-      let (repo, tag) = image_guard(s, &req.image, &owner, &kid)?;   // 先守卫后进内核
+      let (repo, tag) = image_guard(s, &req.image, &user, &kid)?;   // 先守卫后进内核
       let freed = blk(move || ops::image_rm(&s.root, &repo, &tag)).await?;
       Ok(Json(json!({"freed_est_mb": freed})))
   }
   ```
 - 新增 `ImageRmReq{image:String}` 与守卫（仿 redis_db_guard serve.rs:622）：
   ```rust
-  fn image_guard(s:&S, image:&str, owner:&str, kid:&str) -> R<(String,String)>
+  fn image_guard(s:&S, image:&str, user:&str, kid:&str) -> R<(String,String)>
   // split_image_ref→None: E_NAME；repo_owned_by || key_is_admin: 放行；否则 E_AUTH（404 同体）
   ```
 

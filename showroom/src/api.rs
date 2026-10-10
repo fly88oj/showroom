@@ -9,7 +9,7 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use clap::ValueEnum;
 use serde_json::Value;
 
-use showroom_common::{nonce_hex, sign, sign_prehashed, sha256_hex_stream, OwnerKey};
+use showroom_common::{nonce_hex, sign, sign_prehashed, sha256_hex_stream, UserKey};
 
 use crate::config::Config;
 
@@ -48,7 +48,7 @@ pub fn pick_server(
         None => {}
     }
     if let Some(l) = lan {
-        if probe(&l) {
+        if probe(l) {
             return Ok((norm(l), Which::Lan));
         }
     }
@@ -152,7 +152,7 @@ fn check(resp: reqwest::blocking::Response) -> Result<Value, ApiError> {
 }
 
 /// 可达性探测：签名 GET /_api/health（3s 超时；收到任何 HTTP 响应即视为可达）。
-pub fn signed_probe<'a>(owner: &'a str, key: &'a OwnerKey) -> impl Fn(&str) -> bool + 'a {
+pub fn signed_probe<'a>(user: &'a str, key: &'a UserKey) -> impl Fn(&str) -> bool + 'a {
     move |base| {
         let Ok(c) = reqwest::blocking::Client::builder()
             .timeout(Duration::from_secs(3))
@@ -160,7 +160,7 @@ pub fn signed_probe<'a>(owner: &'a str, key: &'a OwnerKey) -> impl Fn(&str) -> b
         else {
             return false;
         };
-        let auth = sign(owner, key, "GET", "/_api/health", b"", now_unix(), &nonce_hex());
+        let auth = sign(user, key, "GET", "/_api/health", b"", now_unix(), &nonce_hex());
         let url = format!("{}/_api/health", base.trim_end_matches('/'));
         c.get(&url).header("Authorization", auth).send().is_ok()
     }
@@ -170,42 +170,42 @@ pub fn signed_probe<'a>(owner: &'a str, key: &'a OwnerKey) -> impl Fn(&str) -> b
 
 pub struct Api {
     pub base: String,
-    owner: String,
-    key: OwnerKey,
+    user: String,
+    key: UserKey,
     http: reqwest::blocking::Client,
 }
 
 impl Api {
-    fn load_key(path: &Path) -> Result<OwnerKey, String> {
-        OwnerKey::from_seed_file(path)
+    fn load_key(path: &Path) -> Result<UserKey, String> {
+        UserKey::from_seed_file(path)
             .map_err(|e| format!("读取密钥 {} 失败：{e}（先运行 showroom keygen）", path.display()))
     }
 
     /// 探测（签名 health）+ 选择服务端 + 加载密钥。
     pub fn connect(cfg: &Config, force: Option<Which>) -> Result<Api, String> {
-        if cfg.owner.is_empty() {
-            return Err("未配置 owner：showroom config --owner <name>".into());
+        if cfg.user.is_empty() {
+            return Err("未配置 user：showroom config --user <name>".into());
         }
         let (base, _which) = pick_server(
             cfg.server_lan.as_deref(),
             cfg.server_public.as_deref(),
             force,
-            signed_probe(&cfg.owner, &Self::load_key(&cfg.key_file())?),
+            signed_probe(&cfg.user, &Self::load_key(&cfg.key_file())?),
         )?;
         Self::open(base, cfg)
     }
 
     /// 用已选定的服务端构造（push 等已探测过的路径复用）。
     pub fn open(base: String, cfg: &Config) -> Result<Api, String> {
-        if cfg.owner.is_empty() {
-            return Err("未配置 owner：showroom config --owner <name>".into());
+        if cfg.user.is_empty() {
+            return Err("未配置 user：showroom config --user <name>".into());
         }
         let key = Self::load_key(&cfg.key_file())?;
         let http = reqwest::blocking::Client::builder()
             .timeout(Duration::from_secs(180)) // publish 服务端滚动发布可能较慢
             .build()
             .map_err(|e| format!("HTTP 客户端构造失败：{e}"))?;
-        Ok(Api { base, owner: cfg.owner.clone(), key, http })
+        Ok(Api { base, user: cfg.user.clone(), key, http })
     }
 
     /// 错误渲染收口：E_AUTH 附登记/时间偏差提示与公钥串，其余原样。
@@ -214,7 +214,7 @@ impl Api {
     }
 
     pub fn signed_get(&self, path_q: &str) -> Result<Value, String> {
-        let auth = sign(&self.owner, &self.key, "GET", path_q, b"", now_unix(), &nonce_hex());
+        let auth = sign(&self.user, &self.key, "GET", path_q, b"", now_unix(), &nonce_hex());
         self.finish(
             self.http
                 .get(format!("{}{}", self.base, path_q))
@@ -231,7 +231,7 @@ impl Api {
 
     fn post_json_inner(&self, path_q: &str, body: &Value) -> Result<Value, ApiError> {
         let bytes = serde_json::to_vec(body).map_err(|e| net_err(e.to_string()))?;
-        let auth = sign(&self.owner, &self.key, "POST", path_q, &bytes, now_unix(), &nonce_hex());
+        let auth = sign(&self.user, &self.key, "POST", path_q, &bytes, now_unix(), &nonce_hex());
         self.http
             .post(format!("{}{}", self.base, path_q))
             .header("Authorization", auth)
@@ -249,7 +249,7 @@ impl Api {
     }
 
     fn signed_get_raw_inner(&self, path_q: &str) -> Result<reqwest::blocking::Response, ApiError> {
-        let auth = sign(&self.owner, &self.key, "GET", path_q, b"", now_unix(), &nonce_hex());
+        let auth = sign(&self.user, &self.key, "GET", path_q, b"", now_unix(), &nonce_hex());
         let resp = reqwest::blocking::Client::builder()
             .timeout(Duration::from_secs(24 * 3600))
             .build()
@@ -277,7 +277,7 @@ impl Api {
             sha256_hex_stream(&f).map_err(|e| net_err(e.to_string()))?
         };
         let auth = sign_prehashed(
-            &self.owner, &self.key, "POST", path_q, &hash, now_unix(), &nonce_hex(),
+            &self.user, &self.key, "POST", path_q, &hash, now_unix(), &nonce_hex(),
         );
         let f = File::open(file).map_err(|e| net_err(e.to_string()))?;
         let resp = reqwest::blocking::Client::new() // 上传走独立无超时语义：单请求放宽到 24h

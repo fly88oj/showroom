@@ -7,7 +7,7 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 use serde_json::{json, Value};
-use showroom_common::{ed25519_dalek::VerifyingKey, sha256_hex, OwnerKey};
+use showroom_common::{ed25519_dalek::VerifyingKey, sha256_hex, UserKey};
 
 pub const PORT_MIN: u16 = 8100;
 pub const PORT_MAX: u16 = 8199;
@@ -64,7 +64,7 @@ pub fn rand_hex(n: usize) -> String {
 
 // —— 名字（SPEC §4 + §11；实现收口在 common::names）——
 
-/// project：§11 放宽正则 + 保留名；owner 等其余名字沿用旧小写正则（registry 路径需小写）。
+/// project：§11 放宽正则 + 保留名；user 等其余名字沿用旧小写正则（registry 路径需小写）。
 pub fn check_name(kind: &str, s: &str) -> R<()> {
     let r = if kind == "project" {
         showroom_common::names::check_project(s)
@@ -98,8 +98,17 @@ pub fn route_path(root: &Path, p: &str) -> PathBuf {
 fn legacy_route_path(root: &Path, p: &str, s: &str) -> PathBuf {
     routes_dir(root).join(format!("{p}-{s}.caddy"))
 }
-pub fn tokens_dir(root: &Path, owner: &str) -> PathBuf {
-    root.join("state/tokens").join(owner)
+pub fn tokens_dir(root: &Path, user: &str) -> PathBuf {
+    root.join("state/tokens").join(user)
+}
+/// registry 凭据目录：`state/users/<user>/reg.cred`（更名前为 `state/owners/<owner>/`；
+/// 旧目录仅回退读取/清理用，写入一律 users；整体迁移见 migrate_state_dirs）。
+pub fn users_dir(root: &Path, user: &str) -> PathBuf {
+    root.join("state/users").join(user)
+}
+/// 更名前旧目录 `state/owners/<owner>/`（迁移前的回退读取与吊销清理用）。
+pub fn legacy_owners_dir(root: &Path, user: &str) -> PathBuf {
+    root.join("state/owners").join(user)
 }
 pub fn ports_reg(root: &Path) -> PathBuf {
     root.join("state/ports.reg")
@@ -109,10 +118,11 @@ pub fn htpasswd_path(root: &Path) -> PathBuf {
 }
 
 // —— project.conf：key=value（owner tag port cport mem cpu redisdb updated [stopped] [legacyslot]）——
+// 注：磁盘键名沿用存量 `owner=`（不 break 主机存量 conf，语义即下方 user 字段）。
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct Conf {
-    pub owner: String,
+    pub user: String,
     pub tag: String,
     pub port: u16,
     pub cport: u16,
@@ -130,7 +140,7 @@ impl Conf {
     pub fn to_conf(&self) -> String {
         let mut s = format!(
             "owner={}\ntag={}\nport={}\ncport={}\nmem={}\ncpu={}\nredisdb={}\nupdated={}\n",
-            self.owner, self.tag, self.port, self.cport, self.mem, self.cpu, self.redisdb, self.updated
+            self.user, self.tag, self.port, self.cport, self.mem, self.cpu, self.redisdb, self.updated
         );
         if self.stopped {
             s.push_str("stopped=1\n");
@@ -149,7 +159,7 @@ impl Conf {
                 .ok_or_else(|| ApiError::state(format!("conf missing field '{k}'")))
         };
         Ok(Conf {
-            owner: need("owner")?,
+            user: need("owner")?,
             tag: need("tag")?,
             port: need("port")?.parse().map_err(|e| ApiError::state(format!("conf port: {e}")))?,
             cport: need("cport")?.parse().map_err(|e| ApiError::state(format!("conf cport: {e}")))?,
@@ -176,7 +186,7 @@ impl Conf {
     /// ps / GET /_api/projects 共用的列表行（SPEC §3 projects 响应字段，§11 无 slot）。
     pub fn to_json(&self, p: &str, status: &str) -> Value {
         json!({
-            "project": p, "owner": self.owner, "tag": self.tag,
+            "project": p, "user": self.user, "tag": self.tag,
             "url": public_url(p), "status": status,
             "port": self.port, "mem": self.mem, "cpu": self.cpu, "updated": self.updated,
         })
@@ -460,11 +470,11 @@ pub fn alloc_redisdb(root: &Path, policy: &Policy) -> R<u8> {
         .ok_or_else(|| ApiError::new("E_QUOTA", format!("redis db pool exhausted: {}/{} in use", used.len(), cap)))
 }
 
-/// 用户名下项目的 redisdb 集合（§13.2 浏览隔离）：扫全部项目 conf 按 conf.owner 聚合，升序去重。
-pub fn user_redis_dbs(root: &Path, owner: &str) -> Vec<u16> {
+/// 用户名下项目的 redisdb 集合（§13.2 浏览隔离）：扫全部项目 conf 按 conf.user 聚合，升序去重。
+pub fn user_redis_dbs(root: &Path, user: &str) -> Vec<u16> {
     let mut v: Vec<u16> = all_confs(root)
         .into_iter()
-        .filter(|(_, c)| c.owner == owner)
+        .filter(|(_, c)| c.user == user)
         .map(|(_, c)| c.redisdb as u16)
         .collect();
     v.sort_unstable();
@@ -526,19 +536,19 @@ pub fn clip_value(s: &str) -> String {
 pub const IMAGES_MAX_REPOS: usize = 500;
 pub const IMAGES_MAX_TAGS: usize = 500;
 
-/// repo 是否属于 owner：`<owner>/` 命名空间（§4 镜像 127.0.0.1:5000/<owner>/<project>:<tag>）。
+/// repo 是否属于 user：`<user>/` 命名空间（§4 镜像 127.0.0.1:5000/<user>/<project>:<tag>）。
 /// split 精确比对首段，"alice-x/y" 不误吞给 "alice"。
-pub fn repo_owned_by(repo: &str, owner: &str) -> bool {
-    repo.split_once('/').map(|(ns, _)| ns == owner).unwrap_or(false)
+pub fn repo_owned_by(repo: &str, user: &str) -> bool {
+    repo.split_once('/').map(|(ns, _)| ns == user).unwrap_or(false)
 }
 
-/// catalog+tags 展平（§13.1 纯函数）：owner=Some 仅留该用户 repo，None（admin 钥匙）全量；
+/// catalog+tags 展平（§13.1 纯函数）：user=Some 仅留该用户 repo，None（admin 钥匙）全量；
 /// repo 数与 tag 总量分别受 IMAGES_MAX_REPOS/IMAGES_MAX_TAGS 上限。
-pub fn flatten_images(catalog: &[(String, Vec<String>)], owner: Option<&str>) -> Vec<String> {
+pub fn flatten_images(catalog: &[(String, Vec<String>)], user: Option<&str>) -> Vec<String> {
     let mut out: Vec<String> = vec![];
     let mut repos = 0usize;
     for (repo, tags) in catalog {
-        if let Some(o) = owner {
+        if let Some(o) = user {
             if !repo_owned_by(repo, o) {
                 continue;
             }
@@ -563,33 +573,33 @@ pub fn kid_of(vk: &VerifyingKey) -> String {
     sha256_hex(&vk.to_bytes())[..8].to_string()
 }
 
-/// kid 形如 sha256(pubkey) 前 8 hex（owner_add 生成）；入参校验防路径拼接穿越。
+/// kid 形如 sha256(pubkey) 前 8 hex（user_add 生成）；入参校验防路径拼接穿越。
 pub fn valid_kid(kid: &str) -> bool {
     kid.len() == 8 && kid.bytes().all(|b| b.is_ascii_hexdigit())
 }
 
-/// owner 全部公钥配 kid（`(kid, key)`，kid 由公钥内容派生，与文件名约定一致）。
+/// user 全部公钥配 kid（`(kid, key)`，kid 由公钥内容派生，与文件名约定一致）。
 /// 无法解析的 .pub（坏文件）跳过——它本就过不了验签。
-pub fn owner_keys_with_kid(root: &Path, owner: &str) -> Vec<(String, VerifyingKey)> {
-    let dir = tokens_dir(root, owner);
+pub fn user_keys_with_kid(root: &Path, user: &str) -> Vec<(String, VerifyingKey)> {
+    let dir = tokens_dir(root, user);
     let Ok(rd) = fs::read_dir(&dir) else { return vec![] };
     rd.filter_map(|e| e.ok())
         .map(|e| e.path())
         .filter(|p| p.extension().and_then(|o| o.to_str()) == Some("pub"))
         .filter_map(|p| {
             let s = fs::read_to_string(p).ok()?;
-            let vk = OwnerKey::from_pub_string(s.trim()).ok()?;
+            let vk = UserKey::from_pub_string(s.trim()).ok()?;
             Some((kid_of(&vk), vk))
         })
         .collect()
 }
 
-/// 管理员标记：`tokens/<owner>/<kid>.admin` 空文件存在 = 该钥匙为管理员（SPEC §12.2）。
-pub fn admin_marker_path(root: &Path, owner: &str, kid: &str) -> PathBuf {
-    tokens_dir(root, owner).join(format!("{kid}.admin"))
+/// 管理员标记：`tokens/<user>/<kid>.admin` 空文件存在 = 该钥匙为管理员（SPEC §12.2）。
+pub fn admin_marker_path(root: &Path, user: &str, kid: &str) -> PathBuf {
+    tokens_dir(root, user).join(format!("{kid}.admin"))
 }
 
-/// 文件 mtime（unix 秒；读不到给 0）——owner_list 的 key 登记时间来源。
+/// 文件 mtime（unix 秒；读不到给 0）——user_list 的 key 登记时间来源。
 pub fn file_mtime(p: &Path) -> u64 {
     fs::metadata(p)
         .ok()
@@ -786,6 +796,50 @@ fn rewrite_ports_reg(root: &Path, winners: &[(String, String)]) {
     let _ = fs::write(ports_reg(root), out);
 }
 
+// —— owner→user 更名的状态目录迁移：state/owners/ → state/users/ ——
+
+/// `state/owners/` 整体改名为 `state/users/`（registry 凭据 reg.cred 的家）。
+/// 幂等：owners 不存在（从未有/已迁移）恒 no-op；users 已存在时不覆盖
+///（手动建过/并发已迁移），如实打印并跳过。serve 启动与 reconcile 前调用；
+/// 读取侧另带双目录兼容（先 users 后 owners 回退），迁移前后行为一致。
+pub fn migrate_state_dirs(root: &Path) -> bool {
+    let old = root.join("state/owners");
+    let new = root.join("state/users");
+    if !old.is_dir() {
+        return false;
+    }
+    if new.exists() {
+        eprintln!("showroomctl: migrate: state/owners 与 state/users 并存，跳过整体改名（如需迁移请手工合并）");
+        return false;
+    }
+    match fs::rename(&old, &new) {
+        Ok(()) => {
+            eprintln!("showroomctl: migrate: state/owners/ 已整体改名为 state/users/");
+            true
+        }
+        Err(e) => {
+            // 跨设备等场景退回逐目录拷贝语义；失败如实记录，下次启动重试
+            let mut moved = true;
+            if let Ok(rd) = fs::read_dir(&old) {
+                for e in rd.flatten() {
+                    let dst = new.join(e.file_name());
+                    if fs::rename(e.path(), &dst).is_err() && fs::copy(e.path(), &dst).is_err() {
+                        moved = false;
+                    }
+                }
+            }
+            if moved {
+                let _ = fs::remove_dir_all(&old);
+                eprintln!("showroomctl: migrate: state/owners/ 已逐项迁入 state/users/");
+                true
+            } else {
+                eprintln!("showroomctl: migrate: state/owners/ → state/users/ 失败（下次启动重试）: {e}");
+                false
+            }
+        }
+    }
+}
+
 // —— _tmp 陈旧会话筛选（SPEC §8.1：>24h 由 gc-images 顺带删）——
 
 pub const TMP_STALE_SECS: u64 = 24 * 3600;
@@ -873,7 +927,7 @@ mod tests {
 
     fn base_conf(updated: u64) -> Conf {
         Conf {
-            owner: "alice".into(),
+            user: "alice".into(),
             tag: "v1".into(),
             port: 8100,
             cport: 3000,
@@ -899,9 +953,9 @@ mod tests {
         for r in ["v2", "_api", "_bootstrap", "_console"] {
             assert!(check_name("project", r).is_err(), "{r} reserved for project");
         }
-        // 辅助名（owner）：旧小写正则，大写拒绝
-        assert!(check_name("owner", "alice").is_ok());
-        assert_eq!(check_name("owner", "Alice").unwrap_err().code, "E_NAME");
+        // 辅助名（user）：旧小写正则，大写拒绝
+        assert!(check_name("user", "alice").is_ok());
+        assert_eq!(check_name("user", "Alice").unwrap_err().code, "E_NAME");
         assert_eq!(check_name("project", "v2").unwrap_err().code, "E_NAME");
     }
 
@@ -912,7 +966,7 @@ mod tests {
         let v = c.to_json("demo", "running");
         assert_eq!(v["project"], "demo");
         assert!(v.get("slot").is_none(), "§11 响应不再含 slot");
-        assert_eq!(v["owner"], "alice");
+        assert_eq!(v["user"], "alice");
         assert_eq!(v["tag"], "v1");
         assert_eq!(v["status"], "running");
         assert_eq!(v["url"], public_url("demo"));
@@ -1150,11 +1204,11 @@ mod tests {
         assert!(e2.msg.contains("4/2"), "{}", e2.msg);
     }
 
-    // 附带 b：user_redis_dbs 聚合（§13.2 浏览隔离）——按 conf.owner 收集，升序去重；无项目空表
+    // 附带 b：user_redis_dbs 聚合（§13.2 浏览隔离）——按 conf.user 收集，升序去重；无项目空表
     #[test]
     fn user_redis_dbs_aggregation() {
         let root = troot("user-dbs");
-        for (p, owner, db) in [
+        for (p, user, db) in [
             ("demo1", "alice", 3u8),
             ("demo2", "alice", 7),
             ("demo3", "alice", 3), // 重复 db 去重
@@ -1162,7 +1216,7 @@ mod tests {
             ("demo5", "carol", 255),
         ] {
             let mut c = base_conf(1);
-            c.owner = owner.into();
+            c.user = user.into();
             c.redisdb = db;
             c.save(&root, p).unwrap();
         }
@@ -1261,6 +1315,31 @@ mod tests {
         assert!(!root.join("state/projects/hello").exists());
         // 幂等
         assert!(!migrate_legacy_layout(&root));
+    }
+
+    // 5e. owner→user 更名目录迁移：owners 存在且 users 不存在 → 整体 mv；幂等；两者并存不覆盖
+    #[test]
+    fn migrate_state_dirs_moves_owners_to_users() {
+        let root = troot("dirs");
+        // 无 owners：no-op
+        assert!(!migrate_state_dirs(&root));
+        // 有 owners：整体改名 + 内容原样
+        fs::create_dir_all(root.join("state/owners/alice")).unwrap();
+        fs::write(root.join("state/owners/alice/reg.cred"), "alice:pw\n").unwrap();
+        fs::create_dir_all(root.join("state/owners/bob")).unwrap();
+        assert!(migrate_state_dirs(&root));
+        assert!(!root.join("state/owners").exists());
+        assert_eq!(
+            fs::read_to_string(root.join("state/users/alice/reg.cred")).unwrap(),
+            "alice:pw\n"
+        );
+        assert!(root.join("state/users/bob").is_dir());
+        // 幂等：再跑 no-op
+        assert!(!migrate_state_dirs(&root));
+        // users 已存在时不覆盖（手动建过/已迁移）
+        fs::create_dir_all(root.join("state/owners/carol")).unwrap();
+        assert!(!migrate_state_dirs(&root));
+        assert!(root.join("state/owners/carol").is_dir(), "并存时保留原状");
     }
 
     // 6. _tmp 陈旧筛选：age>24h 才删；恰 24h / 未来 mtime（时钟偏移）不删
@@ -1396,7 +1475,7 @@ Cached:         13121516 kB
         assert_eq!(clipped_cjk.matches('中').count() * 3 + "...(截断)".len(), clipped_cjk.len());
     }
 
-    // 10b. 镜像列表纯函数（§13.1）：owner 前缀过滤 / admin 全量 / repo 与 tag 上限
+    // 10b. 镜像列表纯函数（§13.1）：user 前缀过滤 / admin 全量 / repo 与 tag 上限
     #[test]
     fn images_flatten_and_filter() {
         // catalog 样例：repo 名典序（registry:2 catalog 实际顺序）× 各自 tags
@@ -1409,7 +1488,7 @@ Cached:         13121516 kB
             ("alice/api", &["v1"]),
             ("alice/web", &["v1", "v2"]),
             ("bob/web", &["v1"]),
-            ("bare", &["latest"]), // 无 owner 前缀 repo：任何用户过滤都不可见（admin 可见）
+            ("bare", &["latest"]), // 无 user 前缀 repo：任何用户过滤都不可见（admin 可见）
         ]);
 
         // admin（None）：全量展平 "repo:tag"
@@ -1511,19 +1590,19 @@ Mon 2026-10-12 00:00:00 +08  1h 32min Sun 2026-10-10 23:00:12 +08   2h 3min ago 
         assert_eq!(file_mtime(&root.join("nope")), 0);
     }
 
-    // 13. owner_keys_with_kid：kid 由公钥内容派生；坏 .pub 跳过；无 owner 空
+    // 13. user_keys_with_kid：kid 由公钥内容派生；坏 .pub 跳过；无 user 空
     #[test]
-    fn owner_keys_with_kid_pairs() {
+    fn user_keys_with_kid_pairs() {
         let root = troot("kids");
-        let k = showroom_common::OwnerKey::generate();
+        let k = showroom_common::UserKey::generate();
         let dir = tokens_dir(&root, "alice");
         fs::create_dir_all(&dir).unwrap();
         fs::write(dir.join("whatever.pub"), format!("{}\n", k.pub_string())).unwrap();
         fs::write(dir.join("broken.pub"), "not a key\n").unwrap();
-        let want = kid_of(&showroom_common::OwnerKey::from_pub_string(&k.pub_string()).unwrap());
-        let got = owner_keys_with_kid(&root, "alice");
+        let want = kid_of(&showroom_common::UserKey::from_pub_string(&k.pub_string()).unwrap());
+        let got = user_keys_with_kid(&root, "alice");
         assert_eq!(got.len(), 1, "坏 .pub 跳过: {got:?}");
         assert_eq!(got[0].0, want);
-        assert!(owner_keys_with_kid(&root, "nobody").is_empty());
+        assert!(user_keys_with_kid(&root, "nobody").is_empty());
     }
 }

@@ -31,7 +31,7 @@ pub const MAX_JSON_BODY: usize = 1024 * 1024;
 
 pub struct AppState {
     pub root: PathBuf,
-    /// nonce 查重（SPEC §1）："owner:nonce" → 过期时刻；惰性清理。
+    /// nonce 查重（SPEC §1）："user:nonce" → 过期时刻；惰性清理。
     /// ponytail: 全局 HashSet 语义，非严格 LRU——重启清零可接受（SPEC 明示）
     pub nonces: Mutex<HashMap<String, i64>>,
 }
@@ -61,6 +61,8 @@ pub async fn run(root: PathBuf) -> R<()> {
         let p = ops::init_keys(&root)?;
         eprintln!("showroomctl: platform rsa generated at {}", p.display());
     }
+    // owner→user 更名的状态目录迁移（幂等：state/owners/ → state/users/，SPEC §5）
+    state::migrate_state_dirs(&root);
     // v1.4 槽位布局迁移（§11，幂等；state 上提 + caddy reload + 容器收养，stderr/日志如实记录）
     for l in ops::migrate_legacy(&root) {
         eprintln!("showroomctl: migrate: {l}");
@@ -115,7 +117,7 @@ async fn dispatch(
     collected: &Collected,
 ) -> Result<Response, ApiError> {
     // 一切端点先验签（含未知路径/方法；SPEC §3 零信息暴露）
-    let Verified { owner, kid } = auth(s, method.as_str(), &uri_str(uri), sha, headers).await?;
+    let Verified { user, kid } = auth(s, method.as_str(), &uri_str(uri), sha, headers).await?;
     if matches!(collected, Collected::Overflow) {
         return Err(ApiError::new("E_QUOTA", "body exceeds limit (json 1MB / import IMPORT_MAX_GB)"));
     }
@@ -124,7 +126,7 @@ async fn dispatch(
     if method == "GET" && path == "/_api/logs-stream" {
         let project = qget(&q, "project")?;
         state::check_name("project", &project)?;
-        own_check(&s.root, &project, &owner)?;
+        user_check(&s.root, &project, &user)?;
         let tail: u32 = q.get("tail").and_then(|t| t.parse().ok()).unwrap_or(100).min(10000);
         let root = s.root.clone();
         return blk(move || streams::logs_stream(&root, &project, tail)).await;
@@ -141,7 +143,7 @@ async fn dispatch(
             .parse()
             .map_err(|_| ApiError::new("E_NAME", "bad len"))?;
         let root = s.root.clone();
-        let o = owner.clone();
+        let o = user.clone();
         let id2 = id.clone();
         let (bytes, total, finished) = blk(move || dbmaint::dump_chunk(&root, &o, &id2, offset, len)).await?;
         if finished {
@@ -160,57 +162,57 @@ async fn dispatch(
 
         // —— 身份（SPEC §12.2）：whoami 用当前请求命中的 kid 判定 admin ——
         ("GET", "/_api/whoami", _) => Ok(Json(json!({
-            "owner": owner, "kid": kid,
-            "admin": ops::key_is_admin(&s.root, &owner, &kid),
+            "user": user, "kid": kid,
+            "admin": ops::key_is_admin(&s.root, &user, &kid),
         }))),
 
         // —— 管理组（SPEC §12.2）：统一验签后再过 admin_guard，非管理员与 E_AUTH 同 404 ——
 
-        ("GET", "/_api/admin/owners", _) => {
-            admin_guard(s, &owner, &kid)?;
+        ("GET", "/_api/admin/users", _) => {
+            admin_guard(s, &user, &kid)?;
             let root = s.root.clone();
-            let owners = blk(move || Ok(ops::owner_list(&root))).await?;
-            Ok(Json(json!({"owners": owners})))
+            let users = blk(move || Ok(ops::user_list(&root))).await?;
+            Ok(Json(json!({"users": users})))
         }
 
-        ("POST", "/_api/admin/owner-add", Collected::Mem(b)) => {
-            admin_guard(s, &owner, &kid)?; // 先守卫后解析 body：非管理员不因 body 畸形泄露 E_NAME/E_AUTH 差异
-            let req: AdminOwnerAddReq = jbody(b)?;
+        ("POST", "/_api/admin/user-add", Collected::Mem(b)) => {
+            admin_guard(s, &user, &kid)?; // 先守卫后解析 body：非管理员不因 body 畸形泄露 E_NAME/E_AUTH 差异
+            let req: AdminUserAddReq = jbody(b)?;
             let root = s.root.clone();
             let added = blk(move || {
-                ops::owner_add(&root, &req.owner, &req.pubkey, req.admin.unwrap_or(false), false)
+                ops::user_add(&root, &req.user, &req.pubkey, req.admin.unwrap_or(false), false)
             })
             .await?;
             // 密码只此一次返回（远程发卡；本机 reg.cred 常驻，不再可查）
             Ok(Json(json!({"ok": true, "kid": added.kid, "registry_password": added.password})))
         }
 
-        ("POST", "/_api/admin/owner-revoke", Collected::Mem(b)) => {
-            admin_guard(s, &owner, &kid)?; // 先守卫后解析 body：非管理员不因 body 畸形泄露 E_NAME/E_AUTH 差异
-            let req: AdminOwnerReq = jbody(b)?;
+        ("POST", "/_api/admin/user-revoke", Collected::Mem(b)) => {
+            admin_guard(s, &user, &kid)?; // 先守卫后解析 body：非管理员不因 body 畸形泄露 E_NAME/E_AUTH 差异
+            let req: AdminUserReq = jbody(b)?;
             let root = s.root.clone();
-            blk(move || ops::owner_revoke(&root, &req.owner)).await?;
+            blk(move || ops::user_revoke(&root, &req.user)).await?;
             Ok(Json(json!({"ok": true})))
         }
 
         ("POST", "/_api/admin/key-rm", Collected::Mem(b)) => {
-            admin_guard(s, &owner, &kid)?; // 先守卫后解析 body：非管理员不因 body 畸形泄露 E_NAME/E_AUTH 差异
+            admin_guard(s, &user, &kid)?; // 先守卫后解析 body：非管理员不因 body 畸形泄露 E_NAME/E_AUTH 差异
             let req: AdminKeyReq = jbody(b)?;
             let root = s.root.clone();
-            blk(move || ops::owner_key_rm(&root, &req.owner, &req.kid)).await?;
+            blk(move || ops::user_key_rm(&root, &req.user, &req.kid)).await?;
             Ok(Json(json!({"ok": true})))
         }
 
         ("POST", "/_api/admin/key-admin", Collected::Mem(b)) => {
-            admin_guard(s, &owner, &kid)?; // 先守卫后解析 body：非管理员不因 body 畸形泄露 E_NAME/E_AUTH 差异
+            admin_guard(s, &user, &kid)?; // 先守卫后解析 body：非管理员不因 body 畸形泄露 E_NAME/E_AUTH 差异
             let req: AdminKeyAdminReq = jbody(b)?;
             let root = s.root.clone();
-            blk(move || ops::key_set_admin(&root, &req.owner, &req.kid, req.admin)).await?;
+            blk(move || ops::key_set_admin(&root, &req.user, &req.kid, req.admin)).await?;
             Ok(Json(json!({"ok": true})))
         }
 
         ("GET", "/_api/admin/status", _) => {
-            admin_guard(s, &owner, &kid)?;
+            admin_guard(s, &user, &kid)?;
             let root = s.root.clone();
             let status = blk(move || ops::admin_status(&root)).await?;
             Ok(Json(status))
@@ -229,11 +231,11 @@ async fn dispatch(
         }
 
         // —— 镜像列表（SPEC §13.1，部署表单 ComboBox）：catalog+tags 展平；
-        //     按签名用户 `<owner>/` 前缀过滤；admin 钥匙不过滤 ——
+        //     按签名用户 `<user>/` 前缀过滤；admin 钥匙不过滤 ——
         ("GET", "/_api/images", _) => {
-            let admin = ops::key_is_admin(&s.root, &owner, &kid);
+            let admin = ops::key_is_admin(&s.root, &user, &kid);
             let root = s.root.clone();
-            let o = owner.clone();
+            let o = user.clone();
             let images = blk(move || ops::images(&root, if admin { None } else { Some(&o) })).await?;
             Ok(Json(json!({"images": images})))
         }
@@ -244,7 +246,7 @@ async fn dispatch(
             let o = blk(move || {
                 publish::publish(
                     &root,
-                    &owner,
+                    &user,
                     &req.project,
                     &req.tag,
                     publish::PublishOpts { mem: req.mem, cpu: req.cpu, cport: req.container_port },
@@ -260,7 +262,7 @@ async fn dispatch(
             Collected::Mem(b),
         ) => {
             let req: ProjectReq = jbody(b)?;
-            own_check(&s.root, &req.project, &owner)?;
+            user_check(&s.root, &req.project, &user)?;
             let act: &'static str = match path {
                 "/_api/stop" => "stop",
                 "/_api/start" => "start",
@@ -286,9 +288,9 @@ async fn dispatch(
             let project = qget(&q, "project")?;
             let tag = qget(&q, "tag")?;
             state::check_name("project", &project)?;
-            publish::check_ownership(&s.root, &project, &owner)?;
+            publish::check_ownership(&s.root, &project, &user)?;
             let root = s.root.clone();
-            let o = owner.clone();
+            let o = user.clone();
             let tmp = tmp.clone();
             let digest = blk(move || publish::import_from_file(&root, &o, &project, &tag, &tmp)).await?;
             Ok(Json(json!({"ok": true, "digest": digest})))
@@ -306,9 +308,9 @@ async fn dispatch(
             let req: BeginReq = jbody(b)?;
             state::check_name("project", &req.project)?;
             publish::check_tag(&req.tag)?;
-            publish::check_ownership(&s.root, &req.project, &owner)?;
+            publish::check_ownership(&s.root, &req.project, &user)?;
             let root = s.root.clone();
-            let o = owner.clone();
+            let o = user.clone();
             let id = blk(move || {
                 publish::import_begin(&root, &o, &req.project, &req.tag, &req.image_id, req.total_bytes)
             })
@@ -322,7 +324,7 @@ async fn dispatch(
                 .parse()
                 .map_err(|_| ApiError::new("E_NAME", "bad seq"))?;
             let root = s.root.clone();
-            let o = owner.clone();
+            let o = user.clone();
             let tmp = tmp.clone();
             let n = blk(move || publish::import_chunk(&root, &o, &id, seq, &tmp)).await?;
             Ok(Json(json!({"ok": true, "received": n})))
@@ -330,24 +332,24 @@ async fn dispatch(
 
         ("GET", "/_api/import-status", _) => {
             let id = qget(&q, "upload")?;
-            let m = publish::load_meta_owned(&s.root, &id, &owner)?;
+            let m = publish::load_meta_owned(&s.root, &id, &user)?;
             Ok(Json(json!({"received": m.received, "total": m.total})))
         }
 
         ("POST", "/_api/import-end", _) => {
             let id = qget(&q, "upload")?;
             let root = s.root.clone();
-            let o = owner.clone();
+            let o = user.clone();
             let digest = blk(move || publish::import_end(&root, &o, &id)).await?;
             Ok(Json(json!({"ok": true, "digest": digest})))
         }
 
-        // —— 数据库维护（SPEC §9）：统一验签 + own_check 后进 dbmaint 内核 ——
+        // —— 数据库维护（SPEC §9）：统一验签 + user_check 后进 dbmaint 内核 ——
 
         ("POST", "/_api/db-sql", Collected::Mem(b)) => {
             let req: DbSqlReq = jbody(b)?;
             state::check_name("project", &req.project)?;
-            own_check(&s.root, &req.project, &owner)?;
+            user_check(&s.root, &req.project, &user)?;
             let (p, sql, confirm) = (req.project, req.sql, req.confirm.unwrap_or(false));
             let root = s.root.clone();
             let out = blk(move || dbmaint::sql(&root, &p, &sql, confirm)).await?;
@@ -357,7 +359,7 @@ async fn dispatch(
         ("GET", "/_api/db-tables", _) => {
             let project = qget(&q, "project")?;
             state::check_name("project", &project)?;
-            own_check(&s.root, &project, &owner)?;
+            user_check(&s.root, &project, &user)?;
             let root = s.root.clone();
             let tables = blk(move || dbmaint::tables(&root, &project)).await?;
             Ok(Json(json!({"tables": tables})))
@@ -366,7 +368,7 @@ async fn dispatch(
         ("POST", "/_api/db-preview", Collected::Mem(b)) => {
             let req: DbPreviewReq = jbody(b)?;
             state::check_name("project", &req.project)?;
-            own_check(&s.root, &req.project, &owner)?;
+            user_check(&s.root, &req.project, &user)?;
             let (p, table, limit) = (req.project, req.table, req.limit.unwrap_or(50));
             let root = s.root.clone();
             let (columns, rows) = blk(move || dbmaint::preview(&root, &p, &table, limit)).await?;
@@ -377,9 +379,9 @@ async fn dispatch(
         ("POST", "/_api/db-dump-begin", Collected::Mem(b)) => {
             let req: DbDumpBeginReq = jbody(b)?;
             state::check_name("project", &req.project)?;
-            own_check(&s.root, &req.project, &owner)?;
+            user_check(&s.root, &req.project, &user)?;
             let root = s.root.clone();
-            let o = owner.clone();
+            let o = user.clone();
             let (p, pem) = (req.project, req.client_pub_pem);
             let id = blk(move || dbmaint::dump_begin(&root, &o, &p, &pem)).await?;
             Ok(Json(json!({"dump_id": id})))
@@ -388,7 +390,7 @@ async fn dispatch(
         ("GET", "/_api/db-dump-status", _) => {
             let id = qget(&q, "dump")?;
             let root = s.root.clone();
-            let o = owner.clone();
+            let o = user.clone();
             let st = blk(move || dbmaint::dump_status(&root, &o, &id)).await?;
             Ok(Json(json!({"ready": st.state == "ready", "total": st.total, "error": st.error})))
         }
@@ -397,7 +399,7 @@ async fn dispatch(
             let project = qget(&q, "project")?;
             let confirm = q.get("confirm").map(|v| v == "true").unwrap_or(false);
             state::check_name("project", &project)?;
-            own_check(&s.root, &project, &owner)?;
+            user_check(&s.root, &project, &user)?;
             let root = s.root.clone();
             let p = project;
             let tmp = tmp.clone();
@@ -408,7 +410,7 @@ async fn dispatch(
         ("POST", "/_api/db-reset", Collected::Mem(b)) => {
             let req: DbResetReq = jbody(b)?;
             state::check_name("project", &req.project)?;
-            own_check(&s.root, &req.project, &owner)?;
+            user_check(&s.root, &req.project, &user)?;
             let root = s.root.clone();
             let (p, confirm) = (req.project, req.confirm.unwrap_or(false));
             blk(move || dbmaint::reset(&root, &p, confirm)).await?;
@@ -419,11 +421,11 @@ async fn dispatch(
 
         ("GET", "/_api/redis-dbs", _) => {
             let policy = state::Policy::load(&s.root);
-            let admin = ops::key_is_admin(&s.root, &owner, &kid);
+            let admin = ops::key_is_admin(&s.root, &user, &kid);
             let dbs: Vec<u16> = if admin {
                 (0..policy.redis_pool_cap()).collect()
             } else {
-                state::user_redis_dbs(&s.root, &owner)
+                state::user_redis_dbs(&s.root, &user)
             };
             let mut v = json!({"dbs": dbs});
             if admin {
@@ -433,7 +435,7 @@ async fn dispatch(
         }
 
         ("GET", "/_api/redis-keys", _) => {
-            let db = redis_db_guard(s, &q, &owner, &kid)?;
+            let db = redis_db_guard(s, &q, &user, &kid)?;
             let pat = q.get("q").cloned().unwrap_or_default();
             // 默认 100 上限 200（--scan 无 limit 参数，内核读满即杀并标截断）
             let limit: usize = q.get("limit").and_then(|t| t.parse().ok()).unwrap_or(100).min(200);
@@ -442,7 +444,7 @@ async fn dispatch(
         }
 
         ("GET", "/_api/redis-get", _) => {
-            let db = redis_db_guard(s, &q, &owner, &kid)?;
+            let db = redis_db_guard(s, &q, &user, &kid)?;
             let key = qget(&q, "key")?;
             let (t, ttl_ms, value) = blk(move || ops::redis_get(db, &key)).await?;
             Ok(Json(json!({"type": t, "ttl_ms": ttl_ms, "value": value})))
@@ -450,7 +452,7 @@ async fn dispatch(
 
         ("GET", "/_api/logs", _) => {
             let project = qget(&q, "project")?;
-            own_check(&s.root, &project, &owner)?;
+            user_check(&s.root, &project, &user)?;
             let tail: u32 = q.get("tail").and_then(|t| t.parse().ok()).unwrap_or(100).min(10000);
             let root = s.root.clone();
             let logs = blk(move || ops::logs(&root, &project, tail)).await?;
@@ -459,7 +461,7 @@ async fn dispatch(
 
         ("GET", "/_api/env", _) => {
             let project = qget(&q, "project")?;
-            own_check(&s.root, &project, &owner)?;
+            user_check(&s.root, &project, &user)?;
             let root = s.root.clone();
             let env = blk(move || ops::env_of(&root, &project)).await?;
             Ok(Json(json!({"env": env})))
@@ -559,16 +561,16 @@ async fn collect_body(root: &Path, body: Body, to_file: bool) -> R<(String, Coll
 
 // —— SR-SIG1 验签（common::verify_with_hash，预计算哈希版）+ nonce 查重 ——
 
-/// auth 产物：owner + 命中钥匙的 kid（whoami / admin_guard 据此判定，SPEC §12.2）。
+/// auth 产物：user + 命中钥匙的 kid（whoami / admin_guard 据此判定，SPEC §12.2）。
 pub struct Verified {
-    pub owner: String,
+    pub user: String,
     pub kid: String,
 }
 
 /// nonce 查重 + 惰性清理（过期条目随每次插入移除）。
-fn nonce_fresh(m: &mut HashMap<String, i64>, owner: &str, nonce: &str, now: i64) -> bool {
+fn nonce_fresh(m: &mut HashMap<String, i64>, user: &str, nonce: &str, now: i64) -> bool {
     m.retain(|_, exp| *exp > now);
-    let key = format!("{owner}:{nonce}");
+    let key = format!("{user}:{nonce}");
     if m.contains_key(&key) {
         return false;
     }
@@ -582,15 +584,15 @@ async fn auth(s: &S, method: &str, uri: &str, body_sha: &str, headers: &HeaderMa
         .get(axum::http::header::AUTHORIZATION)
         .and_then(|v| v.to_str().ok())
         .ok_or_else(|| ApiError::new("E_AUTH", "missing Authorization"))?;
-    let owner = authv.strip_prefix("SR-SIG1 ").and_then(|r| r.split(':').next()).unwrap_or("");
-    // 钥匙带 kid（kid 由公钥内容派生，与 tokens/<owner>/<kid>.pub 文件名约定一致）
-    let keys = if owner.is_empty() { vec![] } else { state::owner_keys_with_kid(&s.root, owner) };
+    let user = authv.strip_prefix("SR-SIG1 ").and_then(|r| r.split(':').next()).unwrap_or("");
+    // 钥匙带 kid（kid 由公钥内容派生，与 tokens/<user>/<kid>.pub 文件名约定一致）
+    let keys = if user.is_empty() { vec![] } else { state::user_keys_with_kid(&s.root, user) };
     let pubkeys: Vec<_> = keys.iter().map(|(_, vk)| *vk).collect();
     let v = common::verify_with_hash(authv, &pubkeys, method, uri, body_sha, now).map_err(|e| {
         eprintln!("showroomctl: auth fail: {e:?} {method} {uri}");
         ApiError::new("E_AUTH", e.to_string())
     })?;
-    // 定位命中钥匙：单把复验（owner 钥匙数 handful、ed25519 验签微秒级，开销可忽略）
+    // 定位命中钥匙：单把复验（user 钥匙数 handful、ed25519 验签微秒级，开销可忽略）
     let kid = keys
         .iter()
         .find(|(_, vk)| {
@@ -600,32 +602,32 @@ async fn auth(s: &S, method: &str, uri: &str, body_sha: &str, headers: &HeaderMa
         .map(|(kid, _)| kid.clone())
         .ok_or_else(|| ApiError::new("E_AUTH", "matching key vanished mid-auth"))?;
     let mut m = s.nonces.lock().unwrap();
-    if !nonce_fresh(&mut m, &v.owner, &v.nonce, now) {
-        return Err(ApiError::new("E_AUTH", format!("nonce replay: {}:{}", v.owner, v.nonce)));
+    if !nonce_fresh(&mut m, &v.user, &v.nonce, now) {
+        return Err(ApiError::new("E_AUTH", format!("nonce replay: {}:{}", v.user, v.nonce)));
     }
-    Ok(Verified { owner: v.owner, kid })
+    Ok(Verified { user: v.user, kid })
 }
 
 /// 管理员钥匙校验（SPEC §12.2）：非管理员返回 E_AUTH → 与未登记/验签失败同一 404
 /// `{"error":"E_AUTH"}`（IntoResponse 对 E_AUTH 丢弃 msg），不泄露 /_api/admin/* 端点存在。
-fn admin_guard(s: &S, owner: &str, kid: &str) -> R<()> {
-    if ops::key_is_admin(&s.root, owner, kid) {
+fn admin_guard(s: &S, user: &str, kid: &str) -> R<()> {
+    if ops::key_is_admin(&s.root, user, kid) {
         Ok(())
     } else {
-        Err(ApiError::new("E_AUTH", format!("not an admin key: {owner}/{kid}")))
+        Err(ApiError::new("E_AUTH", format!("not an admin key: {user}/{kid}")))
     }
 }
 
 /// Redis 浏览归属校验（SPEC §13.2）：请求 db 须 ∈ 签名用户名下项目的 redisdb 集合
 /// （state::user_redis_dbs）；admin 钥匙放开全量（0..policy 池）。
-/// 非归属 → E_AUTH（404 同体，不泄露池内容；与 own_check 语义一致）。
-fn redis_db_guard(s: &S, q: &HashMap<String, String>, owner: &str, kid: &str) -> R<u8> {
+/// 非归属 → E_AUTH（404 同体，不泄露池内容；与 user_check 语义一致）。
+fn redis_db_guard(s: &S, q: &HashMap<String, String>, user: &str, kid: &str) -> R<u8> {
     let policy = state::Policy::load(&s.root);
     let db = state::parse_redis_db(&qget(q, "db")?, policy.redis_pool_cap())?;
-    if ops::key_is_admin(&s.root, owner, kid) || state::user_redis_dbs(&s.root, owner).contains(&(db as u16)) {
+    if ops::key_is_admin(&s.root, user, kid) || state::user_redis_dbs(&s.root, user).contains(&(db as u16)) {
         Ok(db)
     } else {
-        Err(ApiError::new("E_AUTH", format!("redis db {db} not in '{owner}' projects' pool")))
+        Err(ApiError::new("E_AUTH", format!("redis db {db} not in '{user}' projects' pool")))
     }
 }
 
@@ -665,11 +667,11 @@ fn jbody<T: serde::de::DeserializeOwned>(b: &[u8]) -> R<T> {
     serde_json::from_slice(b).map_err(|e| ApiError::new("E_NAME", format!("bad json body: {e}")))
 }
 
-fn own_check(root: &Path, project: &str, owner: &str) -> R<()> {
+fn user_check(root: &Path, project: &str, user: &str) -> R<()> {
     let conf = state::Conf::load(root, project)
         .map_err(|_| ApiError::new("E_NOTFOUND", format!("no project '{project}'")))?;
-    if conf.owner != owner {
-        return Err(ApiError::new("E_AUTH", format!("project '{project}' belongs to {}", conf.owner)));
+    if conf.user != user {
+        return Err(ApiError::new("E_AUTH", format!("project '{project}' belongs to {}", conf.user)));
     }
     Ok(())
 }
@@ -728,26 +730,26 @@ struct DbResetReq {
 }
 
 #[derive(Deserialize)]
-struct AdminOwnerAddReq {
-    owner: String,
+struct AdminUserAddReq {
+    user: String,
     pubkey: String,
     admin: Option<bool>,
 }
 
 #[derive(Deserialize)]
-struct AdminOwnerReq {
-    owner: String,
+struct AdminUserReq {
+    user: String,
 }
 
 #[derive(Deserialize)]
 struct AdminKeyReq {
-    owner: String,
+    user: String,
     kid: String,
 }
 
 #[derive(Deserialize)]
 struct AdminKeyAdminReq {
-    owner: String,
+    user: String,
     kid: String,
     admin: bool,
 }
@@ -760,12 +762,12 @@ mod tests {
     // 预计算哈希验签（common）：往返 / body 哈希不匹配 / 过期
     #[test]
     fn verify_hash_roundtrip() {
-        let k = showroom_common::OwnerKey::generate();
+        let k = showroom_common::UserKey::generate();
         let body = br#"{"project":"demo"}"#;
         let authv = showroom_common::sign("alice", &k, "POST", "/_api/publish", body, 1000, "aabb0011ccdd2233");
-        let vk = [showroom_common::OwnerKey::from_pub_string(&k.pub_string()).unwrap()];
+        let vk = [showroom_common::UserKey::from_pub_string(&k.pub_string()).unwrap()];
         let v = common::verify_with_hash(&authv, &vk, "POST", "/_api/publish", &sha256_hex(body), 1000).unwrap();
-        assert_eq!((v.owner.as_str(), v.nonce.as_str()), ("alice", "aabb0011ccdd2233"));
+        assert_eq!((v.user.as_str(), v.nonce.as_str()), ("alice", "aabb0011ccdd2233"));
 
         assert_eq!(
             common::verify_with_hash(&authv, &vk, "POST", "/_api/publish", &sha256_hex(b"x"), 1000),
@@ -788,12 +790,12 @@ mod tests {
         assert!(nonce_fresh(&mut m, "alice", "n1", 1000));
         assert!(!nonce_fresh(&mut m, "alice", "n1", 1005), "replay must fail");
         assert!(nonce_fresh(&mut m, "alice", "n2", 1005));
-        assert!(nonce_fresh(&mut m, "bob", "n1", 1005), "per-owner namespace");
+        assert!(nonce_fresh(&mut m, "bob", "n1", 1005), "per-user namespace");
         // 过期条目被清理后同 nonce 可再用（签名本身已过窗，无法重放）
         assert!(nonce_fresh(&mut m, "alice", "n1", 1000 + 2 * common::SIG_WINDOW_SECS + 1));
     }
 
-    // admin_guard 判定：管理员钥匙放行；普通钥匙 / 他人 owner / 未登记 → E_AUTH
+    // admin_guard 判定：管理员钥匙放行；普通钥匙 / 他人 user / 未登记 → E_AUTH
     #[test]
     fn admin_guard_allows_admin_key_only() {
         let root = std::env::temp_dir().join(format!("srctl-guard-{}", std::process::id()));
@@ -801,12 +803,12 @@ mod tests {
         std::fs::create_dir_all(&root).unwrap();
         let s: S = Arc::new(AppState { root: root.clone(), nonces: Mutex::new(HashMap::new()) });
 
-        let k = showroom_common::OwnerKey::generate();
-        let added = crate::ops::owner_add(&s.root, "root", &k.pub_string(), true, false).unwrap();
+        let k = showroom_common::UserKey::generate();
+        let added = crate::ops::user_add(&s.root, "root", &k.pub_string(), true, false).unwrap();
         assert!(admin_guard(&s, "root", &added.kid).is_ok());
 
-        let k2 = showroom_common::OwnerKey::generate();
-        let plain = crate::ops::owner_add(&s.root, "root", &k2.pub_string(), false, false).unwrap();
+        let k2 = showroom_common::UserKey::generate();
+        let plain = crate::ops::user_add(&s.root, "root", &k2.pub_string(), false, false).unwrap();
         assert_eq!(admin_guard(&s, "root", &plain.kid).unwrap_err().code, "E_AUTH");
         assert_eq!(admin_guard(&s, "nobody", &added.kid).unwrap_err().code, "E_AUTH");
         assert_eq!(admin_guard(&s, "root", "ffffffff").unwrap_err().code, "E_AUTH");
@@ -823,9 +825,9 @@ mod tests {
         let s: S = Arc::new(AppState { root: root.clone(), nonces: Mutex::new(HashMap::new()) });
 
         // alice 名下项目占 db 3/7；bob 占 db 2
-        for (p, owner, db) in [("demo1", "alice", 3u8), ("demo2", "alice", 7), ("demo3", "bob", 2)] {
+        for (p, user, db) in [("demo1", "alice", 3u8), ("demo2", "alice", 7), ("demo3", "bob", 2)] {
             let c = crate::state::Conf {
-                owner: owner.into(), tag: "v1".into(), port: 8100, cport: 8080,
+                user: user.into(), tag: "v1".into(), port: 8100, cport: 8080,
                 mem: "256m".into(), cpu: 1.0, redisdb: db, updated: 1,
                 stopped: false, legacyslot: None,
             };
@@ -841,17 +843,17 @@ mod tests {
         assert_eq!(redis_db_guard(&s, &qq("3"), "nobody", "ab12cd34").unwrap_err().code, "E_AUTH");
 
         // admin 钥匙放开全量（含别人的 2 与池内任意 255）；超池/非数字仍 E_NAME
-        let k = showroom_common::OwnerKey::generate();
-        let added = crate::ops::owner_add(&s.root, "root", &k.pub_string(), true, false).unwrap();
+        let k = showroom_common::UserKey::generate();
+        let added = crate::ops::user_add(&s.root, "root", &k.pub_string(), true, false).unwrap();
         assert_eq!(redis_db_guard(&s, &qq("2"), "root", &added.kid).unwrap(), 2);
         assert_eq!(redis_db_guard(&s, &qq("255"), "root", &added.kid).unwrap(), 255);
         assert_eq!(redis_db_guard(&s, &qq("256"), "root", &added.kid).unwrap_err().code, "E_NAME");
         assert_eq!(redis_db_guard(&s, &qq("abc"), "root", &added.kid).unwrap_err().code, "E_NAME");
         assert_eq!(redis_db_guard(&s, &HashMap::new(), "root", &added.kid).unwrap_err().code, "E_NAME");
 
-        // 非管理员钥匙即便 owner 有钥匙档案也不越权（无 E_AUTH 与 404 之外的信息差）
-        let k2 = showroom_common::OwnerKey::generate();
-        let plain = crate::ops::owner_add(&s.root, "root", &k2.pub_string(), false, false).unwrap();
+        // 非管理员钥匙即便 user 有钥匙档案也不越权（无 E_AUTH 与 404 之外的信息差）
+        let k2 = showroom_common::UserKey::generate();
+        let plain = crate::ops::user_add(&s.root, "root", &k2.pub_string(), false, false).unwrap();
         assert_eq!(redis_db_guard(&s, &qq("3"), "root", &plain.kid).unwrap_err().code, "E_AUTH");
 
         // 小池（REDIS_DBS=8）：池内 7 放行、池外 15 → E_NAME（alice 名下 db 7 < 8 仍可用）

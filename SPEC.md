@@ -1,15 +1,15 @@
 # Showroom Protocol Spec v1（crate 间契约 — 改动需同步三处实现）
 
 ## 术语
-owner=发布者账号；project=展项（全局唯一）；slot=版本槽位（stable/next/pr42…）；tag=镜像 tag。
+user=发布者账号；project=展项（全局唯一）；slot=版本槽位（stable/next/pr42…）；tag=镜像 tag。
 
 ## 1. 认证：SR-SIG1（所有 /_api 写操作与签名读操作）
 ```
-Authorization: SR-SIG1 <owner>:<unix_ts>:<nonce_hex16>:<sig_b64url>
-canonical = "SR-SIG1\n<owner>\n<ts>\n<nonce>\n<METHOD>\n<path_with_query>\n<sha256_hex(body)>"
+Authorization: SR-SIG1 <user>:<unix_ts>:<nonce_hex16>:<sig_b64url>
+canonical = "SR-SIG1\n<user>\n<ts>\n<nonce>\n<METHOD>\n<path_with_query>\n<sha256_hex(body)>"
 sig = Ed25519_sign(user_priv, canonical.utf8)
 ```
-服务端校验：owner 已登记、|now−ts|≤300s、nonce（per-owner LRU，重启清零可接受）未见、验签通过。
+服务端校验：user 已登记、|now−ts|≤300s、nonce（per-user LRU，重启清零可接受）未见、验签通过。
 body 为空时 sha256_hex("")。
 
 ## 2. 加密信封 v1（import 通道）
@@ -28,7 +28,7 @@ body= wrap || aes256gcm(k, zstd(docker_save_tar))
 | 方法路径 | 请求 | 响应 |
 |---|---|---|
 | GET /_api/health | - | `{"ok":true}` |
-| GET /_api/projects | - | `{"projects":[{project,slot,owner,tag,url,status,port,mem,cpu,updated}]}` |
+| GET /_api/projects | - | `{"projects":[{project,slot,user,tag,url,status,port,mem,cpu,updated}]}` |
 | POST /_api/publish | `{project,slot,tag,mem?,cpu?,container_port?}` | `{ok,url,port}` |
 | POST /_api/stop\|start\|rm\|rollback | `{project,slot}` | `{ok,...}` |
 | GET /_api/logs | `?project=&slot=&tail=100` | `{"logs":"..."}` |
@@ -37,13 +37,13 @@ body= wrap || aes256gcm(k, zstd(docker_save_tar))
 | POST /_api/import-check | `{image_id}` | `{present:bool}` |
 
 错误统一：HTTP 4xx/5xx + `{"error":"E_CODE","msg":"..."}`；错误码 `E_AUTH/E_NAME/E_QUOTA/E_NOTFOUND/E_STATE/E_NET`（msg 不得包含未登记公钥串以外的内部信息；验签失败与路径不存在不可区分）。
-owner 归属校验：签名 owner 必须等于 slot.conf 中 owner（publish 时 project 归属首个创建者）。
+user 归属校验：签名 user 必须等于 slot.conf 中归属者（磁盘键名 owner=，见 §5；publish 时 project 归属首个创建者）。
 
 **静态面（Caddy）**：`/{project}[/slot]/*` 展项页面公开；`/_bootstrap/*`（CLI/Skill 分发）**仅 site A（内网面）提供，site B（公网面）返回 404**；未来的 `/_console` 公网面仅暴露最小登录壳（登录成功前不加载任何管理资源）。
 
 ## 4. 命名与保留
 project/slot：`^[a-z0-9][a-z0-9-]{0,30}$`，project 全局唯一，保留：`v2 _api _bootstrap _console`。
-镜像：`127.0.0.1:5000/<owner>/<project>:<tag>`（外部经 :80 /v2）。
+镜像：`127.0.0.1:5000/<user>/<project>:<tag>`（外部经 :80 /v2）。
 容器：`sr-<project>-<slot>`；DB：`sr_<project>_<slot>`；槽位端口 127.0.0.1:8100–8199（ports.reg 登记）。
 
 ## 5. 主机状态布局（/srv/showroom，btrfs @showroom）
@@ -51,9 +51,9 @@ project/slot：`^[a-z0-9][a-z0-9-]{0,30}$`，project 全局唯一，保留：`v2
 state/policy.env        MAX_SLOTS=30 DEFAULT_MEM=256m MAX_MEM=1g IMPORT_MAX_GB=8 ALLOW_LAN_PORT=0
                         # RESERVE_MEM_MB=1536：内存准入预留 MB（§10.2，缺省 1536，可不写）
 state/ports.reg         每行 <port> <project> <slot>
-state/tokens/<owner>/<kid>.pub    （ed25519 公钥，可多把）
-state/owners/<owner>/reg.cred     registry basic_auth user:hash（bcrypt）
-state/projects/<project>/<slot>.conf   key=value: owner tag port cport mem cpu redisdb updated
+state/tokens/<user>/<kid>.pub    （ed25519 公钥，可多把）
+state/users/<user>/reg.cred     registry basic_auth user:hash（bcrypt）
+state/projects/<project>/<slot>.conf   key=value: owner tag port cport mem cpu redisdb updated（磁盘键名沿用 owner=）
 state/projects/<project>/<slot>.env    见下方环境变量契约
 state/projects/<project>/<slot>.last2  上一 tag
 _middleware/{postgres,redis,registry}/  数据卷(bind)
@@ -89,7 +89,7 @@ POST /_api/import-chunk?upload=<id>&seq=<n>   body=信封原始字节切片（�
 GET  /_api/import-status?upload=<id>          → {"received":[seq...],"total"}                [签名]
 POST /_api/import-end?upload=<id>             → 拼接后走单发 import 同一管道（解密→load→tag→push→manifest），删会话 [签名]
 ```
-- 服务端会话：_tmp/<upload_id>.bin（追加）+ .meta（owner/project/slot/tag/total/seq 列表，JSON）；seq 必须连续且不重复；total 累计不得超 IMPORT_MAX_GB；end 时字节总数必须等于 total_bytes。
+- 服务端会话：_tmp/<upload_id>.bin（追加）+ .meta（user/project/slot/tag/total/seq 列表，JSON）；seq 必须连续且不重复；total 累计不得超 IMPORT_MAX_GB；end 时字节总数必须等于 total_bytes。
 - 完整性：每片独立 SR-SIG1（哈希覆盖该片）；顺序与完整性由服务端 seq/total 强制——整包完整性=片完整性∪顺序完备。
 - 陈旧会话（>24h）由 gc-images 顺带清理。
 ### 8.2 btrfs 快照（showroomctl snapshot hourly|daily）
@@ -101,7 +101,7 @@ POST /_api/import-end?upload=<id>             → 拼接后走单发 import 同�
 - 功能对齐 CLI 只读+发布：列表/发布/停止/启动/删除/回滚/env/logs；镜像上传走 8.1 分片（File.slice 流式 seal，8MB/片，进度条+断点续传）。
 
 ## 9. 数据库维护（v1.2）：发布者自助管理 Schema 与数据
-**原则**：owner 只能碰自己 project×slot 的库 `sr_<p>_<s>`；全端点签名；下行数据（dump）端到端加密（客户端一次性 RSA 公钥上行，信封同 §2 布局）；publish 改为**首建不重建**（数据保留），显式重置走 db-reset。
+**原则**：user 只能碰自己 project×slot 的库 `sr_<p>_<s>`；全端点签名；下行数据（dump）端到端加密（客户端一次性 RSA 公钥上行，信封同 §2 布局）；publish 改为**首建不重建**（数据保留），显式重置走 db-reset。
 **库名归一化**：db_ident = `sr_` + project/slot 中 `-`→`_`（psql -d、CREATE、env 的 DB_NAME/DB_USER/DATABASE_URL 一律用它）；v1.2 前带连字符的存量库在供给/访问时检测旧名存在则沿用，直到 db-reset 重建为新名。
 | 端点 | 请求 | 行为 |
 |---|---|---|
@@ -127,21 +127,21 @@ CLI 对应：`showroom db sql|tables|preview|dump|restore|reset`。公网全可�
 ### 10.2 内存需求与准入（原「内存上限」更名「内存需求」）
 - UI/CLI 文案统一为「内存需求」；语义不变（容器 --memory 硬限）。
 - publish 增加准入判断：读 /proc/meminfo 的 MemAvailable，policy 新增 RESERVE_MEM_MB（默认 1536）；`MemAvailable - RESERVE < 需求内存` → E_QUOTA，msg 给出「可用 X MB（已预留 Y MB）＜ 需求 Z MB」。policy.env 样例同步。
-### 10.3 Redis 内容查看（排障用，跨 owner 不隔离，注明）
+### 10.3 Redis 内容查看（排障用，跨 user 不隔离，注明）
 - GET /_api/redis-dbs → {dbs:[0..15]}（静态）
 - GET /_api/redis-keys?db=N&q=前缀&limit≤200 → {keys:[...]}（redis-cli --scan --pattern，db=N -n）
 - GET /_api/redis-get?db=N&key=K → {type,ttl,value}（redis-cli TYPE/PTTL/按类型 GET/LRANGE/SMEMBERS/HGETALL/ZRANGE）
 - 控制台：状态监控页新增「Redis 浏览」区（或独立第五标签）：DB 下拉+key 前缀过滤+点击查看值（等宽展示，值截断 4KB）。
 ### 10.4 实时下行与低内存大流量传输（ndjson 流 + 分片 dump）
 方向性决策：控制台上行全是短请求，无需双向通道——不引 WebSocket，统一用 fetch 流式消费的 ndjson 流（SSE 风格，逐行 JSON）；大体积下行（db-dump）不再整包进内存，改三段式分片。旧 `POST /_api/db-dump`（base64 单发）**直接移除不保留兼容**（未发布给外部），CLI 同步切换。
-- **GET /_api/logs-stream ?project&slot&tail（默认 100，上限 10000）** `[签名+own_check]`
+- **GET /_api/logs-stream ?project&slot&tail（默认 100，上限 10000）** `[签名+user_check]`
   `docker logs -f --tail <n> <容器>`（不加 --timestamps；stdout+stderr 双流合并桥接，逐行封装）→ 响应 `Content-Type: application/x-ndjson`，每行一个 JSON：`{"t":<unix_ms>,"l":"<日志行>"}`（l 经 JSON 转义；t=服务端收到时刻）。客户端断开（连接关闭→响应流 drop→桥接发送失败）即 kill docker logs 子进程并收尸，绝不留孤儿；容器 EOF（被删除）则流正常结束。
-- **GET /_api/events** `[签名；全局事件流无 own_check，控制台按容器名 sr- 前缀自行过滤展示]`
+- **GET /_api/events** `[签名；全局事件流无 user_check，控制台按容器名 sr- 前缀自行过滤展示]`
   `docker events --filter event=start --filter event=stop --filter event=die --filter event=health_status --format {{json .}}`（事件量小不做容器过滤），逐行解析 JSON 提取字段后封装为 `{"t":<unix_ms>,"e":"<Action>","actor":"<容器名>"}`（t=timeNano/1e6 回落 time*1000；actor=Actor.Attributes.name 回落 Actor.ID；解析失败的行静默丢弃）；同为 x-ndjson 流+断开清理。**心跳**：每 30s 推一行 `{"hb":true}` 防代理空闲断连。
 - **db-dump 三段式**（替代 §9 表中 db-dump 行；§9 内存 4× 问题：pg_dump 全量收进 Vec 再 base64 String）：
-  1. `POST /_api/db-dump-begin {project,slot,client_pub_pem}` → `{dump_id}` `[签名+own_check]`：校验 PEM（E_NAME）→ 定库 → 立即返回；后台线程执行 `pg_dump -Fc` 直连 `seal(客户端公钥)` **流式**写 `_tmp/<id>.bin`（信封必须一次成包才能解，故生成整体单次、生成过程流式，内存恒定 ~4MiB；明文 >256MB → E_QUOTA，杀子进程）；会话记录于 `_tmp/<id>.meta`（owner/project/slot/db），进度于 `_tmp/<id>.status`（running|ready|failed，failed 附 error，成功附 total=信封字节数）。
-  2. `GET /_api/db-dump-chunk ?dump=&offset=&len=` `[签名；meta 校验 owner]`：ready 门（否则 E_STATE）→ 按 offset/len 切片返回 `.bin` 原始字节（`application/octet-stream` + `X-Sr-Total` 头）；len ≤4MB（E_NAME 越界同拒），offset 越过 total → E_NAME，尾片自动钳到 total-offset；**offset+len ≥ total（读完最后一片）即删会话三件套**——多客户端并发拉同一 dump 允许（只读切片），后到者可能 E_NOTFOUND 需重走 begin；24h gc 兜底。
-  3. `GET /_api/db-dump-status ?dump=` `[签名；meta 校验 owner]` → `{"ready":bool,"total":n,"error":...}`（轮询用）。
+  1. `POST /_api/db-dump-begin {project,slot,client_pub_pem}` → `{dump_id}` `[签名+user_check]`：校验 PEM（E_NAME）→ 定库 → 立即返回；后台线程执行 `pg_dump -Fc` 直连 `seal(客户端公钥)` **流式**写 `_tmp/<id>.bin`（信封必须一次成包才能解，故生成整体单次、生成过程流式，内存恒定 ~4MiB；明文 >256MB → E_QUOTA，杀子进程）；会话记录于 `_tmp/<id>.meta`（user/project/slot/db），进度于 `_tmp/<id>.status`（running|ready|failed，failed 附 error，成功附 total=信封字节数）。
+  2. `GET /_api/db-dump-chunk ?dump=&offset=&len=` `[签名；meta 校验 user]`：ready 门（否则 E_STATE）→ 按 offset/len 切片返回 `.bin` 原始字节（`application/octet-stream` + `X-Sr-Total` 头）；len ≤4MB（E_NAME 越界同拒），offset 越过 total → E_NAME，尾片自动钳到 total-offset；**offset+len ≥ total（读完最后一片）即删会话三件套**——多客户端并发拉同一 dump 允许（只读切片），后到者可能 E_NOTFOUND 需重走 begin；24h gc 兜底。
+  3. `GET /_api/db-dump-status ?dump=` `[签名；meta 校验 user]` → `{"ready":bool,"total":n,"error":...}`（轮询用）。
 - CLI `showroom db dump` 同步三段式：begin → 1s 轮询 status 至 ready（1h 上限，failed 即时报错）→ 4MB chunk 循环落本地临时信封（每片≤4MB，内存恒定）→ 一次性私钥解密流式写目标文件/stdout。
 - 陈旧清理：`_tmp` 下 `.status` 并入 gc-images 的 24h 清理（原有 .bin/.meta 不变）。
 
@@ -160,24 +160,24 @@ CLI 对应：`showroom db sql|tables|preview|dump|restore|reset`。公网全可�
 - CLI：`showroom deploy [项目] <tag> [--mem --cpu --container-port]` = push（压缩上传）+ publish --wait + 打印 URL 的原子命令（任一步失败即停，报错含已完成的步骤）。
 - 控制台：发布表单「一键部署」按钮——选 tar → 前端压缩 → 分片上传 → 自动 publish → 展示 URL；分步状态条（压缩中/上传 x%/发布中/完成）。
 ### 12.2 管理员（标记在 Key 上）
-- state：`tokens/<owner>/<kid>.pub` 旁增加 `tokens/<owner>/<kid>.admin`（空文件存在=管理员钥匙）。
-- 引导：主机 CLI `showroomctl owner-add <名> --pubkey <…> --admin` 首个管理员；此后管理员可远程授权。
-- 身份接口：`GET /_api/whoami`（签名）→ `{"owner","kid","admin":bool}`——控制台据此显示/隐藏「管理」标签。
+- state：`tokens/<user>/<kid>.pub` 旁增加 `tokens/<user>/<kid>.admin`（空文件存在=管理员钥匙）。
+- 引导：主机 CLI `showroomctl user-add <名> --pubkey <…> --admin` 首个管理员；此后管理员可远程授权。
+- 身份接口：`GET /_api/whoami`（签名）→ `{"user","kid","admin":bool}`——控制台据此显示/隐藏「管理」标签。
 - 管理接口（全部签名+管理员钥匙校验，非管理员=404 E_AUTH 与未登记不可区分；公网可用）：
-  - `GET /_api/admin/owners` → 账号/钥匙(kid,admin,登记时间)/项目数
-  - `POST /_api/admin/owner-add {owner,pubkey,admin?}` → 返回 registry 密码（远程发卡）
-  - `POST /_api/admin/owner-revoke {owner}`、`POST /_api/admin/key-rm {owner,kid}`
-  - `POST /_api/admin/key-admin {owner,kid,admin}`（授权/收权）
+  - `GET /_api/admin/users` → 账号/钥匙(kid,admin,登记时间)/项目数
+  - `POST /_api/admin/user-add {user,pubkey,admin?}` → 返回 registry 密码（远程发卡）
+  - `POST /_api/admin/user-revoke {user}`、`POST /_api/admin/key-rm {user,kid}`
+  - `POST /_api/admin/key-admin {user,kid,admin}`（授权/收权）
   - `GET /_api/admin/status` → 服务状态(systemd is-active 四服务)、磁盘(根+@showroom)、内存(MemAvailable)、容器列表(名/状态)、timers 下次触发
 - 控制台「管理」标签（仅 admin 钥匙可见）：账号与钥匙表格（发卡对话框含公钥粘贴+是否管理员勾选）、状态面板（自动刷新 30s）、快捷动作（收权/删钥匙，confirm）。
-- 安全语义：管理员钥匙遗失=平台最高权限泄露，owner-key-rm 单独吊销；whoami 用当前请求的 kid 判定。
+- 安全语义：管理员钥匙遗失=平台最高权限泄露，user-key-rm 单独吊销；whoami 用当前请求的 kid 判定。
 
 ## 13. v1.6：部署入口并存 + 镜像选择 + Redis 浏览隔离
 ### 13.1 发布入口三存（一键不取代分步）
 - 「一键部署」：tar→压缩→上传→立即发布（快捷路径）。
 - 「仅上传」：只入 registry，不入库部署（发布者择时部署）。
 - 「部署」：独立表单——**镜像 ComboBox**（datalist 搜索）列当前可选镜像，默认仅当前用户的（admin 可看全部）；选中后填内存需求/端口→发布（旧版本单独部署即从此入口）。
-- 新端点 `GET /_api/images`（签名）→ `{"images":["<owner>/<project>:<tag>",...]}`：registry catalog+tags 合并；按签名用户 owner 前缀过滤；admin 钥匙不过滤。
+- 新端点 `GET /_api/images`（签名）→ `{"images":["<user>/<project>:<tag>",...]}`：registry catalog+tags 合并；按签名用户 user 前缀过滤；admin 钥匙不过滤。
 ### 13.2 Redis 浏览按用户隔离（低成本实现，不动 Redis 本体）
 - 隔离单位=Redis 逻辑库：`state` 已按项目分配 redisdb（0-15）。`/_api/redis-dbs|keys|get` 增加校验：请求 db ∈ 当前用户名下项目的 redisdb 集合；admin 钥匙放开全量。控制台 DB 下拉仅列自己的（admin 全量，标注「管理员视图」）。
 - 诚实边界（文档注明）：容器内应用持有原始连接仍可 SELECT 任意库——这是**界面级/协作级隔离**（防误看防误操作），非安全边界；应用级强隔离需独实例或 Redis ACL+rewrite，成本过高不做。
@@ -197,7 +197,7 @@ CLI 对应：`showroom db sql|tables|preview|dump|restore|reset`。公网全可�
 - 不足→ E_QUOTA，消息含 可用/预留/估算需求，提示「请先删除旧镜像」。
 - registry 快通道（内网 docker 直推）无 begin 钩子：在 publish 时做同式复核（拉取展开发生在部署时刻）——文档注明不对称性。
 ### 14.3 镜像删除
-- `POST /_api/image-rm {image}`（签名）：归属校验（自己的命名空间 `<owner>/` 前缀，admin 全量）→ registry DELETE manifest（digest 查询后删）→ **内联触发 registry-gc**（停-收-启，秒级；live-restore 保护运行中容器）→ 返回 `{"freed_est_mb"}`。
+- `POST /_api/image-rm {image}`（签名）：归属校验（自己的命名空间 `<user>/` 前缀，admin 全量）→ registry DELETE manifest（digest 查询后删）→ **内联触发 registry-gc**（停-收-启，秒级；live-restore 保护运行中容器）→ 返回 `{"freed_est_mb"}`。
 - 删除即释放空间（不等每周 GC），闭环「上传不够→删除→立即可传」。
 - blob 共享安全：多 tag 共享层由 registry-gc --delete-untagged 天然保留仍被引用者。
 - 控制台：镜像列表（部署 ComboBox 同源数据）每行删除按钮（confirm，显示镜像名）；上传失败 E_QUOTA 时错误文案引导到删除。
@@ -212,7 +212,7 @@ CLI 对应：`showroom db sql|tables|preview|dump|restore|reset`。公网全可�
   REDIS_DBS=256  DISK_RESERVE_GB=20  UPLOAD_SPACE_FACTOR=4  RESERVE_MEM_MB=1536
   CADDY=yes  TUNING=sysctl  DEDUP=weekly
   ```
-- `showroomctl setup [--apply]`：无 --apply=diff 模式（列出将做的变更与当前偏差）；--apply 幂等执行：目录/btrfs 子卷/policy/env 合成、docker 网络、所选中间件容器（缺则建、多则停删——**有项目引用的中间件禁用需 --force 并列受影响项目**）、caddy 安装(pacman)+Caddyfile 渲染（按中间件集合生成路由）、systemd 单元（api/timers/dedup）安装启用、sysctl/journald/watchdog 调优、预压缩脚本。全新主机流程=下载二进制→`showroomctl setup --apply`→`owner-add --admin`。
+- `showroomctl setup [--apply]`：无 --apply=diff 模式（列出将做的变更与当前偏差）；--apply 幂等执行：目录/btrfs 子卷/policy/env 合成、docker 网络、所选中间件容器（缺则建、多则停删——**有项目引用的中间件禁用需 --force 并列受影响项目**）、caddy 安装(pacman)+Caddyfile 渲染（按中间件集合生成路由）、systemd 单元（api/timers/dedup）安装启用、sysctl/journald/watchdog 调优、预压缩脚本。全新主机流程=下载二进制→`showroomctl setup --apply`→`user-add --admin`。
 - `showroomctl upgrade`：上传新二进制后的就地升级（替换单元/重渲染配置，保数据）。
 ### 15.2 中间件子命令（CLI+admin 端点同源）
 - `showroomctl middleware status|enable <名>|disable <名> [--force]|set <名> <k>=<v>`

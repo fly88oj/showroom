@@ -30,7 +30,7 @@ labels: bug
 
 ```
 （粘贴 CLI 完整输出 / journalctl -u showroom-api 相关片段 / 控制台 console 报错）
-（注意：请勿粘贴真实密钥、公网地址、密码等敏感信息，用 your-host / <OWNER> 等占位符替换）
+（注意：请勿粘贴真实密钥、公网地址、密码等敏感信息，用 your-host / <USER> 等占位符替换）
 ```
 
 ## 补充说明

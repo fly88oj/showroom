@@ -31,7 +31,7 @@ enum Cmd {
     Serve,
     /// 登记发布者公钥 + 生成 registry 凭据（bcrypt 入 registry.htpasswd，明文 0600 入 reg.cred）；
     /// --admin 同时授管理员钥匙（SPEC §12.2，首个管理员引导用）
-    OwnerAdd {
+    UserAdd {
         name: String,
         /// 发布者公钥串（showroom keygen 打印的那串；省略时给出提示）
         #[arg(long)]
@@ -43,24 +43,24 @@ enum Cmd {
         admin: bool,
     },
     /// 删除发布者某把公钥（admin 标记随钥匙一并清）
-    OwnerKeyRm { owner: String, kid: String },
+    UserKeyRm { user: String, kid: String },
     /// 授/收管理员权限（--admin true|false，SPEC §12.2）
     KeyAdmin {
-        owner: String,
+        user: String,
         kid: String,
         #[arg(long, action = clap::ArgAction::Set)]
         admin: bool,
     },
     /// 吊销发布者（auth 与 registry 登录全失效，已发布展项不动）
-    OwnerRevoke { owner: String },
-    /// 管理员视图（本机调试用，幂等）：owners=账号/钥匙清单，status=主机状态面板
+    UserRevoke { user: String },
+    /// 管理员视图（本机调试用，幂等）：users=账号/钥匙清单，status=主机状态面板
     Admin {
         #[command(subcommand)]
         cmd: AdminCmd,
     },
     /// 发布/滚动更新（管理员直发通道，serve 的 /_api/publish 复用同一内核）
     Publish {
-        owner: String,
+        user: String,
         project: String,
         tag: String,
         #[arg(long)]
@@ -101,7 +101,7 @@ enum Cmd {
     /// registry:2 garbage-collect --delete-untagged（停-扫-启）
     RegistryGc,
     /// 从 stdin 读加密信封导入镜像（内部通道；serve 的 /_api/import 复用同一内核）
-    Import { owner: String, project: String, tag: String },
+    Import { user: String, project: String, tag: String },
     /// 检查镜像是否已在本机 docker（present true/false）
     ImportCheck { image_id: String },
     /// 生成平台 RSA 对（serve 启动缺失时自动生成；已存在不覆盖）
@@ -111,7 +111,7 @@ enum Cmd {
 #[derive(Subcommand)]
 enum AdminCmd {
     /// 账号 / 钥匙（kid+admin+登记时间）/ 项目数清单
-    Owners,
+    Users,
     /// 服务 / 磁盘 / 内存 / 容器 / timers 状态面板（GET /_api/admin/status 同源）
     Status,
 }
@@ -140,49 +140,49 @@ fn dispatch(cli: &Cli) -> R<()> {
             .map_err(|e| ApiError::state(e.to_string()))?
             .block_on(serve::run(root)),
 
-        Cmd::OwnerAdd { name, pubkey, replace_key, admin } => {
+        Cmd::UserAdd { name, pubkey, replace_key, admin } => {
             let pubkey = pubkey.as_deref().ok_or_else(|| {
-                ApiError::new("E_NAME", format!("缺少 --pubkey <公钥串>（发布者跑 showroom keygen 打印的那串；示例：showroomctl owner-add {name} --pubkey <串> --admin）"))
+                ApiError::new("E_NAME", format!("缺少 --pubkey <公钥串>（发布者跑 showroom keygen 打印的那串；示例：showroomctl user-add {name} --pubkey <串> --admin）"))
             })?;
-            let added = ops::owner_add(&root, name, pubkey, *admin, *replace_key)?;
+            let added = ops::user_add(&root, name, pubkey, *admin, *replace_key)?;
             out(
                 j,
                 &format!(
-                    "owner {name} added: kid={}{}; registry creds in state/owners/{name}/reg.cred (user {name})",
+                    "user {name} added: kid={}{}; registry creds in state/users/{name}/reg.cred (user {name})",
                     added.kid,
                     if *admin { " [ADMIN]" } else { "" }
                 ),
-                json!({"ok": true, "owner": name, "kid": added.kid, "admin": admin}),
+                json!({"ok": true, "user": name, "kid": added.kid, "admin": admin}),
             );
             Ok(())
         }
-        Cmd::OwnerKeyRm { owner, kid } => {
-            ops::owner_key_rm(&root, owner, kid)?;
-            out(j, &format!("removed {owner}/{kid}"), json!({"ok": true}));
+        Cmd::UserKeyRm { user, kid } => {
+            ops::user_key_rm(&root, user, kid)?;
+            out(j, &format!("removed {user}/{kid}"), json!({"ok": true}));
             Ok(())
         }
-        Cmd::KeyAdmin { owner, kid, admin } => {
-            ops::key_set_admin(&root, owner, kid, *admin)?;
+        Cmd::KeyAdmin { user, kid, admin } => {
+            ops::key_set_admin(&root, user, kid, *admin)?;
             out(
                 j,
-                &format!("{} admin: {owner}/{kid}", if *admin { "granted" } else { "revoked" }),
-                json!({"ok": true, "owner": owner, "kid": kid, "admin": admin}),
+                &format!("{} admin: {user}/{kid}", if *admin { "granted" } else { "revoked" }),
+                json!({"ok": true, "user": user, "kid": kid, "admin": admin}),
             );
             Ok(())
         }
-        Cmd::OwnerRevoke { owner } => {
-            ops::owner_revoke(&root, owner)?;
-            out(j, &format!("owner {owner} revoked"), json!({"ok": true}));
+        Cmd::UserRevoke { user } => {
+            ops::user_revoke(&root, user)?;
+            out(j, &format!("user {user} revoked"), json!({"ok": true}));
             Ok(())
         }
         Cmd::Admin { cmd } => match cmd {
-            AdminCmd::Owners => {
-                let owners = ops::owner_list(&root);
+            AdminCmd::Users => {
+                let users = ops::user_list(&root);
                 if j {
-                    println!("{}", json!({"owners": owners}));
+                    println!("{}", json!({"users": users}));
                 } else {
-                    for o in &owners {
-                        println!("{:<16} projects={:<3} keys={}", o.owner, o.projects, o.keys.len());
+                    for o in &users {
+                        println!("{:<16} projects={:<3} keys={}", o.user, o.projects, o.keys.len());
                         for k in &o.keys {
                             println!("  {:<10} {} since={}", k.kid, if k.admin { "[ADMIN]" } else { "      " }, k.since);
                         }
@@ -222,10 +222,10 @@ fn dispatch(cli: &Cli) -> R<()> {
             }
         },
 
-        Cmd::Publish { owner, project, tag, mem, cpu, container_port } => {
+        Cmd::Publish { user, project, tag, mem, cpu, container_port } => {
             let o = publish::publish(
                 &root,
-                owner,
+                user,
                 project,
                 tag,
                 publish::PublishOpts { mem: mem.clone(), cpu: *cpu, cport: *container_port },
@@ -270,12 +270,12 @@ fn dispatch(cli: &Cli) -> R<()> {
             } else {
                 println!(
                     "{:<24} {:<12} {:<20} {:<9} {:<5} {:<6} {:<5} {:<10} URL",
-                    "PROJECT", "OWNER", "TAG", "STATUS", "PORT", "MEM", "CPU", "UPDATED"
+                    "PROJECT", "USER", "TAG", "STATUS", "PORT", "MEM", "CPU", "UPDATED"
                 );
                 for (p, c, st) in rows {
                     println!(
                         "{:<24} {:<12} {:<20} {:<9} {:<5} {:<6} {:<5} {:<10} {}",
-                        p, c.owner, c.tag, st, c.port, c.mem, c.cpu, c.updated,
+                        p, c.user, c.tag, st, c.port, c.mem, c.cpu, c.updated,
                         state::public_url(&p)
                     );
                 }
@@ -337,9 +337,9 @@ fn dispatch(cli: &Cli) -> R<()> {
             out(j, "registry garbage-collect done", json!({"ok": true}));
             Ok(())
         }
-        Cmd::Import { owner, project, tag } => {
+        Cmd::Import { user, project, tag } => {
             let (path, _sha) = publish::receive_envelope(&root, std::io::stdin())?;
-            let d = publish::import_from_file(&root, owner, project, tag, &path)?;
+            let d = publish::import_from_file(&root, user, project, tag, &path)?;
             out(j, &format!("imported digest={d}"), json!({"ok": true, "digest": d}));
             Ok(())
         }

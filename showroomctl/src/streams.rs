@@ -168,7 +168,7 @@ fn bridged_response(cmd: &mut Command, what: &str, wrap: LineWrap) -> R<(Respons
 
 // —— A：GET /_api/logs-stream ?project&tail（§11 无 slot）——
 
-/// 统一验签 + own_check 已由 serve 完成；这里做存在性校验后直接桥 docker logs -f。
+/// 统一验签 + user_check 已由 serve 完成；这里做存在性校验后直接桥 docker logs -f。
 pub fn logs_stream(root: &Path, project: &str, tail: u32) -> R<Response> {
     if state::Conf::load(root, project).is_err() {
         return Err(ApiError::new("E_NOTFOUND", format!("no project '{project}'")));
@@ -187,7 +187,7 @@ pub fn logs_stream(root: &Path, project: &str, tail: u32) -> R<Response> {
 
 // —— B：GET /_api/events ——
 
-/// 仅统一验签（全局事件流，无 own_check；控制台按 sr- 前缀自行过滤展示）。
+/// 仅统一验签（全局事件流，无 user_check；控制台按 sr- 前缀自行过滤展示）。
 /// 事件量小不做容器名过滤；解析失败的行（stderr 噪声等）静默丢弃。
 pub fn events_stream() -> R<Response> {
     let mut cmd = Command::new("docker");

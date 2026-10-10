@@ -134,7 +134,7 @@ fn preview(
     )?;
     let cell = |c: &serde_json::Value| c.as_str().map(str::to_string).unwrap_or_else(|| c.to_string());
     if let Some(cols) = v["columns"].as_array() {
-        let names: Vec<String> = cols.iter().map(|c| cell(c)).collect();
+        let names: Vec<String> = cols.iter().map(&cell).collect();
         println!("{}", names.join("\t"));
     }
     if let Some(rows) = v["rows"].as_array() {

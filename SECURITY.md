@@ -8,9 +8,9 @@
 
 Showroom 面向的部署形态是：控制面流量可能经过**不可信的明文链路**（公网 frp 隧道、不启用 TLS 的反向代理）。因此安全不依赖传输层，而是全部实现在应用层：
 
-- **认证 = SR-SIG1 签名**。`/_api/*` 全部端点（含 health）要求 Ed25519 请求签名：canonical 串覆盖 owner、时间戳、nonce、方法、路径与请求体 SHA-256，±300 秒窗口 + per-owner nonce 查重防重放。没有令牌、没有会话 cookie——私钥永远不离开发布者机器。
+- **认证 = SR-SIG1 签名**。`/_api/*` 全部端点（含 health）要求 Ed25519 请求签名：canonical 串覆盖 user、时间戳、nonce、方法、路径与请求体 SHA-256，±300 秒窗口 + per-user nonce 查重防重放。没有令牌、没有会话 cookie——私钥永远不离开发布者机器。
 - **机密性 = 加密信封**。镜像导入与数据库恢复的上行、数据库备份的下行，都封装为「RSA-3072-OAEP-SHA256 包裹的一次性 AES-256-GCM 密钥 + 分段流加密」信封；下行（备份）用客户端一次性 RSA 公钥封装，平台侧无法解密自己的备份。签名覆盖密文哈希（Encrypt-then-MAC）。
-- **授权 = 管理员钥匙分层**。发布者钥匙（owner key）只能操作归属自己的展项；管理员钥匙（admin key，`tokens/<owner>/<kid>.admin` 标记）才能发卡、吊销、查主机状态。管理员接口与普通接口一样返回 `404 E_AUTH`，与未登记不可区分。
+- **授权 = 管理员钥匙分层**。发布者钥匙（user key）只能操作归属自己的展项；管理员钥匙（admin key，`tokens/<user>/<kid>.admin` 标记）才能发卡、吊销、查主机状态。管理员接口与普通接口一样返回 `404 E_AUTH`，与未登记不可区分。
 - **零信息暴露**。未认证或验签失败的任何请求——无论路径是否存在——统一返回 `404 + {"error":"E_AUTH"}`；根路径与未匹配路径一律 404。攻击者无法用它枚举项目、版本或端点。公网控制台在登录成功前不加载任何管理资源。
 
 完整规范（canonical 串格式、信封字节布局、威胁与缓解表）见 [docs/security.md](docs/security.md)。
@@ -42,23 +42,23 @@ Showroom 面向的部署形态是：控制面流量可能经过**不可信的明
 - **管理员动作**（控制台「管理」标签，或主机 CLI）：
 
   ```sh
-  # 只删泄露的那把钥匙（kid 见 /_api/admin/owners 清单）
-  showroomctl owner-key-rm <OWNER> <KID>
-  # 或经签名 API：POST /_api/admin/key-rm {"owner":"<OWNER>","kid":"<KID>"}
+  # 只删泄露的那把钥匙（kid 见 /_api/admin/users 清单）
+  showroomctl user-key-rm <USER> <KID>
+  # 或经签名 API：POST /_api/admin/key-rm {"user":"<USER>","kid":"<KID>"}
 
   # 整个账号立即失能（SR-SIG1 与 registry 登录全失效，已发布展项不动）
-  showroomctl owner-revoke <OWNER>
-  # 或经签名 API：POST /_api/admin/owner-revoke {"owner":"<OWNER>"}
+  showroomctl user-revoke <USER>
+  # 或经签名 API：POST /_api/admin/user-revoke {"user":"<USER>"}
   ```
 
-- **发布者动作**：`showroom keygen --force` 生成新钥匙，把新公钥串交管理员重新登记（`showroomctl owner-add <OWNER> --pubkey <公钥串>` 或控制台发卡对话框）。
+- **发布者动作**：`showroom keygen --force` 生成新钥匙，把新公钥串交管理员重新登记（`showroomctl user-add <USER> --pubkey <公钥串>` 或控制台发卡对话框）。
 
 ### 管理员钥匙泄露
 
 管理员钥匙 = 平台最高权限（可发卡、可吊销他人、可看主机状态），视同平台沦陷：
 
-1. 立即用另一把管理员钥匙吊销泄露钥匙（`owner-key-rm` / `key-rm`，方法同上）；
-2. 若**唯一**管理员钥匙泄露，只能在主机上执行 `showroomctl owner-key-rm <OWNER> <KID>`；
+1. 立即用另一把管理员钥匙吊销泄露钥匙（`user-key-rm` / `key-rm`，方法同上）；
+2. 若**唯一**管理员钥匙泄露，只能在主机上执行 `showroomctl user-key-rm <USER> <KID>`；
 3. 评估该钥匙有效期内管理面被调用的痕迹（journalctl 中 `E_AUTH`/admin 相关记录）；
 4. 视情况轮换平台 RSA 对：吊销后删除 `state/platform_rsa{,.pub}` 并 `showroomctl init-keys` 重新生成——**这会使所有发布者本地的 `platform_rsa.pub` 失效**，需重新分发（仅影响 import 加密通道，不影响签名认证）。
 

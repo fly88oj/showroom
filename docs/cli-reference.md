@@ -2,7 +2,7 @@
 
 发布者 CLI（`showroom`）的全部命令。除 `push` 需要 `docker` 命令行外零运行时依赖；所有管理请求经 SR-SIG1 签名（见 [security.md](security.md)）。主机侧工具 `showroomctl` 的命令面向管理员，见文末附录。
 
-命令中 `<PROJECT>`、`<TAG>`、`<OWNER>`、`your-host` 为占位符。
+命令中 `<PROJECT>`、`<TAG>`、`<USER>`、`your-host` 为占位符。
 
 ## 0. 全局
 
@@ -20,7 +20,7 @@ showroom [--server lan|public] <子命令>
 
 | 文件 | 内容 |
 |---|---|
-| `~/.showroom/config.toml` | owner、双服务端地址、registry 凭据 |
+| `~/.showroom/config.toml` | user（账号）、双服务端地址、registry 凭据 |
 | `~/.showroom/id_ed25519` | 发布者 Ed25519 私钥（裸 32B seed） |
 | `~/.showroom/platform_rsa.pub` | 平台 RSA 公钥（import 加密通道；管理员分发） |
 
@@ -38,10 +38,10 @@ showroom keygen [--force]     # 生成密钥；已存在拒绝覆盖（--force �
 
 ```sh
 showroom config                                        # 无参数=打印当前配置
-showroom config --owner <OWNER> \
+showroom config --user <USER> \
     --server-lan http://showroom-lan.your-host \
     --server-public http://showroom-public.your-host \
-    --registry-user <OWNER> --registry-password '<registry 密码>'
+    --registry-user <USER> --registry-password '<registry 密码>'
 ```
 
 仅更新给出的字段；`--server-lan ""` / `--server-public ""`（空串）清除该字段。地址须以 `http(s)://` 开头。registry 凭据供 push 快通道 `docker login` 使用（密码只走 stdin，不进 argv）。
@@ -52,7 +52,7 @@ showroom config --owner <OWNER> \
 showroom doctor
 ```
 
-体检并逐项打印：密钥可读 / owner 已配置 / server_lan 与 server_public 可达（签名探测）/ 签名自测（用不存在的项目名验证：返回 `E_NOTFOUND` = 验签通过且密钥已登记；`E_AUTH` = 未登记或时钟偏差）/ registry 凭据有效（非关键项）/ docker 可用（仅 push 需要）。任一关键项失败 → 非零退出。
+体检并逐项打印：密钥可读 / user 已配置 / server_lan 与 server_public 可达（签名探测）/ 签名自测（用不存在的项目名验证：返回 `E_NOTFOUND` = 验签通过且密钥已登记；`E_AUTH` = 未登记或时钟偏差）/ registry 凭据有效（非关键项）/ docker 可用（仅 push 需要）。任一关键项失败 → 非零退出。
 
 ## 2. 推送与发布
 
@@ -68,7 +68,7 @@ showroom push <PROJECT> <TAG> [--via auto|registry|import]
 - `--via registry`：强制快通道（需要 `server_lan` 与 registry 凭据）；
 - `--via import`：强制加密通道：`docker save | zstd-19 | seal(平台公钥)` 流式成临时信封 → `POST /_api/import`；服务端先查 `import-check`（镜像 ID 已登记则跳过上传）。
 
-import 通道需要 `~/.showroom/platform_rsa.pub`。仓库名规则：`<host>/<OWNER>/<project 小写>:<TAG>`（docker 仓库名强制小写，项目名大写自动转小写）。
+import 通道需要 `~/.showroom/platform_rsa.pub`。仓库名规则：`<host>/<USER>/<project 小写>:<TAG>`（docker 仓库名强制小写，项目名大写自动转小写）。
 
 ### showroom publish
 
@@ -101,7 +101,7 @@ deploy: 第 1 步(push) 失败：docker push 失败
 
 | 命令 | 说明 |
 |---|---|
-| `showroom ps [--json]` | 全平台展项列表（PROJECT/STATUS/TAG/OWNER）；`--json` 机读 |
+| `showroom ps [--json]` | 全平台展项列表（PROJECT/STATUS/TAG/USER）；`--json` 机读 |
 | `showroom url <PROJECT>` | 打印展项 URL（`http://<server>/<PROJECT>/`），不开浏览器 |
 | `showroom logs <PROJECT> [--tail 100] [-f]` | 查看容器日志；`-f` 跟随（2s 轮询追加式打印） |
 | `showroom env <PROJECT>` | 打印注入容器的环境变量（DB/Redis 连接信息一目了然） |
@@ -112,7 +112,7 @@ deploy: 第 1 步(push) 失败：docker push 失败
 
 ## 4. 数据库维护（db 全家）
 
-owner 只能操作自己项目的库 `sr_<PROJECT>`；全部签名、公网可用。危险语句均需 `--confirm` 二次确认。
+user 只能操作自己项目的库 `sr_<PROJECT>`；全部签名、公网可用。危险语句均需 `--confirm` 二次确认。
 
 | 命令 | 说明 |
 |---|---|
@@ -170,17 +170,17 @@ TODO：`showroom skill` 命令尚未实现（规划中）。
 | 命令 | 说明 |
 |---|---|
 | `showroomctl serve` | 启动控制面（127.0.0.1:8090；正常由 `showroom-api.service` 运行） |
-| `showroomctl owner-add <OWNER> --pubkey 'ed25519:<…>' [--admin] [--replace-key]` | 登记公钥（kid=sha256 前 8 hex）+ 生成 registry 凭据；`--admin` 授管理员钥匙（首个管理员引导） |
-| `showroomctl owner-key-rm <OWNER> <KID>` | 删除某把公钥（admin 标记随之消失） |
-| `showroomctl key-admin <OWNER> <KID> --admin true\|false` | 授/收管理员权限 |
-| `showroomctl owner-revoke <OWNER>` | 吊销账号（签名与 registry 登录全失效，展项不动） |
-| `showroomctl admin owners\|status` | 管理员视图：账号/钥匙清单；服务/磁盘/内存/容器/timers 面板 |
-| `showroomctl publish <OWNER> <PROJECT> <TAG> [--mem --cpu --container-port]` | 管理员直发（与 `/_api/publish` 同一内核） |
+| `showroomctl user-add <USER> --pubkey 'ed25519:<…>' [--admin] [--replace-key]` | 登记公钥（kid=sha256 前 8 hex）+ 生成 registry 凭据；`--admin` 授管理员钥匙（首个管理员引导） |
+| `showroomctl user-key-rm <USER> <KID>` | 删除某把公钥（admin 标记随之消失） |
+| `showroomctl key-admin <USER> <KID> --admin true\|false` | 授/收管理员权限 |
+| `showroomctl user-revoke <USER>` | 吊销账号（签名与 registry 登录全失效，展项不动） |
+| `showroomctl admin users\|status` | 管理员视图：账号/钥匙清单；服务/磁盘/内存/容器/timers 面板 |
+| `showroomctl publish <USER> <PROJECT> <TAG> [--mem --cpu --container-port]` | 管理员直发（与 `/_api/publish` 同一内核） |
 | `showroomctl stop\|start\|rm\|rollback\|ps\|logs\|env` | 项目生命周期与查看（`--json` 机读） |
 | `showroomctl reconcile\|autoheal` | 幂等重建 / 自愈（timer 平时自动跑） |
 | `showroomctl gc-images\|gc-registry\|registry-gc` | 垃圾回收三件套 |
 | `showroomctl snapshot hourly\|daily` | btrfs 快照（保留 24/7） |
-| `showroomctl import <OWNER> <PROJECT> <TAG>` | 从 stdin 读加密信封导入镜像（`/_api/import` 同一内核） |
+| `showroomctl import <USER> <PROJECT> <TAG>` | 从 stdin 读加密信封导入镜像（`/_api/import` 同一内核） |
 | `showroomctl import-check <IMAGE_ID>` | 本机是否已有该镜像 |
 | `showroomctl init-keys` | 生成平台 RSA 对（已存在不覆盖） |
 

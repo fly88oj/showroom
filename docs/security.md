@@ -11,12 +11,12 @@ Showroom 的安全前提：控制面流量可能经过不可信的明文链路�
 ### 1.1 头格式
 
 ```
-Authorization: SR-SIG1 <owner>:<unix_ts>:<nonce_hex16>:<sig_b64url>
+Authorization: SR-SIG1 <user>:<unix_ts>:<nonce_hex16>:<sig_b64url>
 ```
 
 | 字段 | 含义 |
 |---|---|
-| `owner` | 发布者账号名 |
+| `user` | 发布者账号名 |
 | `unix_ts` | 请求时刻的 Unix 秒级时间戳 |
 | `nonce_hex16` | 16 个 hex 字符（8 随机字节），每次请求唯一 |
 | `sig_b64url` | Ed25519 签名，base64url **无 padding** |
@@ -24,26 +24,26 @@ Authorization: SR-SIG1 <owner>:<unix_ts>:<nonce_hex16>:<sig_b64url>
 ### 1.2 canonical 串
 
 ```
-canonical = "SR-SIG1\n<owner>\n<ts>\n<nonce>\n<METHOD>\n<path_with_query>\n<sha256_hex(body)>"
+canonical = "SR-SIG1\n<user>\n<ts>\n<nonce>\n<METHOD>\n<path_with_query>\n<sha256_hex(body)>"
 
 sig = Ed25519_sign(user_priv, canonical.utf8)
 ```
 
 - `METHOD` 大写 HTTP 方法；`path_with_query` 为含查询串的完整路径（如 `/_api/logs?project=demo&tail=100`）；
 - `body` 为空时取 `sha256_hex("")`；
-- 服务端校验四要素：owner 已登记、`|now − ts| ≤ 300s`、nonce 未见（per-owner 查重，服务重启清零可接受）、验签通过。
+- 服务端校验四要素：user 已登记、`|now − ts| ≤ 300s`、nonce 未见（per-user 查重，服务重启清零可接受）、验签通过。
 
 ### 1.3 防重放与防篡改
 
 - **时间窗口 ±300 秒**：签名即刻过期，客户端与服务端时钟需大致同步（NTP）；
-- **nonce 查重**：同一 owner 的 nonce 一次有效，窗口内截获重放同一请求会被拒；
+- **nonce 查重**：同一 user 的 nonce 一次有效，窗口内截获重放同一请求会被拒；
 - **方法/路径/请求体全覆盖**：URL 改写、参数篡改、body 替换都会破坏签名。
 
 ### 1.4 密钥体系
 
 - 发布者密钥：Ed25519，`~/.showroom/id_ed25519`（裸 32B seed，权限 0600）；公钥串格式 `ed25519:<base64(pubkey)>`；
-- 一个 owner 可登记多把公钥（`state/tokens/<owner>/<kid>.pub`），`kid` = 公钥 sha256 前 8 hex；
-- 验签时对 owner 名下**全部**公钥尝试匹配，命中哪把即以哪把的 `kid` 记录身份（`GET /_api/whoami` 据此判定 admin）。
+- 一个 user 可登记多把公钥（`state/tokens/<user>/<kid>.pub`），`kid` = 公钥 sha256 前 8 hex；
+- 验签时对 user 名下**全部**公钥尝试匹配，命中哪把即以哪把的 `kid` 记录身份（`GET /_api/whoami` 据此判定 admin）。
 
 ---
 
@@ -91,17 +91,17 @@ SR-SIG1 签名已覆盖 `sha256(body)`（整个信封的哈希）——Encrypt-t
 
 ## 3. 管理员体系
 
-- 标记在**钥匙**上而非账号上：`state/tokens/<owner>/<kid>.admin`（空文件存在即管理员钥匙）；
-- 引导：首个管理员由主机 CLI `showroomctl owner-add <名> --pubkey <…> --admin` 建立；此后管理员可经签名 API 远程发卡与授权；
+- 标记在**钥匙**上而非账号上：`state/tokens/<user>/<kid>.admin`（空文件存在即管理员钥匙）；
+- 引导：首个管理员由主机 CLI `showroomctl user-add <名> --pubkey <…> --admin` 建立；此后管理员可经签名 API 远程发卡与授权；
 - 能力分层：
 
 | 能力 | 发布者钥匙 | 管理员钥匙 |
 |---|---|---|
 | 操作自己归属的展项（发布/停止/删除/回滚/日志/env/db 维护） | ✓ | ✓ |
-| `GET /_api/projects` 全平台列表 | ✓（明文含 owner 名） | ✓ |
+| `GET /_api/projects` 全平台列表 | ✓（明文含 user 名） | ✓ |
 | Redis 浏览（排障） | ✓ | ✓ |
 | 发卡 / 吊销 / 收权 / 主机状态面板 | ✗ | ✓ |
-| 管理员直发任意项目（`showroomctl publish <owner> …`，仅主机 CLI） | — | 仅主机 |
+| 管理员直发任意项目（`showroomctl publish <user> …`，仅主机 CLI） | — | 仅主机 |
 
 - 管理员钥匙遗失 = 平台最高权限泄露，须按 [SECURITY.md](../SECURITY.md) 处置流程吊销。
 
@@ -118,7 +118,7 @@ SR-SIG1 签名已覆盖 `sha256(body)`（整个信封的哈希）——Encrypt-t
 - **错误码语义最小化**：业务错误 `E_NAME/E_QUOTA/E_NOTFOUND/E_STATE/E_NET` 的 msg 不得包含内部信息；`E_AUTH` 恒无 msg；
 - **公网控制台**登录成功前不加载任何管理资源，只有登录壳；`/_bootstrap/*`（CLI/Skill 分发）仅内网面提供，公网面 404。
 
-注意：`/_api/projects` 等已认证端点对**任意已登记发布者**返回全平台项目清单（含 owner 名）——这是设计取舍（Demo 展示平台的团队内部可见性），不是漏洞；如需强隔离请自行在 Caddy 层收紧。
+注意：`/_api/projects` 等已认证端点对**任意已登记发布者**返回全平台项目清单（含 user 名）——这是设计取舍（Demo 展示平台的团队内部可见性），不是漏洞；如需强隔离请自行在 Caddy 层收紧。
 
 ---
 
@@ -126,17 +126,17 @@ SR-SIG1 签名已覆盖 `sha256(body)`（整个信封的哈希）——Encrypt-t
 
 | # | 威胁 | 缓解 |
 |---|---|---|
-| 1 | 公网链路窃听管理请求 | SR-SIG1 只暴露 owner 名、时间戳与签名；请求体含机密的端点（import/restore/dump）整体走信封加密 |
+| 1 | 公网链路窃听管理请求 | SR-SIG1 只暴露 user 名、时间戳与签名；请求体含机密的端点（import/restore/dump）整体走信封加密 |
 | 2 | 窃听展项流量 | 不缓解——展项页面公开，机密不应进 Demo |
-| 3 | 重放合法请求 | ±300s 窗口 + per-owner nonce 查重 |
+| 3 | 重放合法请求 | ±300s 窗口 + per-user nonce 查重 |
 | 4 | 伪造/篡改请求 | Ed25519 覆盖方法/路径/查询/请求体哈希；信封为 EtM（签名盖密文） |
 | 5 | 离线暴力破解 | Ed25519 / RSA-3072-OAEP-SHA256 / AES-256-GCM 均无已知实际攻击；nonce 不重复保证 GCM 每段密钥流唯一（信封一次性） |
 | 6 | 枚举端点/项目名/版本 | 零信息暴露（§4）：未认证一律 404 E_AUTH；项目名默认随机 8 位 |
-| 7 | 越权操作他人展项 | owner 归属校验（own_check）：签名 owner ≠ 项目 owner → E_NOTFOUND |
-| 8 | 发布者钥匙泄露 | 多钥匙 + 单钥匙吊销（`key-rm`），不影响同 owner 其他钥匙 |
+| 7 | 越权操作他人展项 | user 归属校验（user_check）：签名 user ≠ 项目 user → E_NOTFOUND |
+| 8 | 发布者钥匙泄露 | 多钥匙 + 单钥匙吊销（`key-rm`），不影响同 user 其他钥匙 |
 | 9 | 管理员钥匙泄露 | 分层授权面小；可用另一管理员钥匙远程吊销；吊销即失效（无令牌缓存） |
 | 10 | 平台私钥泄露（历史信封解密） | 轮换平台 RSA 对即可切断；下行备份客户端公钥封装，不受影响 |
-| 11 | registry 凭据泄露 | bcrypt（cost 10）入 htpasswd；`owner-revoke` 同步使 registry 登录失效；registry 仅经 Caddy `/v2` 暴露 |
+| 11 | registry 凭据泄露 | bcrypt（cost 10）入 htpasswd；`user-revoke` 同步使 registry 登录失效；registry 仅经 Caddy `/v2` 暴露 |
 | 12 | 恶意镜像攻击平台 | 镜像以受限资源跑（--memory/--cpus、host 端口仅 127.0.0.1）；但展项容器对共享网络内的 sr-postgres/sr-redis 可达——发布者凭证隔离，非网络隔离（已知边界） |
 | 13 | SQL 注入 / 命令注入 | db-sql 直达 psql stdin（禁 argv）；redis-keys/get 白名单字符校验先于 docker 调用；展项凭据为独立随机密码 |
 | 14 | 大载荷拒绝服务 | JSON body 1MB 帽、import IMPORT_MAX_GB（默认 8GB）帽、db-dump 明文 256MB 帽、分片 seq/total 强制、内存准入（RESERVE_MEM_MB 预留） |
@@ -151,8 +151,8 @@ SR-SIG1 签名已覆盖 `sha256(body)`（整个信封的哈希）——Encrypt-t
 | 密钥 | 位置 | 用途 | 轮换方式 |
 |---|---|---|---|
 | 发布者 Ed25519 私钥 | `~/.showroom/id_ed25519`（0600） | SR-SIG1 签名 | `keygen --force` + 重新登记 |
-| 发布者公钥 | 服务端 `state/tokens/<owner>/<kid>.pub` | 验签 | `key-rm` 删旧 / `owner-add` 加新 |
+| 发布者公钥 | 服务端 `state/tokens/<user>/<kid>.pub` | 验签 | `key-rm` 删旧 / `user-add` 加新 |
 | 平台 RSA-3072 | 服务端 `state/platform_rsa{,.pub}`；公钥分发到 `~/.showroom/platform_rsa.pub` | 解开上行信封 | 删文件 + `init-keys` + 重新分发公钥 |
 | 一次性 RSA-3072 | dump 时客户端进程内 | 解开下行备份 | 每次 dump 天然轮换 |
-| registry 凭据 | `state/owners/<owner>/reg.cred`（0600 明文）+ htpasswd（bcrypt） | `/v2` 推拉镜像 | `owner-revoke` + 重新 `owner-add` |
+| registry 凭据 | `state/users/<user>/reg.cred`（0600 明文）+ htpasswd（bcrypt） | `/v2` 推拉镜像 | `user-revoke` + 重新 `user-add` |
 | 展项 DB 凭据 | `state/projects/<project>.env`（0600） | 注入容器 | `db reset` 重发（密码不变，库重建） |

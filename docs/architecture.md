@@ -17,7 +17,7 @@
 │        │  状态读写                                                                        │
 │        ▼                                                                                 │
 │   /srv/showroom（btrfs 子卷 @showroom）                                                  │
-│   ├─ state/（policy.env · ports.reg · tokens/ · owners/ · projects/ · routes/）          │
+│   ├─ state/（policy.env · ports.reg · tokens/ · users/ · projects/ · routes/）          │
 │   ├─ _middleware/{postgres,redis,registry}/（中间件数据卷）                              │
 │   └─ _tmp/（import/dump 暂存，即用即删 + 24h gc）                                        │
 │                                                                                          │
@@ -36,7 +36,7 @@
 |---|---|---|
 | `showroom-common` | rlib + **wasm32 cdylib** | SPEC §1/§2 的契约实现：SR-SIG1 签名/验签、加密信封 seal/open、命名校验、一次性 RSA 密钥对。原生侧被 ctl/cli 复用；wasm 垫片（C ABI，不用 wasm-bindgen）给浏览器控制台。密码学依赖（ed25519-dalek / rsa / aes-gcm）锁定在本 crate 并重导出，避免下游类型分裂 |
 | `showroom` | 发布者 CLI（`showroom`） | 密钥与配置管理（`~/.showroom/`）、push 双通道、publish/deploy、查询与生命周期命令、db 维护子命令、doctor 体检。除 `push` 需要 docker CLI 外零运行时依赖 |
-| `showroomctl` | 主机工具（`showroomctl`） | HTTP 控制面（`serve`，仅监听 127.0.0.1:8090）+ 全部运维子命令（owner 管理、发布内核、生命周期、reconcile/autoheal/gc、快照、导入）。状态存 `/srv/showroom`，全部外部世界调用集中在 `dockerops`（docker CLI / psql / caddy / 裸 TCP registry 客户端） |
+| `showroomctl` | 主机工具（`showroomctl`） | HTTP 控制面（`serve`，仅监听 127.0.0.1:8090）+ 全部运维子命令（user 管理、发布内核、生命周期、reconcile/autoheal/gc、快照、导入）。状态存 `/srv/showroom`，全部外部世界调用集中在 `dockerops`（docker CLI / psql / caddy / 裸 TCP registry 客户端） |
 | `showroom-web` | 静态资源（`dist/`） | 控制台单页：`index.html` + `showroom_bg.wasm`（由 showroom-common cdylib 构建产物改名）。登录向导、展项/数据库/状态/帮助四区、管理标签（admin 钥匙可见）。产物入库（部署通道依赖静态文件），与垫片源码同一提交内重建 |
 
 内部深模块（showroomctl）：`state`（状态读写+纯函数：命名/policy/conf/端口/redisdb 分配/caddy 片段）、`dockerops`（外部世界）、`publish`（publish/import 内核，serve 与 CLI 子命令共用）、`ops`（生命周期与运维）、`serve`（axum 统一 fallback 分发）、`dbmaint`（db-sql/dump 三段式）、`streams`（ndjson 实时流）。
@@ -49,8 +49,8 @@ CLI 自动探测内网可达性：优先 lan，探不通回落 public。控制�
 
 ```text
 通道 A：registry 快通道（lan 可达时）
-  docker tag demo:v1 <your-host>/<owner>/demo:v1
-  docker login <your-host>（basic auth ← owner 的 registry 凭据）
+  docker tag demo:v1 <your-host>/<user>/demo:v1
+  docker login <your-host>（basic auth ← user 的 registry 凭据）
   docker push ──▶ Caddy /v2 ──▶ sr-registry(127.0.0.1:5000)
   showroom publish demo v1 ──▶ POST /_api/publish（SR-SIG1）
 
@@ -110,9 +110,9 @@ docker --restart unless-stopped：进程级兜底
 ├─ state/
 │  ├─ policy.env                   # MAX_SLOTS DEFAULT_MEM MAX_MEM IMPORT_MAX_GB ALLOW_LAN_PORT RESERVE_MEM_MB
 │  ├─ ports.reg                    # 每行 <port> <project>
-│  ├─ tokens/<owner>/<kid>.pub     # Ed25519 公钥（可多把）；同目录 <kid>.admin 空文件 = 管理员钥匙
-│  ├─ owners/<owner>/reg.cred      # registry basic_auth（0600 明文）
-│  ├─ projects/<project>.conf      # key=value：owner tag port cport mem cpu redisdb updated
+│  ├─ tokens/<user>/<kid>.pub     # Ed25519 公钥（可多把）；同目录 <kid>.admin 空文件 = 管理员钥匙
+│  ├─ users/<user>/reg.cred      # registry basic_auth（0600 明文）
+│  ├─ projects/<project>.conf      # key=value：owner tag port cport mem cpu redisdb updated（磁盘键名沿用 owner=）
 │  ├─ projects/<project>.env       # 注入容器的连接信息（§6 契约）
 │  ├─ projects/<project>.last2     # 上一 tag（回滚目标）
 │  └─ routes/<project>.caddy       # 展项路由片段（主 Caddyfile import）

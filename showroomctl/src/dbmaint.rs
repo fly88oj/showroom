@@ -1,7 +1,7 @@
 //! dbmaint：SPEC §9 数据库维护内核（db-sql / db-tables / db-preview / db-dump / db-restore / db-reset）。
 //! 纪律（ponytail）：psql/pg_dump/pg_restore 全走 `docker exec sr-postgres` 子进程，不引 postgres 客户端库；
 //! 用户 SQL 恒走 stdin（绝不进 argv）；表名走白名单 + 双引号包裹（psql 无参数化）。
-//! serve 在调用前完成统一验签与 own_check；本模块只做名字/上限校验与容器内执行。
+//! serve 在调用前完成统一验签与 user_check；本模块只做名字/上限校验与容器内执行。
 //! db-dump 为三段式（SPEC §10.4）：begin 起 pg_dump|seal 流式后台线程，chunk/status 切片下发。
 
 use std::fs;
@@ -92,7 +92,7 @@ pub fn resolve_db(project: &str, legacyslot: Option<&str>) -> R<(String, bool)> 
     Ok(state::resolve_db_ident(&names, &exists))
 }
 
-/// 项目的 legacyslot（§11 迁移标记；conf 缺失按 None，存在性校验由 serve own_check 先行）。
+/// 项目的 legacyslot（§11 迁移标记；conf 缺失按 None，存在性校验由 serve user_check 先行）。
 fn legacyslot_of(root: &Path, p: &str) -> Option<String> {
     state::Conf::load(root, p).ok().and_then(|c| c.legacyslot)
 }
@@ -161,7 +161,7 @@ pub const DUMP_ZSTD_LEVEL: i32 = 19;
 /// 陈旧（>24h）由 gc-images 顺带清理（ops::gc_tmp 已扫 .bin/.meta/.status）。
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DumpMeta {
-    pub owner: String,
+    pub user: String,
     pub project: String,
     pub db: String,
     pub created: u64,
@@ -185,8 +185,8 @@ fn dump_status_path(root: &Path, id: &str) -> PathBuf {
     root.join("_tmp").join(format!("{id}.status"))
 }
 
-/// 会话归属：id 非法/不存在 → E_NOTFOUND；owner 不符 → E_AUTH（不泄露会话内情）。
-fn load_dump_meta_owned(root: &Path, id: &str, owner: &str) -> R<DumpMeta> {
+/// 会话归属：id 非法/不存在 → E_NOTFOUND；user 不符 → E_AUTH（不泄露会话内情）。
+fn load_dump_meta_owned(root: &Path, id: &str, user: &str) -> R<DumpMeta> {
     if !state::valid_session_id(id) {
         return Err(ApiError::new("E_NOTFOUND", "no such dump"));
     }
@@ -194,8 +194,8 @@ fn load_dump_meta_owned(root: &Path, id: &str, owner: &str) -> R<DumpMeta> {
         .map_err(|_| ApiError::new("E_NOTFOUND", "no such dump"))?;
     let m: DumpMeta =
         serde_json::from_str(&text).map_err(|e| ApiError::state(format!("dump meta parse: {e}")))?;
-    if m.owner != owner {
-        return Err(ApiError::new("E_AUTH", format!("dump '{id}' belongs to {}", m.owner)));
+    if m.user != user {
+        return Err(ApiError::new("E_AUTH", format!("dump '{id}' belongs to {}", m.user)));
     }
     Ok(m)
 }
@@ -299,8 +299,8 @@ fn dump_seal_to(db: &str, pub_key: &showroom_common::rsa::RsaPublicKey, out: &Pa
 
 /// POST /_api/db-dump-begin 内核：解析客户端公钥（E_NAME 先拒）→ 定库 → 落 meta/status
 /// → 起后台线程 pg_dump|zstd-19|seal 流式写 .bin，立即返回 dump_id（不等待）。
-/// 名字校验与 own_check 由 serve 完成。线程无论成败终态都写回 .status；失败删 .bin。
-pub fn dump_begin(root: &Path, owner: &str, project: &str, client_pub_pem: &str) -> R<String> {
+/// 名字校验与 user_check 由 serve 完成。线程无论成败终态都写回 .status；失败删 .bin。
+pub fn dump_begin(root: &Path, user: &str, project: &str, client_pub_pem: &str) -> R<String> {
     use showroom_common::rsa::pkcs8::DecodePublicKey;
 
     let pub_key = showroom_common::rsa::RsaPublicKey::from_public_key_pem(client_pub_pem.trim())
@@ -310,7 +310,7 @@ pub fn dump_begin(root: &Path, owner: &str, project: &str, client_pub_pem: &str)
     fs::create_dir_all(root.join("_tmp"))?;
     // meta/status 先于 .bin 落盘：chunk/status 以 meta 判归属，bin 未就绪只表现为 running
     let meta = DumpMeta {
-        owner: owner.to_string(),
+        user: user.to_string(),
         project: project.to_string(),
         db: db.clone(),
         created: state::unix_now(),
@@ -352,8 +352,8 @@ pub fn plan_chunk(total: u64, offset: u64, len: u64) -> R<(u64, bool)> {
 
 /// GET /_api/db-dump-chunk 内核：归属校验 → ready 门 → 读 [offset, offset+n) 字节。
 /// 返回 (字节, total, finished)；finished（读完最后一片）由调用方触发会话删除。
-pub fn dump_chunk(root: &Path, owner: &str, id: &str, offset: u64, len: u64) -> R<(Vec<u8>, u64, bool)> {
-    load_dump_meta_owned(root, id, owner)?;
+pub fn dump_chunk(root: &Path, user: &str, id: &str, offset: u64, len: u64) -> R<(Vec<u8>, u64, bool)> {
+    load_dump_meta_owned(root, id, user)?;
     let st = load_dump_status(root, id);
     match st.state.as_str() {
         "ready" => {}
@@ -373,8 +373,8 @@ pub fn dump_chunk(root: &Path, owner: &str, id: &str, offset: u64, len: u64) -> 
 }
 
 /// GET /_api/db-dump-status 内核：归属校验后读状态。
-pub fn dump_status(root: &Path, owner: &str, id: &str) -> R<DumpStatus> {
-    load_dump_meta_owned(root, id, owner)?;
+pub fn dump_status(root: &Path, user: &str, id: &str) -> R<DumpStatus> {
+    load_dump_meta_owned(root, id, user)?;
     Ok(load_dump_status(root, id))
 }
 
@@ -616,12 +616,12 @@ mod tests {
     }
 
     /// 手工落一份 ready 会话（绕开 dump_begin 的 docker 依赖），返回 (root, id, sealed 字节)。
-    fn ready_session(name: &str, owner: &str, sealed: &[u8]) -> (PathBuf, String) {
+    fn ready_session(name: &str, user: &str, sealed: &[u8]) -> (PathBuf, String) {
         let root = troot(name);
         let id = state::rand_hex(16);
         fs::write(dump_bin(&root, &id), sealed).unwrap();
         let meta = DumpMeta {
-            owner: owner.into(),
+            user: user.into(),
             project: "demo".into(),
             db: "sr_demo".into(),
             created: 1,
@@ -681,7 +681,7 @@ mod tests {
     fn dump_not_ready_and_failed_states() {
         let root = troot("states");
         let id = state::rand_hex(16);
-        let meta = DumpMeta { owner: "alice".into(), project: "p".into(), db: "d".into(), created: 1 };
+        let meta = DumpMeta { user: "alice".into(), project: "p".into(), db: "d".into(), created: 1 };
         fs::write(dump_meta_path(&root, &id), serde_json::to_string(&meta).unwrap()).unwrap();
         // 未写 status（线程极早期）→ 默认 running
         assert_eq!(dump_status(&root, "alice", &id).unwrap().state, "running");

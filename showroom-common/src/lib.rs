@@ -110,8 +110,8 @@ pub mod names {
             && b.iter().all(|&c| c.is_ascii_alphanumeric() || c == b'-')
     }
 
-    /// 辅助名字（owner 等）沿用旧正则：`^[a-z0-9][a-z0-9-]{0,30}$`。
-    /// owner 进 registry 镜像路径与 htpasswd，保持小写（docker 仓库名禁大写）。
+    /// 辅助名字（user 等）沿用旧正则：`^[a-z0-9][a-z0-9-]{0,30}$`。
+    /// user 进 registry 镜像路径与 htpasswd，保持小写（docker 仓库名禁大写）。
     pub fn valid_aux(s: &str) -> bool {
         let b = s.as_bytes();
         !b.is_empty()
@@ -131,7 +131,7 @@ pub mod names {
 
     pub const RESERVED: [&str; 4] = ["v2", "_api", "_bootstrap", "_console"];
 
-    /// 辅助名（owner 等）仅正则（保留名不约束）。
+    /// 辅助名（user 等）仅正则（保留名不约束）。
     pub fn check_aux(s: &str) -> Result<(), String> {
         if valid_aux(s) {
             Ok(())
@@ -173,13 +173,13 @@ pub mod names {
 
 // ———— SR-SIG1（SPEC §1）————
 
-pub struct OwnerKey(SigningKey);
+pub struct UserKey(SigningKey);
 
-impl OwnerKey {
+impl UserKey {
     pub fn generate() -> Self {
         let mut seed = [0u8; KEY_LEN];
         OsRng.fill_bytes(&mut seed);
-        OwnerKey(SigningKey::from_bytes(&seed))
+        UserKey(SigningKey::from_bytes(&seed))
     }
 
     /// 读取裸 32B seed 文件（`save_seed` 写出的格式）。
@@ -188,7 +188,7 @@ impl OwnerKey {
         let seed: [u8; KEY_LEN] = seed.as_slice().try_into().map_err(|_| {
             io::Error::new(io::ErrorKind::InvalidData, "seed file must be exactly 32 bytes")
         })?;
-        Ok(OwnerKey(SigningKey::from_bytes(&seed)))
+        Ok(UserKey(SigningKey::from_bytes(&seed)))
     }
 
     /// 写裸 32B seed（0600；wasm32 无文件系统语义，仅原生提供）。
@@ -217,51 +217,51 @@ impl OwnerKey {
     }
 }
 
-/// canonical = "SR-SIG1\n<owner>\n<ts>\n<nonce>\n<METHOD>\n<path_with_query>\n<sha256_hex(body)>"。
+/// canonical = "SR-SIG1\n<user>\n<ts>\n<nonce>\n<METHOD>\n<path_with_query>\n<sha256_hex(body)>"。
 pub fn build_canonical(
-    owner: &str,
+    user: &str,
     ts: i64,
     nonce: &str,
     method: &str,
     path_with_query: &str,
     body_sha256_hex: &str,
 ) -> String {
-    format!("SR-SIG1\n{owner}\n{ts}\n{nonce}\n{method}\n{path_with_query}\n{body_sha256_hex}")
+    format!("SR-SIG1\n{user}\n{ts}\n{nonce}\n{method}\n{path_with_query}\n{body_sha256_hex}")
 }
 
-/// 生成完整 Authorization 值 `SR-SIG1 <owner>:<ts>:<nonce>:<sig_b64url>`（sig 为 base64url 无 padding）。
+/// 生成完整 Authorization 值 `SR-SIG1 <user>:<ts>:<nonce>:<sig_b64url>`（sig 为 base64url 无 padding）。
 /// nonce 由调用方生成（nonce_hex）；method 传大写。
 pub fn sign(
-    owner: &str,
-    key: &OwnerKey,
+    user: &str,
+    key: &UserKey,
     method: &str,
     path_with_query: &str,
     body: &[u8],
     now_unix: i64,
     nonce: &str,
 ) -> String {
-    sign_prehashed(owner, key, method, path_with_query, &sha256_hex(body), now_unix, nonce)
+    sign_prehashed(user, key, method, path_with_query, &sha256_hex(body), now_unix, nonce)
 }
 
 /// 预哈希签名：body 哈希由调用方算好（sha256_hex/ sha256_hex_stream），
 /// 与 sign 同格式——大文件流式上传先哈希再签，避免整文件进内存。
 pub fn sign_prehashed(
-    owner: &str,
-    key: &OwnerKey,
+    user: &str,
+    key: &UserKey,
     method: &str,
     path_with_query: &str,
     body_sha256_hex: &str,
     ts: i64,
     nonce: &str,
 ) -> String {
-    let canonical = build_canonical(owner, ts, nonce, method, path_with_query, body_sha256_hex);
+    let canonical = build_canonical(user, ts, nonce, method, path_with_query, body_sha256_hex);
     let sig = key.0.sign(canonical.as_bytes()).to_bytes();
-    format!("SR-SIG1 {owner}:{ts}:{nonce}:{}", URL_SAFE_NO_PAD.encode(sig))
+    format!("SR-SIG1 {user}:{ts}:{nonce}:{}", URL_SAFE_NO_PAD.encode(sig))
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Verified {
-    pub owner: String,
+    pub user: String,
     pub ts: i64,
     pub nonce: String,
 }
@@ -285,8 +285,8 @@ impl fmt::Display for AuthError {
 
 impl std::error::Error for AuthError {}
 
-/// 验证 SR-SIG1：格式解析 → ±300s 时间窗 → 依次尝试登记公钥（owner 可多把，任一命中即过）。
-/// nonce 查重（per-owner LRU，SPEC §1）由调用方按返回的 `Verified.nonce` 自行完成。
+/// 验证 SR-SIG1：格式解析 → ±300s 时间窗 → 依次尝试登记公钥（user 可多把，任一命中即过）。
+/// nonce 查重（per-user LRU，SPEC §1）由调用方按返回的 `Verified.nonce` 自行完成。
 pub fn verify(
     auth_value: &str,
     pubkeys: &[VerifyingKey],
@@ -310,12 +310,12 @@ pub fn verify_with_hash(
 ) -> std::result::Result<Verified, AuthError> {
     let rest = auth_value.strip_prefix("SR-SIG1 ").ok_or(AuthError::Format)?;
     let mut parts = rest.splitn(4, ':');
-    let (owner, ts, nonce, sig_b64) = match (parts.next(), parts.next(), parts.next(), parts.next())
+    let (user, ts, nonce, sig_b64) = match (parts.next(), parts.next(), parts.next(), parts.next())
     {
         (Some(a), Some(b), Some(c), Some(d)) => (a, b, c, d),
         _ => return Err(AuthError::Format),
     };
-    if owner.is_empty() || nonce.is_empty() {
+    if user.is_empty() || nonce.is_empty() {
         return Err(AuthError::Format);
     }
     let ts: i64 = ts.parse().map_err(|_| AuthError::Format)?;
@@ -325,11 +325,11 @@ pub fn verify_with_hash(
     if (now - ts).abs() > SIG_WINDOW_SECS {
         return Err(AuthError::Stale);
     }
-    let canonical = build_canonical(owner, ts, nonce, method, path_q, body_sha_hex);
+    let canonical = build_canonical(user, ts, nonce, method, path_q, body_sha_hex);
     for vk in pubkeys {
         if vk.verify(canonical.as_bytes(), &sig).is_ok() {
             return Ok(Verified {
-                owner: owner.to_owned(),
+                user: user.to_owned(),
                 ts,
                 nonce: nonce.to_owned(),
             });
@@ -490,13 +490,13 @@ mod tests {
     // 1. sign→verify 往返（body 非空 / 空）
     #[test]
     fn sign_verify_roundtrip() {
-        let k = OwnerKey::generate();
+        let k = UserKey::generate();
         let vk = [k.0.verifying_key()];
         for body in [b"{\"project\":\"demo\"}".as_slice(), b""] {
             let auth = sign("alice", &k, "POST", "/_api/publish", body, 1_000_000, "0123456789abcdef");
             let v = verify(&auth, &vk, "POST", "/_api/publish", body, 1_000_000).unwrap();
             assert_eq!(
-                (v.owner.as_str(), v.ts, v.nonce.as_str()),
+                (v.user.as_str(), v.ts, v.nonce.as_str()),
                 ("alice", 1_000_000, "0123456789abcdef")
             );
         }
@@ -505,7 +505,7 @@ mod tests {
     // 2. 篡改 body 一个字节 → BadSignature
     #[test]
     fn tampered_body_rejected() {
-        let k = OwnerKey::generate();
+        let k = UserKey::generate();
         let auth = sign("alice", &k, "POST", "/_api/publish", b"body-0", 1_000_000, "0123456789abcdef");
         assert_eq!(
             verify(&auth, &[k.0.verifying_key()], "POST", "/_api/publish", b"body-1", 1_000_000),
@@ -516,7 +516,7 @@ mod tests {
     // 3. ts 超窗（now±301）→ Stale；±300 边界通过
     #[test]
     fn stale_ts_rejected() {
-        let k = OwnerKey::generate();
+        let k = UserKey::generate();
         let vk = [k.0.verifying_key()];
         let auth = sign("alice", &k, "POST", "/_api/publish", b"", 1_000_000, "0123456789abcdef");
         for now in [1_000_000 + 301, 1_000_000 - 301] {
@@ -533,9 +533,9 @@ mod tests {
     // 4. 错误公钥 → BadSignature；多把公钥时第二把命中可通过
     #[test]
     fn wrong_key_and_multi_key() {
-        let k = OwnerKey::generate();
+        let k = UserKey::generate();
         let auth = sign("alice", &k, "GET", "/_api/logs?project=demo&tail=100", b"", 5, "aabbccddeeff0011");
-        let wrong = OwnerKey::generate();
+        let wrong = UserKey::generate();
         assert_eq!(
             verify(
                 &auth,
@@ -594,17 +594,17 @@ mod tests {
         assert!(open(&platform().0, Cursor::new(t2.as_slice()), &mut out2).is_err());
     }
 
-    // 7. OwnerKey seed save/load + pub_string/from_pub_string 往返（0600 权限）
+    // 7. UserKey seed save/load + pub_string/from_pub_string 往返（0600 权限）
     #[test]
-    fn owner_key_roundtrip() {
-        let k = OwnerKey::generate();
+    fn user_key_roundtrip() {
+        let k = UserKey::generate();
         let p = tmp("id_ed25519");
         k.save_seed(&p).unwrap();
-        let k2 = OwnerKey::from_seed_file(&p).unwrap();
+        let k2 = UserKey::from_seed_file(&p).unwrap();
         assert_eq!(k2.pub_string(), k.pub_string());
         assert_eq!(fs::metadata(&p).unwrap().permissions().mode() & 0o777, 0o600);
 
-        let vk = OwnerKey::from_pub_string(&k.pub_string()).unwrap();
+        let vk = UserKey::from_pub_string(&k.pub_string()).unwrap();
         assert_eq!(vk.to_bytes(), *k.0.verifying_key().as_bytes());
         let _ = fs::remove_file(&p);
     }
@@ -622,7 +622,7 @@ mod tests {
     }
 
     // 9. 名字规则（SPEC §4 + §11 v1.4）：project 放宽正则（大写/连字符）+ 保留名；
-    //    辅助名（owner 等）沿用旧小写正则。tag 规则不变。
+    //    辅助名（user 等）沿用旧小写正则。tag 规则不变。
     #[test]
     fn names_project_regex_relaxed_and_reserved() {
         assert!(names::check_project("demo").is_ok());
@@ -638,7 +638,7 @@ mod tests {
         ] {
             assert!(names::check_project(bad).is_err(), "project 应拒: {bad}");
         }
-        // 辅助名：旧小写正则（owner 进 registry 路径，保持小写约束）
+        // 辅助名：旧小写正则（user 进 registry 路径，保持小写约束）
         assert!(names::check_aux("alice-2").is_ok());
         assert!(names::check_aux("pr42").is_ok());
         assert!(names::check_aux("v2").is_ok(), "辅助名不受保留名约束");
@@ -680,12 +680,12 @@ mod tests {
             sha256_hex_stream(Cursor::new(b"")).unwrap(),
             "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
         );
-        let k = OwnerKey::generate();
+        let k = UserKey::generate();
         let pq = "/_api/import?project=demo&tag=v1";
         let auth = sign_prehashed("alice", &k, "POST", pq, &hash, 7, "aabb0011ccdd2233");
         let vk = [k.0.verifying_key()];
         let v = verify_with_hash(&auth, &vk, "POST", pq, &hash, 7).unwrap();
-        assert_eq!((v.owner.as_str(), v.nonce.as_str()), ("alice", "aabb0011ccdd2233"));
+        assert_eq!((v.user.as_str(), v.nonce.as_str()), ("alice", "aabb0011ccdd2233"));
         assert_eq!(
             verify_with_hash(&auth, &vk, "POST", pq, &sha256_hex(b"other"), 7),
             Err(AuthError::BadSignature)

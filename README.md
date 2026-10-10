@@ -46,7 +46,7 @@ showroom deploy v1          # 推镜像 + 发布 + 打印 URL，一步到位
 
 ### 第一步：部署主机（管理员，一次性）
 
-在一台 Linux + Docker + btrfs 的机器上部署控制面与中间件：目录与子卷、systemd 单元、Caddyfile、中间件容器、首把管理员钥匙引导（`showroomctl owner-add <名> --pubkey <…> --admin`）。
+在一台 Linux + Docker + btrfs 的机器上部署控制面与中间件：目录与子卷、systemd 单元、Caddyfile、中间件容器、首把管理员钥匙引导（`showroomctl user-add <名> --pubkey <…> --admin`）。
 
 完整步骤见 **[docs/deployment.md](docs/deployment.md)**。
 
@@ -55,7 +55,7 @@ showroom deploy v1          # 推镜像 + 发布 + 打印 URL，一步到位
 ```sh
 showroom keygen                                  # 生成 Ed25519 密钥，打印公钥串
 # 把公钥串发给管理员登记（管理员可用控制台「管理」标签远程发卡，返回 registry 密码）
-showroom config --owner <你的账号> \
+showroom config --user <你的账号> \
     --server-lan http://<your-host> \
     --registry-user <你的账号> --registry-password <registry 密码>
 showroom doctor                                  # 体检：密钥/配置/服务端/签名/docker

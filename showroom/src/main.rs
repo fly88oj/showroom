@@ -17,7 +17,7 @@ use serde_json::{json, Value};
 use api::{Api, Which};
 use config::Config;
 use showroom_common::names::{check_project, check_tag, random_project};
-use showroom_common::OwnerKey;
+use showroom_common::UserKey;
 
 #[derive(Parser)]
 #[command(name = "showroom", about = "Showroom 发布者 CLI（push/publish/查看/运维）", version)]
@@ -47,7 +47,7 @@ enum Cmd {
     /// 查看/更新配置（仅更新给出的字段；无参数时打印当前配置）
     Config {
         #[arg(long)]
-        owner: Option<String>,
+        user: Option<String>,
         #[arg(long)]
         server_lan: Option<String>,
         /// 传空串清除
@@ -177,8 +177,8 @@ fn run(cli: &Cli) -> Result<(), String> {
     let cfg = Config::load()?;
     match &cli.cmd {
         Cmd::Keygen { force } => keygen(*force, &cfg),
-        Cmd::Config { owner, server_lan, server_public, registry_user, registry_password } => {
-            config_cmd(&cfg, owner, server_lan, server_public, registry_user, registry_password)
+        Cmd::Config { user, server_lan, server_public, registry_user, registry_password } => {
+            config_cmd(&cfg, user, server_lan, server_public, registry_user, registry_password)
         }
         Cmd::Push { project, tag, via } => push(&cfg, cli.server, project, tag, *via),
         Cmd::Deploy { project_tag, mem, cpu, container_port } => {
@@ -221,7 +221,7 @@ fn keygen(force: bool, cfg: &Config) -> Result<(), String> {
     if p.exists() && !force {
         return Err(format!("密钥 {} 已存在，拒绝覆盖（--force 强制）", p.display()));
     }
-    let k = OwnerKey::generate();
+    let k = UserKey::generate();
     k.save_seed(&p).map_err(|e| format!("写密钥失败：{e}"))?;
     println!("密钥: {}", p.display());
     println!("公钥: {}", k.pub_string());
@@ -231,7 +231,7 @@ fn keygen(force: bool, cfg: &Config) -> Result<(), String> {
 
 fn config_cmd(
     cfg: &Config,
-    owner: &Option<String>,
+    user: &Option<String>,
     server_lan: &Option<String>,
     server_public: &Option<String>,
     registry_user: &Option<String>,
@@ -245,12 +245,12 @@ fn config_cmd(
         }
     };
     let mut c = cfg.clone();
-    if let (None, None, None, None, None) = (owner, server_lan, server_public, registry_user, registry_password) {
+    if let (None, None, None, None, None) = (user, server_lan, server_public, registry_user, registry_password) {
         println!("{}", toml::to_string_pretty(&c).map_err(|e| e.to_string())?);
         return Ok(());
     }
-    if let Some(o) = owner {
-        c.owner = o.clone();
+    if let Some(o) = user {
+        c.user = o.clone();
     }
     if let Some(u) = server_lan {
         check_url(u)?;
@@ -303,13 +303,13 @@ fn push(
 
 fn select(cfg: &Config, force: Option<Which>) -> Result<(String, Which), String> {
     // 探测需签名，故先加载密钥（失败即报错，引导 keygen）
-    let key = OwnerKey::from_seed_file(&cfg.key_file())
+    let key = UserKey::from_seed_file(&cfg.key_file())
         .map_err(|e| format!("读取密钥 {} 失败：{e}（先运行 showroom keygen）", cfg.key_file().display()))?;
     api::pick_server(
         cfg.server_lan.as_deref(),
         cfg.server_public.as_deref(),
         force,
-        api::signed_probe(&cfg.owner, &key),
+        api::signed_probe(&cfg.user, &key),
     )
 }
 
@@ -373,11 +373,11 @@ fn push_registry(cfg: &Config, project: &str, tag: &str, t0: Instant) -> Result<
     if cfg.registry.password.is_empty() {
         return Err("未配置 registry 密码：showroom config --registry-password …".into());
     }
-    let user = if cfg.registry.user.is_empty() { cfg.owner.clone() } else { cfg.registry.user.clone() };
+    let user = if cfg.registry.user.is_empty() { cfg.user.clone() } else { cfg.registry.user.clone() };
     let host = registry_host(lan);
     let src = format!("{project}:{tag}");
     // docker 仓库名强制小写（§11 项目名允许大写 → repo 路径转小写，与服务端 image_ref 对齐）
-    let reg_tag = format!("{host}/{}/{}:{tag}", cfg.owner, project.to_ascii_lowercase());
+    let reg_tag = format!("{host}/{}/{}:{tag}", cfg.user, project.to_ascii_lowercase());
     docker_run(&["tag", &src, &reg_tag])?;
     docker_login(&host, &user, &cfg.registry.password)?;
     docker_run(&["push", &reg_tag])?;
@@ -453,6 +453,7 @@ fn parse_cpu(s: &str) -> Result<f64, String> {
     }
 }
 
+#[allow(clippy::too_many_arguments)] // 展开自 publish/deploy 共用的参数组（§12.1）
 fn publish(
     cfg: &Config,
     force: Option<Which>,
@@ -566,7 +567,7 @@ fn ps(cfg: &Config, force: Option<Which>, json_out: bool) -> Result<(), String> 
         return Ok(());
     }
     let arr = v["projects"].as_array().cloned().unwrap_or_default();
-    println!("{:<26} {:<10} {:<26} {}", "PROJECT", "STATUS", "TAG", "OWNER");
+    println!("{:<26} {:<10} {:<26} USER", "PROJECT", "STATUS", "TAG");
     for e in &arr {
         let g = |k: &str| e[k].as_str().unwrap_or("");
         println!(
@@ -574,7 +575,7 @@ fn ps(cfg: &Config, force: Option<Which>, json_out: bool) -> Result<(), String> 
             trunc(g("project"), 25),
             trunc(g("status"), 9),
             trunc(g("tag"), 25),
-            g("owner")
+            g("user")
         );
     }
     Ok(())
@@ -592,7 +593,7 @@ fn url_cmd(cfg: &Config, force: Option<Which>, project: &str) -> Result<(), Stri
     check_project(project)?;
     let api = Api::connect(cfg, force)?;
     let v = api.signed_get("/_api/projects")?;
-    let found = v["projects"].as_array().map_or(false, |a| {
+    let found = v["projects"].as_array().is_some_and(|a| {
         a.iter().any(|e| e["project"].as_str() == Some(project))
     });
     if !found {
@@ -674,7 +675,7 @@ fn doctor(cfg: &Config) -> Result<(), String> {
     let mut all_ok = true;
 
     // 1. 密钥
-    let key = match OwnerKey::from_seed_file(&cfg.key_file()) {
+    let key = match UserKey::from_seed_file(&cfg.key_file()) {
         Ok(k) => {
             println!("✓ 密钥 {} 可读，公钥串：{}", cfg.key_file().display(), k.pub_string());
             Some(k)
@@ -687,15 +688,15 @@ fn doctor(cfg: &Config) -> Result<(), String> {
     };
 
     // 2. 配置
-    if cfg.owner.is_empty() {
+    if cfg.user.is_empty() {
         all_ok = false;
-        println!("✗ 未配置 owner（showroom config --owner …）");
+        println!("✗ 未配置 user（showroom config --user …）");
     } else {
-        println!("✓ owner = {}", cfg.owner);
+        println!("✓ user = {}", cfg.user);
     }
 
     // 3/4. 服务端可达（签名 health 探测）
-    let probe = key.as_ref().map(|k| api::signed_probe(&cfg.owner, k));
+    let probe = key.as_ref().map(|k| api::signed_probe(&cfg.user, k));
     let mut lan_ok = false;
     let mut pub_ok = false;
     for (label, url, ok_flag) in [
@@ -703,7 +704,7 @@ fn doctor(cfg: &Config) -> Result<(), String> {
         ("server_public", cfg.server_public.as_deref(), &mut pub_ok),
     ] {
         let Some(u) = url.filter(|s| !s.is_empty()) else { continue };
-        let reachable = probe.as_ref().map_or(false, |p| p(u));
+        let reachable = probe.as_ref().is_some_and(|p| p(u));
         if reachable {
             println!("✓ {label} {u} 可达");
             *ok_flag = true;
@@ -747,7 +748,7 @@ fn doctor(cfg: &Config) -> Result<(), String> {
     if let (Some(lan), Some(u), Some(pw)) = (&cfg.server_lan, reg_user, reg_pass) {
         let url = format!("{}/v2/", lan.trim_end_matches('/'));
         match reqwest::blocking::Client::builder().timeout(Duration::from_secs(5)).build()
-            .and_then(|c| Ok(c.get(&url).basic_auth(u, Some(pw)).send()))
+            .map(|c| c.get(&url).basic_auth(u, Some(pw)).send())
         {
             Ok(Ok(resp)) if resp.status().as_u16() == 200 => println!("✓ registry 快通道可用（凭据有效）"),
             Ok(Ok(resp)) if resp.status().as_u16() == 401 => println!("✗ registry 凭据无效（push 将回落加密通道；用 showroom config --registry-password 更新）"),
