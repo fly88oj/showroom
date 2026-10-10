@@ -203,3 +203,24 @@ CLI 对应：`showroom db sql|tables|preview|dump|restore|reset`。公网全可�
 - 控制台：镜像列表（部署 ComboBox 同源数据）每行删除按钮（confirm，显示镜像名）；上传失败 E_QUOTA 时错误文案引导到删除。
 ### 14.4 policy 新增
 `DISK_RESERVE_GB=20`、`UPLOAD_SPACE_FACTOR=4`（均可调）。
+
+## 15. v1.8：主机自举（setup）与中间件编排
+### 15.1 声明式期望状态
+- `state/host.env`（setup 生成、可改、幂等应用）：
+  ```
+  MIDDLEWARE="postgres registry redis"     # 集合：按需增减（如无 redis 主机）
+  REDIS_DBS=256  DISK_RESERVE_GB=20  UPLOAD_SPACE_FACTOR=4  RESERVE_MEM_MB=1536
+  CADDY=yes  TUNING=sysctl  DEDUP=weekly
+  ```
+- `showroomctl setup [--apply]`：无 --apply=diff 模式（列出将做的变更与当前偏差）；--apply 幂等执行：目录/btrfs 子卷/policy/env 合成、docker 网络、所选中间件容器（缺则建、多则停删——**有项目引用的中间件禁用需 --force 并列受影响项目**）、caddy 安装(pacman)+Caddyfile 渲染（按中间件集合生成路由）、systemd 单元（api/timers/dedup）安装启用、sysctl/journald/watchdog 调优、预压缩脚本。全新主机流程=下载二进制→`showroomctl setup --apply`→`owner-add --admin`。
+- `showroomctl upgrade`：上传新二进制后的就地升级（替换单元/重渲染配置，保数据）。
+### 15.2 中间件子命令（CLI+admin 端点同源）
+- `showroomctl middleware status|enable <名>|disable <名> [--force]|set <名> <k>=<v>`
+- admin 端点：GET /_api/admin/host（期望状态+实际偏差+建议）、POST /_api/admin/host（改 host.env 后自动 setup --apply 的 diff→apply 两段式：先返回变更清单，confirm=true 执行）
+- env 注入自适应：禁用的中间件对应变量组（REDIS_*）不再注入，publish 照常；ps/env 标注「未启用」。
+### 15.3 Redis 逻辑库自动扩容
+- admin/status 与 /_api/admin/host 常驻检查：`已用库数 + 头 room` vs `REDIS_DBS`；余量 <20% 时状态面板黄条提示「建议扩容」。
+- 扩容流程（databases 变更需重启实例）：管理员 `showroomctl middleware set redis databases=512`（或 Web 表单）→ showroom 提示「需重启 Redis（约 3 秒，数据 AOF 持久，运行中应用的连接将自动重连）」→ confirm → 停旧容器→新容器带 `--databases N` 起来→自动验证 ping+库数→回报结果。**不静默重启**——用户明确要求提示管理员确认。
+- 项目数逼近池上限时 publish 的 redisdb 分配 E_QUOTA 消息直接给扩容命令建议。
+### 15.4 分发
+- release 二进制经 GitHub Releases（CI 产物）+ 主机 `_bootstrap`；docs/deployment.md 改写为 setup 单命令流程（旧手工步骤降级为附录/原理说明）。
