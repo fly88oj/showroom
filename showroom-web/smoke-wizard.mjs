@@ -29,6 +29,15 @@
 //      账号与钥匙表、发卡对话框提交体校验（registry 密码仅显示一次）、行内管理动作
 //      （key-admin/key-rm/user-revoke + 中文 confirm 文案）、平台状态面板、30s 自动刷新、
 //      admin 接口 404 E_AUTH 顶部条报错、whoami 失败顶部条报错
+//  11b) plan-16 §1.5 发卡收口：主路径「自动生成强密码」（crypto 随机 16 位，展示+复制）→
+//      user-add {user,password}（无 pubkey）→ 结果两行一次性密码（登录初始+registry）；
+//      公钥直登记收进折叠专家路径（{user,pubkey}，结果仅 registry 行+kid）；「同时授予管理员」
+//      勾选带 admin:true；账号表 has_password 徽标（已设/未设）+ 行内「补发密码」
+//      （confirm → passwd-set {user,password} → 新密码一次性展示对话框 → 徽标翻转）
+//  11c) plan-16 §2.2 改密收口：顶部「修改密码」对话框（当前+新+确认；autocomplete 三件）→
+//      字段校验（空/不一致/与当前相同）→ 当前密码校验复用 login-begin+本地 finish（错即内联拒绝，
+//      不触达 pw-begin）→ pw-begin {user,m1}（SR-SIG1 签名）→ pw-commit {user,record} → 旧密码
+//      失效/新密码可登录（toy 服务端记录替换）→ 成功提示重新登录并退出会话
 //  12) §13 发布三入口并存：一键部署 / 仅上传（无 publish 调用，③④ skip，镜像已入库提示）/
 //      部署表单（/_api/images 惰性加载+刷新+选择自动带出项目标签+发布）；
 //      §13.2 Redis 浏览用户隔离文案 + 管理员视图标注（whoami 两态）
@@ -105,6 +114,7 @@ const BTN_TEXT = {
   'lg-submit': '登录',
   'pub-submit': '一键部署', 'btn-upload-only': '仅上传', 'dep-submit': '发布', 'ad-na-submit': '发放',
   'hs-apply': '查看变更', 'hs-confirm': '确认执行', 'hs-rx-preview': '获取确认提示', 'hs-rx-run': '我已了解，执行扩容',
+  'pw-submit': '确认修改', 'ad-na-pubsubmit': '登记公钥发放',
 };
 const armBtnText = () => { for (const [id, t] of Object.entries(BTN_TEXT)) $s(id).textContent = t; };
 globalThis.document = {
@@ -247,6 +257,12 @@ let pendingBind = null;                  // 服务端在途 bind_token（单次�
 const authBeginBodies = [], authFinishBodies = [], keyBindBodies = [], keyBindAuths = [], keyBindToks = [];
 const selfrmBodies = [];
 const wireTexts = [];                    // 全部上线请求体（密码零明文断言用）
+// plan-16 §2.2 改密三件序列（SR-SIG1 签名端点）+ §1.5 补发：观测与捕获
+let pwBeginN = 0, pwCommitN = 0;
+const pwBeginBodies = [], pwCommitBodies = [], pwBeginAuths = [];
+let pwChangeNew = null;                  // toy 服务端无法从 record 提取密码：由场景侧告知（记录替换即生效）
+// plan-16 §1.5 补发（passwd-set）：观测与捕获
+const passwdSetBodies = [];
 // 观测计数 / 捕获（场景 6 断言用）
 let projectsN = 0, eventsN = 0, logsN = 0, statusN = 0;
 let lastLogsUrl = '', lastLogsAuth = '', lastEventsAuth = '', beginBody = null;
@@ -296,10 +312,10 @@ const HOST_STATE = { // 方案 §4 契约形状 + 协调者补充的 FRP 键（�
 };
 let hostResp = HOST_STATE; // 可替换（池两态/扩容后收敛）
 const ADM_USERS = { users: [
-  { user: 'alice', projects: 2, keys: [
+  { user: 'alice', projects: 2, has_password: true, keys: [
     { kid: 'kid-a1', admin: true, created: '2026-09-01T10:00:00' },
     { kid: 'kid-a2', admin: false, created: '2026-09-02T11:00:00' } ] },
-  { user: 'bob', projects: 0, keys: [ { kid: 'kid-b1', admin: false, created: '2026-10-01T09:00:00' } ] },
+  { user: 'bob', projects: 0, has_password: false, keys: [ { kid: 'kid-b1', admin: false, created: '2026-10-01T09:00:00' } ] },
 ] };
 const ADM_STATUS = {
   services: { 'showroom-caddy': 'active', 'showroom-registry': 'active', 'showroom-postgres': 'active', 'showroom-redis': 'inactive' },
@@ -379,6 +395,24 @@ globalThis.fetch = async (url, init = {}) => {
     return resp(200, { kid: `kid-bind-${authBindN}`, admin: !!(PWDB[body.user] && PWDB[body.user].admin) });
   }
   if (u.includes('/_api/key-selfrm')) { selfrmN++; selfrmBodies.push(JSON.parse(t)); return resp(200, { ok: true }); }
+  // —— plan-16 §2.2 改密三件序列（SR-SIG1 常规签名；与页面的 mock 注册分支同一 toy 协议：m1/m2/record） ——
+  if (u.includes('/_api/auth/pw-begin')) {
+    pwBeginN++;
+    const body = JSON.parse(t);
+    pwBeginBodies.push(body); pwBeginAuths.push(auth);
+    const j1 = mParse(body.m1);
+    if (!j1 || j1.m !== 'm1' || j1.u !== body.user) return resp(500, { error: 'E_STATE', msg: 'pw-begin: bad m1' });
+    return resp(200, { m2: mB64({ v: 1, m: 'm2', n: `p${pwBeginN}` }) });
+  }
+  if (u.includes('/_api/auth/pw-commit')) {
+    pwCommitN++;
+    const body = JSON.parse(t);
+    pwCommitBodies.push(body);
+    const jr = mParse(body.record);
+    if (!jr || jr.m !== 'record') return resp(500, { error: 'E_STATE', msg: 'pw-commit: bad record' });
+    if (pwChangeNew != null && PWDB[body.user]) PWDB[body.user].pass = pwChangeNew; // 记录替换即新密码生效（toy 协议）
+    return resp(200, { ok: true });
+  }
   if (u.includes('/_api/health')) return mode === 'ok' ? resp(200, { ok: true }) : resp(404, { error: 'E_AUTH' });
   if (u.includes('/_api/projects')) { projectsN++; return resp(200, PROJECTS); }
   if (u.includes('/_api/images')) { // §13.1：admin 钥匙全量（admin_view），普通仅本人前缀；§14.3 删除后清单收敛
@@ -468,7 +502,22 @@ globalThis.fetch = async (url, init = {}) => {
     if (whoamiFail) return resp(404, { error: 'E_AUTH' });
     return resp(200, { user: 'alice', kid: 'kid-self', admin: whoamiAdmin });
   }
-  if (u.includes('/_api/admin/user-add')) { userAddBody = JSON.parse(dec2.decode(init.body)); return resp(200, { ok: true, kid: 'kid-new', registry_password: 'reg-pw-smoke' }); }
+  if (u.includes('/_api/admin/user-add')) { // plan-16 §1.5：password → login_password 一次性回显；pubkey → kid
+    userAddBody = JSON.parse(dec2.decode(init.body));
+    return resp(200, {
+      ok: true,
+      ...(userAddBody.pubkey ? { kid: 'kid-new' } : {}),
+      ...(userAddBody.password ? { login_password: userAddBody.password } : {}),
+      registry_password: 'reg-pw-smoke',
+    });
+  }
+  if (u.includes('/_api/admin/passwd-set')) { // plan-16 §1.5 补发：{user,password} → 一次性返回；徽标随之翻转
+    const body = JSON.parse(dec2.decode(init.body));
+    passwdSetBodies.push(body);
+    const row = ADM_USERS.users.find((x) => x.user === body.user);
+    if (row) row.has_password = true;
+    return resp(200, { ok: true, password: body.password || 'gen-pw-smoke' });
+  }
   if (u.includes('/_api/admin/user-revoke')) { revokeBodies.push(JSON.parse(dec2.decode(init.body))); return resp(200, { ok: true }); }
   if (u.includes('/_api/admin/key-admin')) { keyAdminBodies.push(JSON.parse(dec2.decode(init.body))); return resp(200, { ok: true }); }
   if (u.includes('/_api/admin/key-rm')) { keyRmBodies.push(JSON.parse(dec2.decode(init.body))); return resp(200, { ok: true }); }
@@ -944,27 +993,54 @@ ok(adminStatusN === adStBase + 1, '勾选「每 30 秒自动刷新」：立即�
 $s('ad-st-auto').checked = false;
 fire($s('ad-st-auto'), 'change');
 
-// —— 发卡对话框（远程发卡）：提交体校验（字段内联错误+聚焦首错）+ registry 密码仅显示一次 ——
+// —— 发卡对话框（plan-16 §1.5 主路径）：账号 + 自动生成强密码 → user-add {user,password} ——
 click('ad-user-add');
 ok($s('dlg-user-add').open === true, '发卡对话框打开');
 click('ad-na-submit'); // 全空 → 账号名校验
 ok(userAddBody === null && ($s('ad-na-user-err').textContent || '').includes('账号名'), '发卡校验：账号名不合法即内联拒绝（未发请求）');
 $s('ad-na-user').value = 'newbie';
-$s('ad-na-pub').value = 'not-a-pubkey';
-click('ad-na-submit');
-ok(userAddBody === null && ($s('ad-na-pub-err').textContent || '').includes('ed25519:'), '发卡校验：公钥串格式内联拒绝（未发请求）');
-$s('ad-na-pub').value = 'ed25519:' + 'A'.repeat(43);
+click('ad-na-submit'); // 账号合法但未生成密码 → 生成区错误
+ok(userAddBody === null && ($s('ad-na-gen-err').textContent || '').includes('自动生成强密码'), '发卡校验：未生成初始密码即内联拒绝（未发请求）');
+click('ad-na-gen');
+const genPw1 = $s('ad-na-gen-pw').textContent || '';
+ok(/^[a-zA-Z0-9]{16}$/.test(genPw1), `「自动生成强密码」：crypto 随机 16 位（${genPw1}）`);
+ok(shown('ad-na-gen-box'), '生成后：初始密码展示区出现（醒目 + 复制按钮）');
+click('ad-na-copy-gen');
+ok(($s('msg').textContent || '').includes('已复制'), '初始密码「复制密码」按钮可用（剪贴板降级路径）');
+click('ad-na-gen'); // 再点一次：换新密码（旧值不残留）
+const genPw2 = $s('ad-na-gen-pw').textContent || '';
+ok(genPw2 !== genPw1 && /^[a-zA-Z0-9]{16}$/.test(genPw2), '再次「自动生成强密码」：换新密码（旧值不残留）');
+wireTexts.length = 0;
 click('ad-na-submit');
 await sleep(60);
-ok(userAddBody && userAddBody.user === 'newbie' && userAddBody.pubkey.startsWith('ed25519:') && !('admin' in userAddBody),
-  '发卡提交体：账号 + 公钥（未勾选管理员则不带 admin 字段）');
-ok($s('ad-na-pw').textContent === 'reg-pw-smoke', '发卡结果：registry_password 字段展示为一次性密码');
+ok(userAddBody && userAddBody.user === 'newbie' && userAddBody.password === genPw2 && !('pubkey' in userAddBody) && !('admin' in userAddBody),
+  '发卡提交体（主路径）：{user,password}（无 pubkey；未勾选管理员不带 admin）');
+ok(shown('ad-na-result') && $s('ad-na-login-pw').textContent === genPw2 && $s('ad-na-pw').textContent === 'reg-pw-smoke',
+  '发卡结果两行：登录初始密码（回显生成值）+ registry 密码（服务端一次性返回）');
+ok(!wireTexts.filter((t) => !t.includes('/_api/admin/user-add')).some((t) => t.includes(genPw2)),
+  '发卡上行：初始密码仅出现在 user-add 管理员签名通道（不进 /_api/auth/* 等其他请求体）');
+ok(hidden('ad-na-gen-box'), '发放成功后：生成区收起（结果区已含登录初始密码，避免重复展示）');
 ok(!$s('ad-na-submit').disabled && $s('ad-na-submit').textContent === '发放', '发卡请求结束：按钮恢复原文与可用');
 $s('ad-na-user').value = 'newbie2';
+click('ad-na-gen');
 $s('ad-na-admin').checked = true;
 click('ad-na-submit');
 await sleep(60);
-ok(userAddBody.admin === true, '勾选「同时授予管理员」→ 提交体 admin:true');
+ok(userAddBody.admin === true && userAddBody.user === 'newbie2', '勾选「同时授予管理员」→ 提交体 admin:true');
+// —— 专家路径（折叠）：直接登记公钥（旧 pubkey 发卡表单保底） ——
+$s('ad-na-user').value = 'ci-bot';
+$s('ad-na-pub').value = 'not-a-pubkey';
+click('ad-na-pubsubmit');
+ok(userAddBody.user === 'newbie2' && ($s('ad-na-pub-err').textContent || '').includes('ed25519:'), '专家路径：公钥串格式内联拒绝（未发请求）');
+$s('ad-na-pub').value = 'ed25519:' + 'A'.repeat(43);
+click('ad-na-pubsubmit');
+await sleep(60);
+ok(userAddBody.user === 'ci-bot' && userAddBody.pubkey.startsWith('ed25519:') && !('password' in userAddBody),
+  '专家路径提交体：{user,pubkey}（不带 password）');
+ok(shown('ad-na-result') && hidden('ad-na-login-row') && $s('ad-na-pw').textContent === 'reg-pw-smoke',
+  '专家路径结果：仅 registry 密码一行（登录初始密码行隐藏）');
+ok(($s('ad-na-kid-note').textContent || '').includes('kid-new'), '专家路径结果：登记钥匙 kid 回显');
+ok(!$s('ad-na-pubsubmit').disabled && $s('ad-na-pubsubmit').textContent === '登记公钥发放', '专家路径请求结束：按钮恢复原文与可用');
 click('ad-na-close');
 ok($s('dlg-user-add').open === false, '发卡对话框关闭');
 
@@ -988,6 +1064,37 @@ confirmRet = false; // confirm 拒绝：动作不得提交
 act('keyrm', 'bob', 'kid-b1');
 await sleep(60);
 ok(keyRmBodies.length === 1, 'confirm 取消：管理动作不提交');
+confirmRet = true;
+
+// —— 账号表 has_password 徽标（plan-16 §1.5）：未设密码灰徽标 + 行内「补发密码」→ 一次性新密码 ——
+const tbPw = $s('ad-users-tbl:q').innerHTML || '';
+ok(tbPw.indexOf('已设密码') >= 0 && tbPw.indexOf('未设密码') > tbPw.indexOf('已设密码'),
+  'has_password 徽标两态：alice=已设密码 / bob=未设密码（按行对应）');
+ok(/data-act="pwset" data-user="bob"/.test(tbPw) && !/data-act="pwset" data-user="alice"/.test(tbPw),
+  '「补发密码」按钮仅出现在未设密码账号行（已设密码行无此按钮）');
+confirmMsgs.length = 0;
+act('pwset', 'bob');
+await sleep(60);
+const psConfirm = confirmMsgs.at(-1) || '';
+ok(psConfirm.includes('bob') && psConfirm.includes('补发') && psConfirm.includes('仅显示一次'),
+  '补发密码：confirm 中文文案含账号名与一次性/失效语义');
+ok(passwdSetBodies.length === 1 && passwdSetBodies[0].user === 'bob' && /^[a-zA-Z0-9]{16}$/.test(passwdSetBodies[0].password),
+  '补发提交体：{user, password=<crypto 随机 16 位>}');
+ok($s('dlg-passwd-set').open === true && ($s('ad-ps-user').textContent || '') === 'bob'
+  && $s('ad-ps-pw').textContent === passwdSetBodies[0].password,
+  '补发结果：新登录密码一次性展示（对话框醒目提示 + 回显服务端返回值）');
+click('ad-ps-copy');
+ok(($s('msg').textContent || '').includes('已复制'), '补发结果「复制密码」按钮可用');
+await sleep(60); // loadAdminUsers 刷新（mock 侧 has_password 已翻转）
+const tbPw2 = $s('ad-users-tbl:q').innerHTML || '';
+ok(!tbPw2.includes('未设密码') && !/data-act="pwset"/.test(tbPw2),
+  '补发成功后：账号表刷新，徽标翻转为「已设密码」（补发按钮消失）');
+click('ad-ps-close');
+ok($s('dlg-passwd-set').open === false, '补发对话框关闭');
+confirmRet = false; // confirm 取消：不提交 passwd-set
+act('pwset', 'bob');
+await sleep(40);
+ok(passwdSetBodies.length === 1, 'confirm 取消：补发不提交');
 confirmRet = true;
 
 // —— admin 接口 404 E_AUTH（权限被收回等异常）：顶部条报错 ——
@@ -1119,6 +1226,55 @@ await sleep(80);
 ok($s('rd-scope').textContent === '管理员视图', 'admin 钥匙：Redis 浏览 DB 下拉标注「管理员视图」（全量逻辑库）');
 clickTab('proj');
 whoamiAdmin = false;
+
+// —— 修改密码（plan-16 §2.2 pw 三件序列收口）：校验 → 当前密码本地校验 → pw-begin/commit → 重新登录 ——
+click('btn-pwchange');
+ok($s('dlg-pw').open === true, '顶部「修改密码」对话框打开（状态条区入口）');
+click('pw-submit'); // 全空 → 当前密码字段内联拒绝
+ok(pwBeginN === 0 && ($s('pw-cur-err').textContent || '').includes('当前密码'), '改密校验：当前密码为空即内联拒绝（未发请求）');
+$s('pw-cur').value = 'alice-pw';
+$s('pw-new').value = 'alice-pw-2'; $s('pw-new2').value = 'two-different';
+click('pw-submit');
+ok(pwBeginN === 0 && ($s('pw-new2-err').textContent || '').includes('不一致'), '改密校验：两次新密码不一致即内联拒绝');
+$s('pw-new').value = 'alice-pw'; $s('pw-new2').value = 'alice-pw'; // 两次一致但与当前密码相同
+click('pw-submit');
+ok(pwBeginN === 0 && ($s('pw-new-err').textContent || '').includes('相同'), '改密校验：新密码与当前相同即内联拒绝');
+$s('pw-cur').value = 'wrong-old'; $s('pw-new').value = 'alice-pw-2'; $s('pw-new2').value = 'alice-pw-2';
+const abP = authBeginN;
+wireTexts.length = 0;
+click('pw-submit');
+await sleep(80);
+ok(authBeginN === abP + 1 && pwBeginN === 0 && pwCommitN === 0, '当前密码校验：复用 login-begin + 本地 finish（无登录态副作用、不触达 pw-begin）');
+ok(($s('pw-cur-err').textContent || '').includes('当前密码不正确'), '当前密码错：字段内联错误（本地 finish 即败）');
+ok(!wireTexts.some((t) => t.includes('wrong-old') || t.includes('alice-pw-2')), 'OPAQUE 断言：校验上行仅 ke1 报文，新旧密码零明文');
+$s('pw-cur').value = 'alice-pw';
+pwChangeNew = 'alice-pw-2'; // toy 服务端：pw-commit 记录替换后新密码生效
+wireTexts.length = 0;
+click('pw-submit');
+ok(await waitFor(() => pwCommitN === 1 && hidden('app'), 5000), '改密成功：pw-commit 完成 → 退出当前会话（提示重新登录）');
+ok(pwBeginBodies[0] && pwBeginBodies[0].user === 'alice' && typeof pwBeginBodies[0].m1 === 'string' && pwBeginBodies[0].m1.length > 16,
+  'pw-begin 提交体 {user, m1}（报文序列①，b64 注册首条）');
+ok(/^SR-SIG1 /.test(pwBeginAuths[0] || ''), 'pw-begin 为 SR-SIG1 常规签名 POST（与 login-begin 未签名相对）');
+ok(pwCommitBodies[0] && pwCommitBodies[0].user === 'alice' && typeof pwCommitBodies[0].record === 'string' && pwCommitBodies[0].record.length > 16,
+  'pw-commit 提交体 {user, record}（报文序列③：原子替换记录）');
+ok(!wireTexts.some((t) => t.includes('alice-pw-2')), 'OPAQUE 断言：改密全程上行（m1/record/签名体）无新密码明文');
+ok($s('dlg-pw').open === false, '改密成功：对话框关闭');
+ok(($s('msg').textContent || '').includes('密码修改成功') && ($s('msg').textContent || '').includes('重新登录'), '成功提示：请使用新密码重新登录');
+ok(($s('lg-fb').textContent || '').includes('新密码'), '登录卡指引：输入新密码重新登录（本机钥匙仍有效说明保留）');
+ok(($s('pw-cur').value || '') === '' && ($s('pw-new').value || '') === '' && ($s('pw-new2').value || '') === '',
+  '改密完成：三个密码框已清空（不留在 DOM）');
+// 旧密码失效 / 新密码可登录（toy 服务端记录已替换）
+const kbP = keyBindBodies.length, afP = authFinishN;
+$s('lg-user').value = 'alice'; $s('lg-pass').value = 'alice-pw';
+fire($s('lg-form'), 'submit', { preventDefault() {} });
+await sleep(80);
+ok(authFinishN === afP && ($s('lg-pass-err').textContent || '').includes('密码错误') && !hidden('login'),
+  '旧密码已失效：登录本地 finish 即失败（两态文案，无第三请求）');
+$s('lg-pass').value = 'alice-pw-2';
+fire($s('lg-form'), 'submit', { preventDefault() {} });
+ok(await waitFor(() => keyBindBodies.length === kbP + 1 && hidden('login'), 5000), '新密码登录成功（pass 记录已替换，钥匙重绑幂等）');
+pwChangeNew = null;
+PWDB.alice.pass = 'alice-pw'; // 还原 toy 口令本（后续场景 3 仍按旧口令编排）
 
 // —— 退出登录（plan-16 §3：不删 seed）→「免密码进入」重进 ——
 click('btn-logout');
@@ -1280,6 +1436,20 @@ ok(html.includes('登录与账号') && html.includes('两把独立发放的密�
 ok(html.includes('专家路径：公钥与机器用户（CLI / CI）') && html.includes('showroom keygen') && html.includes('--pubkey')
   && html.includes('showroom login'),
   'plan-16 帮助页：保留 CLI/公钥专家节（keygen/user-add --pubkey/login）');
+// —— plan-16 收口：发卡初始密码 / 补发 / 改密入口 ——
+for (const ep of ['/_api/auth/pw-begin', '/_api/auth/pw-commit', '/_api/admin/passwd-set']) ok(html.includes(ep), `plan-16 §1.5/§2.2：${ep} 已接线`);
+ok(html.includes('id="btn-pwchange"') && html.includes('id="dlg-pw"') && html.includes('修改密码'), '改密入口：顶部状态条按钮 + 对话框容器');
+ok(html.includes('autocomplete="current-password"') && html.includes('autocomplete="new-password"'),
+  '规范：改密密码框 autocomplete（current-password / new-password）');
+ok((html.match(/type="password"/g) || []).length >= 4, '规范：密码输入均 type=password（登录 1 + 改密 3）');
+for (const s of ['自动生成强密码', '登录初始密码', '未设密码', '已设密码', '补发密码', '仅显示一次', '重新登录', '专家路径：直接登记公钥（CLI 用户）']) {
+  ok(html.includes(s), `plan-16 收口文案全中文：${s}`);
+}
+ok(html.includes('id="ad-na-gen"') && html.includes('id="ad-na-gen-pw"') && html.includes('id="ad-na-login-pw"') && html.includes('id="ad-ps-pw"'),
+  '发卡/补发一次性密码展示容器齐备（生成区 + 结果两行 + 补发对话框）');
+ok(html.includes('<details id="ad-na-expert"') && html.includes('登记公钥发放'), '发卡专家路径：公钥直登记收进 <details> 折叠（旧表单保底）');
+for (const id of ['pw-cur', 'pw-new', 'pw-new2']) ok(html.includes(`for="${id}"`), `规范：改密控件 label for="${id}"`);
+ok(!html.includes('op=change'), '改密路径与服务端对齐（pw-begin 无 op 查询参数——按 serve.rs/SPEC §16 实形状）');
 ok(!html.includes('内存上限'), '§10.2：「内存上限」零残留');
 ok((html.match(/内存需求/g) || []).length >= 3, '§10.2：表单/帮助/错误文案均用「内存需求」');
 ok(!/槽位|slot/i.test(html), '§11：全 HTML「槽位/slot」零残留');

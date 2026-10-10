@@ -187,6 +187,7 @@
       <span class="row" style="gap:.8rem">
         <span class="note">账号 <span class="mono" id="hd-user"></span></span>
         <span class="note">服务器 <span class="mono" id="hd-srv"></span></span>
+        <button id="btn-pwchange" title="当前密码校验后替换为新密码（OPAQUE，密码不明文上线）">修改密码</button>
         <button id="btn-logout">退出登录</button>
       </span>
     </div>
@@ -449,7 +450,8 @@
     <ul class="note" style="margin:.2rem 0 0;padding-left:1.2rem">
       <li>控制台用「账号 + 密码」登录：密码只在登录时使用一次，登录后本设备自动保管专用钥匙，此后全部操作自动签名，无需再输密码。</li>
       <li>新设备 / 换浏览器：直接输入账号密码登录即可，平台自动为本设备绑定新钥匙（旧设备钥匙按平台策略自动回收，回收后该设备重新密码登录）。</li>
-      <li>忘记密码：请联系管理员重置（控制台无法自助找回；重置不影响各设备已绑定的钥匙）。</li>
+      <li>忘记密码：请联系管理员重置（控制台无法自助找回；重置不影响各设备已绑定的钥匙，管理员在「管理」页点「补发密码」即生成新的登录初始密码）。</li>
+      <li>修改密码：登录后点顶部「修改密码」自助更换——需先输入当前密码校验，新密码经 OPAQUE 盲化上线、全程不明文；改完请用新密码重新登录（本机钥匙不受影响）。</li>
       <li>登录密码与 registry 密码是两把独立发放的密码：前者登录控制台 / CLI，后者在 docker push 推送镜像时使用。</li>
       <li>本设备钥匙由浏览器自动生成并保存在 localStorage（属试验性存储）：清除浏览器数据即失效，届时重新密码登录即可；「忘记此设备」可主动清除（可选同时远程注销本机钥匙）。</li>
     </ul>
@@ -482,7 +484,10 @@
       <tbody>
         <tr><td>账号密码登录（自动绑定本机）</td><td class="mono">showroom login &lt;账号&gt;</td></tr>
         <tr><td>退出登录 / 忘记此设备</td><td class="mono">showroom logout [--purge]</td></tr>
+        <tr><td>修改密码（登录态自助）</td><td>控制台顶部「修改密码」入口（CLI 暂无；管理员可代为重置，见下）</td></tr>
         <tr><td>生成密钥（专家：CI / 机器用户）</td><td class="mono">showroom keygen</td></tr>
+        <tr><td>发放新账号（初始密码 / 管理员）</td><td class="mono">showroomctl user-add &lt;账号&gt; --gen-password [--admin]</td></tr>
+        <tr><td>补发 / 重置密码（管理员）</td><td class="mono">showroomctl user-passwd &lt;账号&gt; --gen-password</td></tr>
         <tr><td>登记公钥（管理员 · 专家路径）</td><td class="mono">showroomctl user-add &lt;账号&gt; --pubkey &lt;公钥串&gt;</td></tr>
         <tr><td>展项列表</td><td class="mono">showroom ps</td></tr>
         <tr><td>一键部署 / 仅上传 / 部署（选镜像）</td><td class="mono">showroom deploy / push / publish</td></tr>
@@ -517,6 +522,27 @@
       <tbody></tbody>
     </table></div>
   </dialog>
+
+  <!-- 修改密码（plan-16 §2.2 pw 三件序列）：当前密码本地校验（复用 OPAQUE login 序列，不产生登录态）
+       → pw-begin {user,m1} → 本地 reg finish → pw-commit {user,record}（后两者均 SR-SIG1 常规签名） -->
+  <dialog id="dlg-pw" aria-labelledby="dlg-pw-title">
+    <h2 style="display:inline" id="dlg-pw-title">修改密码</h2>
+    <button type="button" id="pw-close" style="float:right">关闭</button>
+    <label class="field" for="pw-cur"><span>当前密码（先校验本人旧密码，再替换为新密码）</span>
+      <input type="password" id="pw-cur" size="18" autocomplete="current-password" aria-describedby="pw-cur-err"></label>
+    <p class="ferr" id="pw-cur-err" aria-live="polite"></p>
+    <label class="field" style="margin-top:.4rem" for="pw-new"><span>新密码</span>
+      <input type="password" id="pw-new" size="18" autocomplete="new-password" aria-describedby="pw-new-err"></label>
+    <p class="ferr" id="pw-new-err" aria-live="polite"></p>
+    <label class="field" style="margin-top:.4rem" for="pw-new2"><span>确认新密码（再输入一遍）</span>
+      <input type="password" id="pw-new2" size="18" autocomplete="new-password" aria-describedby="pw-new2-err"></label>
+    <p class="ferr" id="pw-new2-err" aria-live="polite"></p>
+    <div class="row" style="margin-top:.6rem">
+      <button type="button" id="pw-submit">确认修改</button>
+      <span class="fb" id="pw-fb" aria-live="polite" style="margin:0"></span>
+    </div>
+    <p class="note">修改成功后请用新密码重新登录（本机钥匙不受影响，仍可点【免密码进入】继续使用）。新旧密码均只在本机参与 OPAQUE 盲化，全程不明文上线。</p>
+  </dialog>
 </template>
 
 <!-- ———— 管理员标签（SPEC §12.2）：仅 whoami admin=true 时克隆进文档流；非管理员的 DOM 不存在 ———— -->
@@ -535,7 +561,7 @@
           <tbody><tr><td colspan="4" class="note">未加载</td></tr></tbody>
         </table>
       </div>
-      <p class="note">管理员标记挂在钥匙（kid）上：设为管理员后该钥匙可访问本页全部管理功能；删除钥匙即刻失效；吊销整个账号会一并删除其名下全部钥匙与 registry 访问凭据。</p>
+      <p class="note">管理员标记挂在钥匙（kid）上：设为管理员后该钥匙可访问本页全部管理功能；删除钥匙即刻失效；吊销整个账号会一并删除其名下全部钥匙与 registry 访问凭据。「未设密码」表示该账号尚无登录密码（密码登录不可用，钥匙登录不受影响）：点「补发密码」生成新的登录初始密码（仅显示一次，原密码即刻失效）；补发/改密均不动已绑定的钥匙。</p>
 
       <div class="sep"></div>
       <h2>平台状态</h2>
@@ -607,27 +633,63 @@
       <div id="hs-report" class="hidden" style="margin-top:.5rem" aria-live="polite"></div>
     </section>
 
-    <!-- 发放新账号（远程发卡）：账号名 + 公钥粘贴 + 管理员勾选 → registry 密码仅显示一次 -->
+    <!-- 发放新账号（plan-16 §1.4/§1.5 收口）：主路径=账号 + 自动生成登录初始密码（crypto 随机 16 位）
+         → user-add {user,password}；结果两行一次性密码（登录初始 + registry）。公钥直登记收进底部
+         折叠「专家路径」（CLI/CI 用户：user-add {user,pubkey}，旧公钥发卡表单保底） -->
     <dialog id="dlg-user-add" aria-labelledby="dlg-user-add-title">
       <h2 style="display:inline" id="dlg-user-add-title">发放新账号</h2>
       <button type="button" id="ad-na-close" style="float:right">关闭</button>
       <label class="field" for="ad-na-user"><span>账号名（<span class="mono">^[a-z0-9][a-z0-9-]{0,30}$</span>）</span>
         <input type="text" id="ad-na-user" size="14" pattern="[a-z0-9][a-z0-9-]{0,30}" aria-describedby="ad-na-user-err"></label>
       <p class="ferr" id="ad-na-user-err" aria-live="polite"></p>
-      <label class="field" style="margin-top:.5rem" for="ad-na-pub"><span>公钥串（粘贴 <span class="mono">showroom keygen</span> 产物，<span class="mono">ed25519:…</span>）</span>
-        <textarea id="ad-na-pub" class="mono" spellcheck="false" placeholder="ed25519:…" aria-describedby="ad-na-pub-err"></textarea></label>
-      <p class="ferr" id="ad-na-pub-err" aria-live="polite"></p>
-      <label class="row" for="ad-na-admin" style="gap:.35rem;margin-top:.5rem"><input type="checkbox" id="ad-na-admin"><span>同时授予管理员（该钥匙可管理账号、钥匙与平台状态）</span></label>
-      <div class="row" style="margin-top:.6rem">
-        <button id="ad-na-submit">发放</button>
+      <div class="row" style="margin-top:.5rem">
+        <button type="button" id="ad-na-gen">自动生成强密码</button>
         <span class="fb" id="ad-na-fb" aria-live="polite" style="margin:0"></span>
       </div>
-      <div id="ad-na-result" class="hidden" style="margin-top:.6rem">
-        <p class="note" style="color:#e8c37f">发放成功：下方是该账号的 registry 密码——<b>仅显示一次</b>，请立即交予发布者妥善保存，关闭后无法再查。</p>
+      <p class="ferr" id="ad-na-gen-err" aria-live="polite"></p>
+      <div id="ad-na-gen-box" class="hidden" style="margin-top:.3rem">
+        <p class="note" style="color:#e8c37f;margin:.2rem 0 0">已生成登录初始密码——点「发放」后将与 registry 密码一起再次展示（均仅显示一次），请即时交予发布者。</p>
         <div class="row" style="align-items:center;gap:.6rem;flex-wrap:nowrap">
-          <code id="ad-na-pw" class="pub mono" style="font-size:16px"></code>
+          <code id="ad-na-gen-pw" class="pub mono" style="font-size:16px;letter-spacing:.4px;user-select:all"></code>
+          <button type="button" id="ad-na-copy-gen">复制密码</button>
+        </div>
+      </div>
+      <label class="row" for="ad-na-admin" style="gap:.35rem;margin-top:.6rem"><input type="checkbox" id="ad-na-admin"><span>同时授予管理员（可管理账号、钥匙与平台状态）</span></label>
+      <div class="row" style="margin-top:.6rem">
+        <button type="button" id="ad-na-submit">发放</button>
+      </div>
+      <div id="ad-na-result" class="hidden" style="margin-top:.6rem" aria-live="polite">
+        <p class="note" style="color:#e8c37f">发放成功：以下密码均<b>仅显示一次</b>，请立即交予发布者妥善保存，关闭后无法再查。</p>
+        <div class="row" id="ad-na-login-row" style="align-items:center;gap:.6rem;flex-wrap:nowrap">
+          <span class="note" style="white-space:nowrap">登录初始密码（登录控制台 / CLI）</span>
+          <code id="ad-na-login-pw" class="pub mono" style="font-size:16px;letter-spacing:.4px;user-select:all"></code>
+          <button type="button" id="ad-na-copy-login">复制</button>
+        </div>
+        <div class="row" style="align-items:center;gap:.6rem;flex-wrap:nowrap;margin-top:.3rem">
+          <span class="note" style="white-space:nowrap">registry 密码（docker push 用）</span>
+          <code id="ad-na-pw" class="pub mono" style="font-size:16px;letter-spacing:.4px;user-select:all"></code>
           <button type="button" id="ad-na-copy">复制密码</button>
         </div>
+        <p class="note" id="ad-na-kid-note" style="margin:.3rem 0 0"></p>
+      </div>
+      <details id="ad-na-expert" style="margin-top:.9rem;border-top:1px dashed #2a2f39;padding-top:.5rem">
+        <summary>专家路径：直接登记公钥（CLI 用户）</summary>
+        <p class="note" style="margin:.4rem 0 0">跳过登录密码：直接登记 <span class="mono">showroom keygen</span> 公钥串（机器对机器钥匙不受密码绑定钥匙的自动回收，生命周期人工管理）；登记后仍可在账号表用「补发密码」增设登录密码。</p>
+        <label class="field" style="margin-top:.4rem" for="ad-na-pub"><span>公钥串（粘贴 <span class="mono">showroom keygen</span> 产物，<span class="mono">ed25519:…</span>）</span>
+          <textarea id="ad-na-pub" class="mono" spellcheck="false" placeholder="ed25519:…" aria-describedby="ad-na-pub-err"></textarea></label>
+        <p class="ferr" id="ad-na-pub-err" aria-live="polite"></p>
+        <div class="row" style="margin-top:.4rem"><button type="button" id="ad-na-pubsubmit">登记公钥发放</button></div>
+      </details>
+    </dialog>
+
+    <!-- 补发登录密码（plan-16 §1.5 passwd-set）：confirm → 生成新密码一次性展示（旧密码即刻失效，不动既有钥匙） -->
+    <dialog id="dlg-passwd-set" aria-labelledby="dlg-passwd-set-title">
+      <h2 style="display:inline" id="dlg-passwd-set-title">补发登录密码</h2>
+      <button type="button" id="ad-ps-close" style="float:right">关闭</button>
+      <p class="note" style="color:#e8c37f;margin:.6rem 0 0">已为账号 <span class="mono" id="ad-ps-user"></span> 生成新的登录初始密码——<b>仅显示一次</b>，请立即交予发布者妥善保存；原密码即刻失效，各设备已绑定的钥匙不受影响。</p>
+      <div class="row" style="align-items:center;gap:.6rem;flex-wrap:nowrap;margin-top:.5rem">
+        <code id="ad-ps-pw" class="pub mono" style="font-size:16px;letter-spacing:.4px;user-select:all"></code>
+        <button type="button" id="ad-ps-copy">复制密码</button>
       </div>
     </dialog>
 
@@ -850,6 +912,44 @@ function opaqueFinish(sid, pass, ke2) {
   return MOCK_B64({ v: 1, m: 'ke3', mac: j.mac });
 }
 function opaqueEnd(sid) { MOCK_SESS.delete(sid); } // 真垫片会话在 finish 时一次性自弃；此处仅清 mock 映射
+
+// —— OPAQUE 注册适配（改密码，plan-16 §2.2 pw 三件序列：m1 → m2 → record）——
+// 真垫片导出 sr_reg_start/sr_reg_msg/sr_reg_finish（b64 串进出、finish 一次性消费会话、
+// 容量不足 -(所需) ≤ -40）；OPAQUE_SHIM 未就绪时同走「形状兼容 mock」（注册对 m2 不做
+// 密码验证——错密码语义只属登录序列，此处任何合法形状 m2 都产出 record）。
+const REG_SHIM = typeof ex.sr_reg_start === 'function' && typeof ex.sr_reg_msg === 'function' && typeof ex.sr_reg_finish === 'function';
+/** ① reg_start：新密码 + user → m1（真垫片=盲化 OPRF 注册首条；mock=形状兼容假报文）。返回 {sid, m1}。 */
+function opaqueRegStart(user, pass) {
+  if (REG_SHIM) {
+    const [pp, pl] = put(enc.encode(pass)), [up, ul] = put(enc.encode(user));
+    let sid;
+    try { sid = ex.sr_reg_start(pp, pl, up, ul); }
+    finally { unput(pp, pl); unput(up, ul); }
+    if (sid <= 0) throw { error: 'E_NET', msg: `reg_start 失败（${sid}；-6=熵未注入）` };
+    const m1 = shimCStr((p, c) => ex.sr_reg_msg(sid, p, c), 2048); // 幂等可重复取
+    return { sid, m1 };
+  }
+  const sid = ++mockSidSeq;
+  MOCK_SESS.set(sid, { user, r: MOCK_FP(`showroom-opaque-mock|${user}|${pass}`) });
+  return { sid, m1: MOCK_B64({ v: 1, m: 'm1', u: user, n: nonceHex() }) };
+}
+/** ② reg_finish：喂 m2 在本地完成注册 → record（b64，pw-commit 上行）。成功后会话一次性自弃。 */
+function opaqueRegFinish(sid, pass, m2) {
+  if (REG_SHIM) {
+    const [pp, pl] = put(enc.encode(pass)), [mp, ml] = put(enc.encode(m2));
+    const cap = 4096, out = alloc(cap); // finish 一次性消费会话：首给足容量，不做探测重试
+    const r = ex.sr_reg_finish(sid, pp, pl, mp, ml, out, cap);
+    unput(pp, pl); unput(mp, ml);
+    const record = r > 0 ? readCStr(out, r) : null;
+    unput(out, cap);
+    if (!record) throw { error: 'E_NET', msg: `reg_finish 失败（${r}）` };
+    return record;
+  }
+  const st = MOCK_SESS.get(sid), j = MOCK_PARSE(m2);
+  if (!st || !j || j.m !== 'm2') throw { error: 'E_NET', msg: '' };
+  return MOCK_B64({ v: 1, m: 'record', u: st.user, mac: MOCK_FP(`rec|${j.n}|${st.r}`) });
+}
+function opaqueRegEnd(sid) { MOCK_SESS.delete(sid); } // 真垫片会话在 finish 时一次性自弃；此处仅清 mock 映射
 
 // —— 一步登录（plan-16 §2.2/§3）：login-begin → 本地 finish → login-finish → key-bind → 进入 ——
 async function postAuthJson(path, body) { // /_api/auth/*：唯一应答未签名请求的端点族（§2.3）
@@ -1138,11 +1238,13 @@ function enterApp() {
 function logout() {
   state.loggedIn = false;
   clearInterval(stTimer); stTimer = null; $('st-auto').checked = false;
-  if (adminBuilt) { // 管理页定时器与发卡对话框随登录态收尾
+  if (adminBuilt) { // 管理页定时器与发卡/补发/扩容对话框随登录态收尾
     clearInterval(adTimer); adTimer = null; $('ad-st-auto').checked = false;
     if ($('dlg-user-add').open) $('dlg-user-add').close();
+    if ($('dlg-passwd-set')?.open) $('dlg-passwd-set').close(); // plan-16 §1.5 补发对话框同收尾
     if ($('dlg-redis-x')?.open) $('dlg-redis-x').close(); // §15 扩容对话框同收尾
   }
+  if ($('dlg-pw')?.open) $('dlg-pw').close(); // 改密对话框随登录态收尾
   stopLogsStream('已退出登录');      // 日志实时流随登录态终止
   logsLive.project = null; logsLive.lines = [];
   $('st-logs-target').textContent = '（未选择）'; logsRender();
@@ -1156,6 +1258,56 @@ function logout() {
   refreshLoginChrome();
   $('lg-fb').textContent = '已退出登录（本机钥匙仍保留）。可点【免密码进入】再次进入，或输入账号密码切换账号。';
 }
+
+// —— 修改密码（plan-16 §2.2 收口）：当前密码本地校验（复用 OPAQUE 登录序列 login-begin + 本地
+//    finish，不调 login-finish 即不产生登录态）→ pw-begin {user,m1}（SR-SIG1）→ 本地 reg finish →
+//    pw-commit {user,record}（SR-SIG1，服务端原子替换 pass.opaque，不动既有钥匙）→ 提示重新登录 ——
+function openPwDlg() {
+  $('pw-cur').value = ''; $('pw-new').value = ''; $('pw-new2').value = '';
+  clearErrs('pw-cur', 'pw-new', 'pw-new2');
+  $('pw-fb').textContent = '';
+  $('dlg-pw').showModal();
+  $('pw-cur').focus();
+}
+async function onPwChange() {
+  clearErrs('pw-cur', 'pw-new', 'pw-new2');
+  const cur = $('pw-cur').value, nw = $('pw-new').value, nw2 = $('pw-new2').value;
+  if (!cur) return fieldErr('pw-cur', '请输入当前密码；忘记密码请联系管理员重置');
+  if (!nw) return fieldErr('pw-new', '请输入新密码');
+  if (nw !== nw2) return fieldErr('pw-new2', '两次输入的新密码不一致，请重新输入');
+  if (nw === cur) return fieldErr('pw-new', '新密码与当前密码相同，请换一个');
+  busy($('pw-submit'), true, '修改中…');
+  $('pw-fb').textContent = '正在校验当前密码…';
+  try {
+    // ① 当前密码校验：完整 login-begin + 本地 finish（错密码本地即败），不产生登录态
+    const st = opaqueStart(state.user, cur);
+    let ke2;
+    try { ke2 = (await postAuthJson('/_api/auth/login-begin', { user: state.user, ke1: st.ke1 })).ke2; }
+    catch (e) { opaqueEnd(st.sid); throw e; }
+    try { opaqueFinish(st.sid, cur, ke2); }
+    catch (e) { if (e && e.error === 'E_PW_LOCAL') throw { error: 'E_PW_CUR', msg: '' }; throw e; }
+    finally { opaqueEnd(st.sid); }
+    // ② pw 三件序列（服务端 §16：签名即会话证明，旧密码不再上线；60s 在途注册态一次性消费）
+    $('pw-fb').textContent = '当前密码已校验，正在替换…';
+    const rs = opaqueRegStart(state.user, nw); // ②-1 m1
+    let m2;
+    try { m2 = (await api('POST', '/_api/auth/pw-begin', { user: state.user, m1: rs.m1 })).m2; }
+    catch (e) { opaqueRegEnd(rs.sid); throw e; }
+    let record;
+    try { record = opaqueRegFinish(rs.sid, nw, m2); } // ②-2 本地 reg finish → record
+    finally { opaqueRegEnd(rs.sid); }
+    await api('POST', '/_api/auth/pw-commit', { user: state.user, record }); // ②-3 原子替换
+    $('pw-cur').value = ''; $('pw-new').value = ''; $('pw-new2').value = ''; // 用后即清，不留在 DOM
+    if ($('dlg-pw').open) $('dlg-pw').close();
+    showMsg('密码修改成功：请使用新密码重新登录。', 'ok');
+    logout(); // 收口：结束当前会话，引导新密码重登（本机钥匙仍有效，用户也可免密码进入）
+    $('lg-fb').textContent = '密码已修改：请输入新密码重新登录（本机钥匙仍有效，也可点【免密码进入】继续使用）。';
+  } catch (e) {
+    $('pw-fb').textContent = '';
+    if (e && e.error === 'E_PW_CUR') fieldErr('pw-cur', '当前密码不正确（或该账号密码已被重置），请重输');
+    else apiFail('修改密码', e);
+  } finally { busy($('pw-submit'), false); }
+}
 // —— §11 随机项目名：crypto.getRandomValues 拒绝采样生成 8 位 [a-zA-Z0-9]（降低字典遍历发现门槛） ——
 function randomProject() {
   const A = 'abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789';
@@ -1164,6 +1316,18 @@ function randomProject() {
     const b = new Uint8Array(32);
     crypto.getRandomValues(b);
     for (const v of b) { if (v < 248 && s.length < 8) s += A[v % 62]; } // 248=62×4：截断去模偏
+  }
+  return s;
+}
+// —— plan-16 §1.4 发卡/补发用强密码：crypto.getRandomValues 拒绝采样生成 16 位 [a-zA-Z0-9]
+//    （62^16≈2^95 熵；纯字母数字便于人工抄录转交，与 CLI 侧 24 hex 同一强度档位） ——
+function randomPassword() {
+  const A = 'abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789';
+  let s = '';
+  while (s.length < 16) {
+    const b = new Uint8Array(32);
+    crypto.getRandomValues(b);
+    for (const v of b) { if (v < 248 && s.length < 16) s += A[v % 62]; } // 248=62×4：截断去模偏
   }
   return s;
 }
@@ -1178,6 +1342,11 @@ function buildApp() {
   $('hd-pempub').value = localStorage.getItem('sr.pempub') || '';
   $('hd-pempub').addEventListener('input', () => localStorage.setItem('sr.pempub', $('hd-pempub').value));
   $('btn-logout').addEventListener('click', logout);
+  // 修改密码（plan-16 §2.2）：顶部入口 + 对话框（密码框 autocomplete、字段内联错误、busy）
+  $('btn-pwchange').addEventListener('click', openPwDlg);
+  $('pw-close').addEventListener('click', () => $('dlg-pw').close());
+  $('pw-submit').addEventListener('click', onPwChange);
+  for (const id of ['pw-cur', 'pw-new', 'pw-new2']) $(id).addEventListener('input', () => fieldErr(id, ''));
   // 帮助页：环境变量清单表
   $('help-env-tbl').querySelector('tbody').innerHTML = Object.entries(ENV_DESC)
     .map(([k, d]) => `<tr><td class="mono">${esc(k)}</td><td class="wrap">${esc(d)}</td></tr>`).join('');
@@ -1229,6 +1398,7 @@ const switchTab = activateTab;
 
 // ================ §12.2 管理员标签（whoami admin=true 才渲染；否则 DOM 不存在） ================
 let adminBuilt = false, adTimer = null;
+let naGenPw = ''; // 发卡对话框已生成未发放的登录初始密码（发放成功即清空，防旧密码误发二次）
 async function syncAdmin() {
   let isAdmin = false;
   try {
@@ -1268,20 +1438,37 @@ function wireAdminTab() {
     clearInterval(adTimer); adTimer = null;
     if ($('ad-st-auto').checked) { refreshAdminStatus(); adTimer = setInterval(refreshAdminStatus, 30000); }
   });
-  $('ad-user-add').addEventListener('click', () => { // 远程发卡对话框（打开即聚焦首字段；Esc/关闭焦点自动归还）
+  $('ad-user-add').addEventListener('click', () => { // 发卡对话框（打开即聚焦首字段；Esc/关闭焦点自动归还）
     $('ad-na-user').value = ''; $('ad-na-pub').value = '';
     $('ad-na-admin').checked = false;
+    naGenPw = ''; // 上轮生成未发放的密码不跨轮残留
+    $('ad-na-gen-box').classList.add('hidden');
+    $('ad-na-gen-pw').textContent = '';
     $('ad-na-result').classList.add('hidden');
-    $('ad-na-pw').textContent = '';
-    clearErrs('ad-na-user', 'ad-na-pub');
+    $('ad-na-login-pw').textContent = ''; $('ad-na-pw').textContent = '';
+    $('ad-na-kid-note').textContent = '';
+    $('ad-na-expert').open = false; // 专家折叠每轮收起（主路径默认）
+    clearErrs('ad-na-user', 'ad-na-gen', 'ad-na-pub');
     $('dlg-user-add').showModal();
     $('ad-na-user').focus();
   });
   $('ad-na-close').addEventListener('click', () => $('dlg-user-add').close());
+  $('ad-na-gen').addEventListener('click', () => { // 自动生成强密码：展示一次（发放成功即被结果区接管）
+    naGenPw = randomPassword();
+    $('ad-na-gen-pw').textContent = naGenPw;
+    $('ad-na-gen-box').classList.remove('hidden');
+    fieldErr('ad-na-gen', '');
+  });
+  $('ad-na-copy-gen').addEventListener('click', () => copyText($('ad-na-gen-pw').textContent, '登录初始密码'));
   $('ad-na-submit').addEventListener('click', onUserAdd);
+  $('ad-na-pubsubmit').addEventListener('click', onUserAddPub);
   $('ad-na-user').addEventListener('input', () => fieldErr('ad-na-user', ''));
   $('ad-na-pub').addEventListener('input', () => fieldErr('ad-na-pub', ''));
+  $('ad-na-copy-login').addEventListener('click', () => copyText($('ad-na-login-pw').textContent, '登录初始密码'));
   $('ad-na-copy').addEventListener('click', () => copyText($('ad-na-pw').textContent, 'registry 密码'));
+  // 补发密码对话框（plan-16 §1.5）：只承载一次性密码展示，动作在账号表行内
+  $('ad-ps-close').addEventListener('click', () => $('dlg-passwd-set').close());
+  $('ad-ps-copy').addEventListener('click', () => copyText($('ad-ps-pw').textContent, '登录初始密码'));
   $('ad-users-tbl').addEventListener('click', onAdminKeyAction);
   // §15 主机编排：期望状态刷新 / 两段式（预演→确认）/ Redis 扩容对话框
   $('hs-refresh').addEventListener('click', () => refreshHost());
@@ -1301,9 +1488,14 @@ async function loadAdminUsers() { // 账号与钥匙表（§12.2：账号/钥匙
     const users = j.users || [];
     tb.innerHTML = users.length ? users.map((o) => {
       const keys = o.keys || [];
+      // plan-16 §1.5 has_password 徽标：未设密码 → 灰徽标 + 行内「补发密码」（passwd-set）；已设 → 静态徽标
+      const pwCell = o.has_password
+        ? '<span class="badge">已设密码</span>'
+        : `<span class="badge">未设密码</span> <button class="act" data-act="pwset" data-user="${esc(o.user)}">补发密码</button>`;
       return `<tr class="ad-user-row"><td colspan="4">
           <span class="mono">${esc(o.user)}</span>
           <span class="note">· 项目数 ${esc(String(o.projects ?? '—'))} · 钥匙 ${keys.length} 把</span>
+          ${pwCell}
           <button class="act danger" data-act="revoke" data-user="${esc(o.user)}" style="margin-left:.4rem">吊销整个账号</button>
         </td></tr>` + (keys.map((k) => `<tr>
           <td class="mono wrap">${esc(k.kid)}</td>
@@ -1333,6 +1525,7 @@ async function onAdminKeyAction(ev) {
   const btn = ev.target.closest('button[data-act]');
   if (!btn || btn.disabled) return;
   const { act, user, kid } = btn.dataset;
+  if (act === 'pwset') return onAdminPasswdSet(user); // plan-16 §1.5 补发：单独流（confirm + 一次性密码展示）
   const def = ADMIN_ACT[act];
   if (!def) return;
   if (!confirm(def.ask(user, kid))) return;
@@ -1344,22 +1537,55 @@ async function onAdminKeyAction(ev) {
   } catch (e) { apiFail(def.cn, e); }
   btn.disabled = false;
 }
-async function onUserAdd() { // 远程发卡：账号 + 公钥 + 可选管理员 → registry 密码（仅显示一次）
+/** 补发/重置登录密码（plan-16 §1.5）：confirm → passwd-set {user,password}（客户端 crypto 生成）→
+ *  新密码一次性展示（对话框）；旧密码即刻失效，不动既有钥匙 → 表刷新（徽标翻转）。 */
+async function onAdminPasswdSet(user) {
+  if (!confirm(`确认为账号 ${user} 补发登录密码？将生成新的登录初始密码（仅显示一次），原密码即刻失效；各设备已绑定的钥匙不受影响。`)) return;
+  const pw = randomPassword();
+  try {
+    const j = await api('POST', '/_api/admin/passwd-set', { user, password: pw });
+    $('ad-ps-user').textContent = user;
+    $('ad-ps-pw').textContent = j.password || pw; // 服务端一次性回显；异常缺失回落本地生成值
+    $('dlg-passwd-set').showModal();
+    $('ad-fb').textContent = `已补发登录密码（${user}，新密码仅显示一次）`;
+    loadAdminUsers();
+  } catch (e) { apiFail(`补发密码（${user}）`, e); }
+}
+/** 发卡提交共用：user-add → 两行一次性密码结果（登录初始 / registry）+ kid 回显 + 表刷新。 */
+async function issueUser(body, withLoginPw) {
+  const j = await api('POST', '/_api/admin/user-add', body);
+  $('ad-na-result').classList.remove('hidden');
+  $('ad-na-login-row').classList.toggle('hidden', !withLoginPw || !j.login_password);
+  $('ad-na-login-pw').textContent = j.login_password || '';
+  $('ad-na-pw').textContent = j.registry_password || j.password || j.cred || '（响应未携带密码，请联系主机管理员）';
+  $('ad-na-kid-note').textContent = j.kid ? `已登记公钥钥匙 kid：${j.kid}。` : '';
+  $('ad-na-fb').textContent = `已发放账号 ${body.user}${body.admin ? '（含管理员）' : ''}`;
+  loadAdminUsers();
+}
+async function onUserAdd() { // 主路径（plan-16 §1.5）：账号 + 自动生成的初始密码 → user-add {user,password}
+  const user = $('ad-na-user').value.trim();
+  if (!NAME_RE.test(user)) return fieldErr('ad-na-user', `账号名「${user}」不合法（须匹配 ^[a-z0-9][a-z0-9-]{0,30}$），请修改后重试`);
+  if (!naGenPw) return fieldErr('ad-na-gen', '请先点「自动生成强密码」生成登录初始密码（或展开底部「专家路径」直接登记公钥）');
+  const body = { user, password: naGenPw };
+  if ($('ad-na-admin').checked) body.admin = true; // 「同时授予管理员」勾选才携带
+  busy($('ad-na-submit'), true, '发放中…');
+  try {
+    await issueUser(body, true);
+    naGenPw = ''; // 发放即失效：结果区已接管展示，防止旧密码误发二次
+    $('ad-na-gen-box').classList.add('hidden');
+  } catch (e) { apiFail('发放新账号', e); }
+  busy($('ad-na-submit'), false);
+}
+async function onUserAddPub() { // 专家路径（旧公钥发卡表单保底）：user-add {user,pubkey}
   const user = $('ad-na-user').value.trim();
   if (!NAME_RE.test(user)) return fieldErr('ad-na-user', `账号名「${user}」不合法（须匹配 ^[a-z0-9][a-z0-9-]{0,30}$），请修改后重试`);
   const pubkey = $('ad-na-pub').value.trim();
   if (!/^ed25519:[A-Za-z0-9+/]{43}$/.test(pubkey)) return fieldErr('ad-na-pub', '公钥串格式应为 ed25519:<43 位 Base64>（showroom keygen 产物），请粘贴完整公钥串');
   const body = { user, pubkey };
-  if ($('ad-na-admin').checked) body.admin = true; // 「同时授予管理员」勾选才携带
-  busy($('ad-na-submit'), true, '发放中…');
-  try {
-    const j = await api('POST', '/_api/admin/user-add', body);
-    $('ad-na-result').classList.remove('hidden');
-    $('ad-na-pw').textContent = j.registry_password || j.password || j.cred || '（响应未携带密码，请联系主机管理员）';
-    $('ad-na-fb').textContent = `已发放账号 ${user}${body.admin ? '（含管理员）' : ''}`;
-    loadAdminUsers();
-  } catch (e) { apiFail('发放新账号', e); }
-  busy($('ad-na-submit'), false);
+  if ($('ad-na-admin').checked) body.admin = true;
+  busy($('ad-na-pubsubmit'), true, '发放中…');
+  try { await issueUser(body, false); } catch (e) { apiFail('登记公钥发放', e); }
+  busy($('ad-na-pubsubmit'), false);
 }
 const SVC_CN = { active: '运行中', inactive: '未运行', failed: '失败', activating: '启动中', deactivating: '停止中' };
 const svcCn = (s) => SVC_CN[s] || s || '未知';
