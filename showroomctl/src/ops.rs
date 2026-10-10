@@ -110,6 +110,40 @@ pub fn env_of(root: &Path, p: &str, s: &str) -> R<BTreeMap<String, String>> {
     Ok(state::parse_kv(&text))
 }
 
+// —— Redis 浏览内核（SPEC §10.3，排障用；跨 owner 不隔离——SPEC 已注明）——
+
+/// GET /_api/redis-keys：q 过白名单转 pattern 后 --scan 增量收集前 limit 个（读满即杀，见 dockerops）。
+pub fn redis_keys(db: u8, q: &str, limit: usize) -> R<(Vec<String>, bool)> {
+    let pattern = state::redis_scan_pattern(q)
+        .ok_or_else(|| ApiError::new("E_NAME", format!("q '{q}' 含白名单 [a-zA-Z0-9:_*.-] 外字符")))?;
+    dockerops::redis_scan(db, &pattern, limit)
+}
+
+/// GET /_api/redis-get：TYPE → PTTL → 按类型取值，值统一转字符串并 4KB 截断。
+/// list/zset 取前 100 条；其他类型（stream 等）type 字段如实带回、值留空。
+pub fn redis_get(db: u8, key: &str) -> R<(String, i64, String)> {
+    // 取舍：redis key 理论可含任意字节，此处保守白名单——argv 传参本无注入面，
+    // 白名单外的 key（空格/引号/二进制等）请用 CLI 直查（错误信息如实提示）。
+    if !state::valid_redis_key(key) {
+        return Err(ApiError::new("E_NAME", format!("key '{key}' 含特殊字符，请用 CLI 查看")));
+    }
+    let t = dockerops::redis_cli(db, &["TYPE", key])?.trim().to_string();
+    let ttl_s = dockerops::redis_cli(db, &["PTTL", key])?;
+    let ttl_ms: i64 = ttl_s
+        .trim()
+        .parse()
+        .map_err(|e| ApiError::state(format!("PTTL 输出异常 ({ttl_s:?}): {e}")))?;
+    let raw = match t.as_str() {
+        "string" => dockerops::redis_cli(db, &["GET", key])?,
+        "list" => dockerops::redis_cli(db, &["LRANGE", key, "0", "99"])?,
+        "hash" => dockerops::redis_cli(db, &["HGETALL", key])?,
+        "set" => dockerops::redis_cli(db, &["SMEMBERS", key])?,
+        "zset" => dockerops::redis_cli(db, &["ZRANGE", key, "0", "99", "WITHSCORES"])?,
+        _ => String::new(), // none（键不存在）/ stream 等：type 已如实带回
+    };
+    Ok((t, ttl_ms, state::clip_value(&raw)))
+}
+
 /// reconcile：遍历 slot.conf，容器/路由缺失按 conf 重建（幂等）。
 pub fn reconcile(root: &Path) -> Vec<String> {
     let mut log = vec![];
@@ -394,4 +428,23 @@ pub fn init_keys(root: &Path) -> R<PathBuf> {
     showroom_common::PlatformKeys::generate()
         .save_pem(&dir)
         .map_err(|e| ApiError::state(format!("save platform rsa: {e}")))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // Redis 内核的白名单拒绝路径（校验先于 docker 调用，不碰容器）：
+    // q / key 出白名单 → E_NAME；合法入参不在此测（需 sr-redis，e2e 域）
+    #[test]
+    fn redis_kernels_reject_bad_input() {
+        for bad_q in ["a b", "a$b", "a;b"] {
+            let e = redis_keys(0, bad_q, 10).unwrap_err();
+            assert_eq!(e.code, "E_NAME", "{bad_q}: {}", e.msg);
+        }
+        for bad_k in ["", "a b", "k;SCAN", "中"] {
+            let e = redis_get(0, bad_k).unwrap_err();
+            assert_eq!(e.code, "E_NAME", "{bad_k:?}: {}", e.msg);
+        }
+    }
 }

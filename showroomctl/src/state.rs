@@ -287,6 +287,8 @@ pub struct Policy {
     pub max_mem: String,
     pub import_max_gb: u64,
     pub allow_lan_port: bool,
+    /// 内存准入预留（§10.2，MB）：MemAvailable 减去它之后须仍满足本次发布的需求。
+    pub reserve_mem_mb: u64,
 }
 
 impl Default for Policy {
@@ -297,6 +299,7 @@ impl Default for Policy {
             max_mem: "1g".into(),
             import_max_gb: 8,
             allow_lan_port: false,
+            reserve_mem_mb: 1536,
         }
     }
 }
@@ -311,6 +314,7 @@ impl Policy {
             max_mem: m.get("MAX_MEM").cloned().unwrap_or_else(|| "1g".into()),
             import_max_gb: m.get("IMPORT_MAX_GB").and_then(|v| v.parse().ok()).unwrap_or(8),
             allow_lan_port: m.get("ALLOW_LAN_PORT").map(|v| v != "0").unwrap_or(false),
+            reserve_mem_mb: m.get("RESERVE_MEM_MB").and_then(|v| v.parse().ok()).unwrap_or(1536),
         }
     }
 
@@ -346,6 +350,26 @@ pub fn effective_mem(policy: &Policy, want: Option<&str>) -> R<String> {
         return Err(ApiError::new("E_QUOTA", format!("mem {m} exceeds MAX_MEM={}", policy.max_mem)));
     }
     Ok(m.to_string())
+}
+
+// —— 内存准入（SPEC §10.2）——
+
+/// 准入判断（纯函数）：`MemAvailable(kB)/1024 − reserve < need` → Err（中文 msg 含 可用/预留/需求 三个数）。
+/// 差额用有符号算（avail < reserve 且 need=0 时按公式也应拒，且免无符号下溢）；kB→MB 向下取整（保守侧）。
+pub fn mem_admission(need_mb: u64, mem_available_kb: u64, reserve_mb: u64) -> Result<(), String> {
+    let avail_mb = mem_available_kb / 1024;
+    if (avail_mb as i64).saturating_sub(reserve_mb as i64) < need_mb as i64 {
+        return Err(format!(
+            "内存不足：可用 {avail_mb} MB（已预留 {reserve_mb} MB）＜ 需求 {need_mb} MB"
+        ));
+    }
+    Ok(())
+}
+
+/// /proc/meminfo 的 MemAvailable 行（`MemAvailable:  12345678 kB`）→ KB 数；缺失/畸形 → None。
+pub fn parse_meminfo_available_kb(text: &str) -> Option<u64> {
+    let line = text.lines().find(|l| l.starts_with("MemAvailable:"))?;
+    line.split_whitespace().nth(1)?.parse().ok()
 }
 
 // —— ports.reg：每行 <port> <project> <slot>，槽位端口 8100–8199 ——
@@ -405,6 +429,52 @@ pub fn alloc_redisdb(root: &Path) -> R<u8> {
     (0..REDIS_DBS)
         .find(|d| !used.contains(d))
         .ok_or_else(|| ApiError::new("E_QUOTA", "no free redis db in 0-15"))
+}
+
+// —— Redis 浏览纯函数（SPEC §10.3）——
+
+/// db 参数：数字 0-15（REDIS_DBS-1），否则 E_NAME。
+pub fn parse_redis_db(s: &str) -> R<u8> {
+    s.parse::<u8>()
+        .ok()
+        .filter(|d| *d < REDIS_DBS)
+        .ok_or_else(|| ApiError::new("E_NAME", format!("db 须为 0-{} 的数字", REDIS_DBS - 1)))
+}
+
+/// q（前缀过滤）→ --scan pattern：空 → "*"（全部）；非空须过白名单 [a-zA-Z0-9:_*.-]，尾部补 *。
+/// 双保险：redis-cli 经 docker exec argv 传参本无 shell 元字符注入面，白名单仍拦一道；
+/// q 自带 * 时（如 "demo:*"）补成 "**"，glob 语义等同 "*"。
+pub fn redis_scan_pattern(q: &str) -> Option<String> {
+    let ok = q
+        .bytes()
+        .all(|c| c.is_ascii_alphanumeric() || matches!(c, b':' | b'_' | b'*' | b'.' | b'-'));
+    if !ok {
+        return None;
+    }
+    Some(if q.is_empty() { "*".to_string() } else { format!("{q}*") })
+}
+
+/// key 白名单：与 q 同字符集且非空。取舍（SPEC §10.3）：redis key 理论可含任意字节，
+/// 这里保守白名单——白名单外的 key（空格/引号/二进制等）请用 CLI 直查，端点如实报 E_NAME 提示。
+pub fn valid_redis_key(k: &str) -> bool {
+    !k.is_empty()
+        && k.bytes()
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, b':' | b'_' | b'*' | b'.' | b'-'))
+}
+
+/// redis 值统一转字符串后的截断帽（§10.3：超 4KB 截断加标记）。
+pub const REDIS_VALUE_MAX: usize = 4096;
+
+/// 超 4KB 按 UTF-8 边界截断并加 "...(截断)"（多字节字符不被切半）；不超则原样。
+pub fn clip_value(s: &str) -> String {
+    if s.len() <= REDIS_VALUE_MAX {
+        return s.to_string();
+    }
+    let mut end = REDIS_VALUE_MAX;
+    while end > 0 && !s.is_char_boundary(end) {
+        end -= 1;
+    }
+    format!("{}...(截断)", &s[..end])
 }
 
 // —— 发布者公钥 / registry 凭据文件 ——
@@ -660,20 +730,34 @@ mod tests {
         fs::create_dir_all(root.join("state")).unwrap();
         fs::write(
             root.join("state/policy.env"),
-            "MAX_SLOTS=5\nDEFAULT_MEM=128m\nMAX_MEM=512m\nIMPORT_MAX_GB=2\nALLOW_LAN_PORT=1\n",
+            "MAX_SLOTS=5\nDEFAULT_MEM=128m\nMAX_MEM=512m\nIMPORT_MAX_GB=2\nALLOW_LAN_PORT=1\nRESERVE_MEM_MB=512\n",
         )
         .unwrap();
         let p = Policy::load(&root);
         assert_eq!(
-            (p.max_slots, p.default_mem.as_str(), p.max_mem.as_str(), p.import_max_gb, p.allow_lan_port),
-            (5, "128m", "512m", 2, true)
+            (
+                p.max_slots,
+                p.default_mem.as_str(),
+                p.max_mem.as_str(),
+                p.import_max_gb,
+                p.allow_lan_port,
+                p.reserve_mem_mb,
+            ),
+            (5, "128m", "512m", 2, true, 512)
         );
         assert_eq!(p.import_cap_bytes(), 2 << 30);
 
         let d = Policy::load(&troot("policy-default"));
         assert_eq!(
-            (d.max_slots, d.default_mem.as_str(), d.max_mem.as_str(), d.import_max_gb, d.allow_lan_port),
-            (30, "256m", "1g", 8, false)
+            (
+                d.max_slots,
+                d.default_mem.as_str(),
+                d.max_mem.as_str(),
+                d.import_max_gb,
+                d.allow_lan_port,
+                d.reserve_mem_mb,
+            ),
+            (30, "256m", "1g", 8, false, 1536)
         );
 
         assert_eq!(parse_mem("256m"), Some(256 * 1024 * 1024));
@@ -765,5 +849,94 @@ mod tests {
         let mut shuf = names.clone();
         shuf.reverse();
         assert_eq!(prune_snapshots(&shuf, 24), del);
+    }
+
+    // 8. 内存准入边界（§10.2）：刚好满足 / 差 1MB / 超大 / avail<reserve / kB 向下取整保守
+    #[test]
+    fn mem_admission_boundaries() {
+        let kb = |mb: u64| mb * 1024;
+
+        // 刚好满足：avail - reserve == need → 放行
+        assert_eq!(mem_admission(256, kb(1536 + 256), 1536), Ok(()));
+        assert_eq!(mem_admission(0, kb(1536), 1536), Ok(()));
+
+        // 差 1MB → 拒，msg 含 可用/预留/需求 三个数字
+        let e = mem_admission(256, kb(1536 + 255), 1536).unwrap_err();
+        for n in ["1791", "1536", "256"] {
+            assert!(e.contains(n), "msg 缺数字 {n}: {e}");
+        }
+
+        // 超大需求 → 拒
+        assert!(mem_admission(1_000_000, kb(32 * 1024), 1536).is_err());
+
+        // avail < reserve：差额为负（有符号算，免下溢），need=0 也按公式拒
+        assert!(mem_admission(0, kb(512), 1536).is_err());
+        assert!(mem_admission(100, kb(1000), 1536).is_err());
+
+        // kB → MB 向下取整走保守侧：1792MB 差 1kB 不够 1792MB 需求（floor 成 1791）
+        assert!(mem_admission(1792, kb(1792) - 1, 0).is_err());
+        assert_eq!(mem_admission(1792, kb(1792), 0), Ok(()));
+    }
+
+    // 9. /proc/meminfo MemAvailable 行解析样例
+    #[test]
+    fn meminfo_parse() {
+        let sample = "\
+MemTotal:       32613828 kB
+MemFree:         4319068 kB
+MemAvailable:   18472896 kB
+Buffers:          523264 kB
+Cached:         13121516 kB
+";
+        assert_eq!(parse_meminfo_available_kb(sample), Some(18_472_896));
+        assert_eq!(parse_meminfo_available_kb("MemAvailable:  1024 kB\n"), Some(1024));
+        // 缺行 / 无数字 / 非数字 / 相近前缀（MemAvailableX 不匹配）→ None
+        assert_eq!(parse_meminfo_available_kb("MemTotal: 100 kB\n"), None);
+        assert_eq!(parse_meminfo_available_kb("MemAvailable:\n"), None);
+        assert_eq!(parse_meminfo_available_kb("MemAvailable: abc kB\n"), None);
+        assert_eq!(parse_meminfo_available_kb("MemAvailableX: 1 kB\n"), None);
+        assert_eq!(parse_meminfo_available_kb(""), None);
+    }
+
+    // 10. Redis 浏览白名单（§10.3）：db / q / key 边界 + 值 4KB 截断
+    #[test]
+    fn redis_browse_validation() {
+        // db：0 与 15 放行；16 / 负数 / 非数字 / 空 → E_NAME
+        assert_eq!(parse_redis_db("0").unwrap(), 0);
+        assert_eq!(parse_redis_db("15").unwrap(), 15);
+        for bad in ["16", "99", "-1", "abc", "", "1.5", " 1"] {
+            assert_eq!(parse_redis_db(bad).unwrap_err().code, "E_NAME", "{bad:?}");
+        }
+
+        // q → pattern：空 → "*"；白名单内补尾部 *；白名单外 → None
+        assert_eq!(redis_scan_pattern("").as_deref(), Some("*"));
+        assert_eq!(redis_scan_pattern("demo").as_deref(), Some("demo*"));
+        assert_eq!(redis_scan_pattern("sr_demo:next").as_deref(), Some("sr_demo:next*"));
+        assert_eq!(redis_scan_pattern("a.b-c_d*e").as_deref(), Some("a.b-c_d*e*"));
+        for bad in ["a b", "a$b", "a;b", "a|b", "a\nb", "%", "héllo", "a'b", "a\"b", "a\\b"] {
+            assert_eq!(redis_scan_pattern(bad), None, "{bad:?} 应拒绝");
+        }
+
+        // key：同字符集且非空
+        for good in ["k", "sr_demo_next:field", "a.b-c_d*e", "0123"] {
+            assert!(valid_redis_key(good), "{good} 应合法");
+        }
+        for bad in ["", "a b", "a$b", "k;SCAN", "中", "a\n"] {
+            assert!(!valid_redis_key(bad), "{bad:?} 应拒绝");
+        }
+
+        // 值截断：不超原样；超 4KB 按 UTF-8 边界截断加标记（中文不被切半）
+        assert_eq!(clip_value("short"), "short");
+        let long = "a".repeat(REDIS_VALUE_MAX);
+        assert_eq!(clip_value(&long), long);
+        let over = "a".repeat(REDIS_VALUE_MAX + 10);
+        let clipped = clip_value(&over);
+        assert_eq!(clipped.len(), REDIS_VALUE_MAX + "...(截断)".len());
+        assert!(clipped.ends_with("...(截断)"));
+        let cjk: String = "中".repeat(REDIS_VALUE_MAX / 3 + 5); // 3 字节/字，必切在中间
+        let clipped_cjk = clip_value(&cjk);
+        assert!(clipped_cjk.ends_with("...(截断)"));
+        assert!(clipped_cjk.len() < REDIS_VALUE_MAX + 15, "多字节按边界截短");
+        assert_eq!(clipped_cjk.matches('中').count() * 3 + "...(截断)".len(), clipped_cjk.len());
     }
 }

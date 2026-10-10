@@ -209,6 +209,70 @@ pub fn caddy_reload() -> R<()> {
     run("caddy", &["reload", "--config", CADDY_FILE, "--adapter", "caddyfile"]).map(|_| ())
 }
 
+// —— Redis 浏览（SPEC §10.3）：redis-cli 恒走 docker exec sr-redis（ponytail：不引 redis 客户端库）——
+
+/// redis-cli 单命令（TYPE/PTTL/GET/LRANGE/HGETALL/SMEMBERS/ZRANGE）：argv 传参（无 shell），
+/// 返回 stdout 全文（非交互 redis-cli 为 raw 文本输出）。
+pub fn redis_cli(db: u8, args: &[&str]) -> R<String> {
+    let db_s = db.to_string();
+    let mut argv: Vec<&str> = vec!["exec", "sr-redis", "redis-cli", "-n", &db_s];
+    argv.extend_from_slice(args);
+    docker(&argv)
+}
+
+/// `redis-cli -n <db> --scan --pattern <p>`：增量读行，收满 limit 个后多读到一行即杀子进程并标截断
+/// （--scan 本无 limit 参数；杀掉 docker exec 客户端后容器内 redis-cli 写断管自退，不陪跑全量 scan）。
+/// 返回 (前 limit 个 key, 是否截断)；EOF 自然结束则 truncated=false。
+pub fn redis_scan(db: u8, pattern: &str, limit: usize) -> R<(Vec<String>, bool)> {
+    use std::io::BufRead;
+    let db_s = db.to_string();
+    let mut child = Command::new("docker")
+        .args(["exec", "sr-redis", "redis-cli", "-n", &db_s, "--scan", "--pattern", pattern])
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .map_err(|e| ApiError::state(format!("spawn redis-cli --scan: {e}")))?;
+    let mut stdout = child.stdout.take().unwrap();
+    let mut keys: Vec<String> = Vec::new();
+    let mut truncated = false;
+    let mut line = String::new();
+    {
+        let mut reader = std::io::BufReader::new(&mut stdout);
+        loop {
+            line.clear();
+            match reader.read_line(&mut line) {
+                Ok(0) => break, // EOF：scan 自然结束
+                Ok(_) => {
+                    let l = line.trim();
+                    if l.is_empty() {
+                        continue;
+                    }
+                    if keys.len() >= limit {
+                        truncated = true; // 已够 limit 又见一行 → 还有更多
+                        break;
+                    }
+                    keys.push(l.to_string());
+                }
+                Err(e) => {
+                    kill_wait(&mut child);
+                    return Err(ApiError::state(format!("redis --scan read: {e}")));
+                }
+            }
+        }
+    }
+    if truncated {
+        kill_wait(&mut child);
+        return Ok((keys, true));
+    }
+    let out = child
+        .wait_with_output()
+        .map_err(|e| ApiError::state(format!("redis --scan wait: {e}")))?;
+    if !out.status.success() {
+        return Err(fail("redis-cli --scan", &out));
+    }
+    Ok((keys, false))
+}
+
 // —— registry v2：HTTP/1.0 over TcpStream（HTTP/1.0 服务器不得用 chunked，读至 EOF 即 body）——
 
 /// state/_internal.cred 的 user:pass；不存在则生成 `_internal` 账号并登记进 registry.htpasswd。

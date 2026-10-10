@@ -312,6 +312,28 @@ async fn dispatch(
             Ok(Json(json!({"ok": true})))
         }
 
+        // —— Redis 浏览（SPEC §10.3，排障用）：统一验签；跨 owner 不做归属校验（SPEC 已注明）——
+
+        ("GET", "/_api/redis-dbs", _) => {
+            Ok(Json(json!({"dbs": (0..state::REDIS_DBS).collect::<Vec<u8>>()})))
+        }
+
+        ("GET", "/_api/redis-keys", _) => {
+            let db = state::parse_redis_db(&qget(&q, "db")?)?;
+            let pat = q.get("q").cloned().unwrap_or_default();
+            // 默认 100 上限 200（--scan 无 limit 参数，内核读满即杀并标截断）
+            let limit: usize = q.get("limit").and_then(|t| t.parse().ok()).unwrap_or(100).min(200);
+            let (keys, truncated) = blk(move || ops::redis_keys(db, &pat, limit)).await?;
+            Ok(Json(json!({"keys": keys, "truncated": truncated})))
+        }
+
+        ("GET", "/_api/redis-get", _) => {
+            let db = state::parse_redis_db(&qget(&q, "db")?)?;
+            let key = qget(&q, "key")?;
+            let (t, ttl_ms, value) = blk(move || ops::redis_get(db, &key)).await?;
+            Ok(Json(json!({"type": t, "ttl_ms": ttl_ms, "value": value})))
+        }
+
         ("GET", "/_api/logs", _) => {
             let project = qget(&q, "project")?;
             let slot = qget(&q, "slot")?;

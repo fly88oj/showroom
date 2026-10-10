@@ -67,6 +67,14 @@ fn health_probe(port: u16) -> bool {
     false // 超时放行
 }
 
+/// /proc/meminfo 的 MemAvailable（KB；行解析纯函数在 state，单测覆盖）。读不到 → E_STATE（fail-closed）。
+fn mem_available_kb() -> R<u64> {
+    let text = fs::read_to_string("/proc/meminfo")
+        .map_err(|e| ApiError::state(format!("read /proc/meminfo: {e}")))?;
+    state::parse_meminfo_available_kb(&text)
+        .ok_or_else(|| ApiError::state("/proc/meminfo missing MemAvailable"))
+}
+
 pub fn publish(
     root: &Path,
     owner: &str,
@@ -86,6 +94,13 @@ pub fn publish(
         return Err(ApiError::new("E_QUOTA", format!("MAX_SLOTS={} reached", policy.max_slots)));
     }
     let mem = state::effective_mem(&policy, opts.mem.as_deref().or(old.as_ref().map(|c| c.mem.as_str())))?;
+    // 内存准入（SPEC §10.2）：MemAvailable − RESERVE_MEM_MB ≥ 本次需求才放行，否则 E_QUOTA。
+    // 只查**本次请求**的 need（当前可用减预留是否满足本次需求），不累加存量槽位——
+    // 存量由容器 --memory 硬限自保护。放在创建容器（含 DB 供给/env 写盘）之前，失败零副作用。
+    let need_mb = state::parse_mem(&mem).unwrap_or(0) >> 20;
+    if let Err(m) = state::mem_admission(need_mb, mem_available_kb()?, policy.reserve_mem_mb) {
+        return Err(ApiError::new("E_QUOTA", m));
+    }
     let cpu = opts.cpu.or(old.as_ref().map(|c| c.cpu)).unwrap_or(1.0);
     let cport = opts.cport.or(old.as_ref().map(|c| c.cport)).unwrap_or(8080);
     let port = match &old {
@@ -565,5 +580,11 @@ mod tests {
         assert!(!bin.exists(), ".bin cleaned");
         assert!(!meta.exists(), ".meta cleaned");
         assert_eq!(import_end(&root, "alice", &id).unwrap_err().code, "E_NOTFOUND");
+    }
+
+    // §10.2 准入接线：/proc/meminfo 可读且 MemAvailable > 0（Linux 主机恒真；纯解析在 state 单测）
+    #[test]
+    fn meminfo_read_wiring() {
+        assert!(mem_available_kb().unwrap() > 0);
     }
 }

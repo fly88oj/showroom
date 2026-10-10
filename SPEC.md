@@ -49,6 +49,7 @@ project/slot：`^[a-z0-9][a-z0-9-]{0,30}$`，project 全局唯一，保留：`v2
 ## 5. 主机状态布局（/srv/showroom，btrfs @showroom）
 ```
 state/policy.env        MAX_SLOTS=30 DEFAULT_MEM=256m MAX_MEM=1g IMPORT_MAX_GB=8 ALLOW_LAN_PORT=0
+                        # RESERVE_MEM_MB=1536：内存准入预留 MB（§10.2，缺省 1536，可不写）
 state/ports.reg         每行 <port> <project> <slot>
 state/tokens/<owner>/<kid>.pub    （ed25519 公钥，可多把）
 state/owners/<owner>/reg.cred     registry basic_auth user:hash（bcrypt）
