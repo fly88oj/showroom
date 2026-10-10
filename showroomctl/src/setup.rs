@@ -1439,7 +1439,7 @@ mod tests {
         let b = render_caddyfile(&no_reg, "lan.example", "pub.example");
         assert!(!b.contains("handle /v2/*"), "registry 缺 → 无 /v2 块");
         assert!(!b.contains("127.0.0.1:5000"), "registry 缺 → 不反代 registry");
-        assert!(b.contains("http://pub.example {"));
+        assert!(b.contains("http://127.0.0.1:8080 {"));
 
         let c = render_caddyfile(&full, "lan.example", "");
         assert!(!c.contains("site B"), "PUBLIC_HOST 空 → 不渲染 site B");
@@ -1482,7 +1482,7 @@ mod tests {
              \n\
              # ————— site B：公网面（frp 等公网隧道流量命中的站点）—————\n\
              # 公网发布走加密 import 通道，不放 /v2；/_bootstrap 返回 404。\n\
-             http://pub.example {\n\
+             http://127.0.0.1:8080 {\n\
              \timport showroom-app\n\
              }\n"
         );
