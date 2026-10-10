@@ -27,6 +27,11 @@
 //      旧单发 db-dump 已移除 / 新增文案全中文（无英文混排）/
 //      界面规范（无内联事件/无 transition:all/无 outline:none/占位符 … 结尾/
 //      tablist 语义/reduced-motion/overscroll/touch-action/tabular-nums/theme-color）
+//  12) §14 磁盘空间与镜像删除：上传区空间条（/_api/space 常显「可用空间（已扣预留）」一位小数 /
+//      手动刷新 / 拉取失败静默「空间信息不可用」/ import-end 成功后自动刷新）、
+//      镜像清单每行删除（confirm 含镜像名与回滚失效语义 → image-rm 提交体 → alert 回收量 →
+//      清单+空间条刷新；confirm 取消不提交；失败走顶部条）、
+//      磁盘 E_QUOTA 顶部条追加删除引导并刷新空间条（内存类 E_QUOTA 不追加）
 import { readFileSync, writeFileSync, mkdtempSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -152,6 +157,9 @@ function sealFor(pubPem, plain) {
 const confirmMsgs = [];
 let confirmRet = true;
 globalThis.confirm = (m) => { confirmMsgs.push(String(m)); return confirmRet; };
+// —— alert 垫片：仅记录文案（§14.3 删除成功「已回收约 N MB」断言用） ——
+const alertMsgs = [];
+globalThis.alert = (m) => { alertMsgs.push(String(m)); };
 
 // —— 独立 zstd 压缩（与页面同 wasm 字节的另一实例）：对账页面 compressToBlob 的产物 ——
 function zstdAll(chunks) {
@@ -202,6 +210,12 @@ let curUploadId = null;
 let imagesN = 0, imagesAdminView = false; // imagesAdminView：模拟服务端按 admin 钥匙返回全量
 const IMAGES_ALL = ['alice/demo:v1', 'alice/demo2:v2', 'bob/other:v1'];
 const IMAGES_SELF = ['alice/demo:v1', 'alice/demo2:v2'];
+// 场景 §14 捕获：磁盘空间（/_api/space）/ 镜像删除（/_api/image-rm）
+let spaceN = 0, spaceFail = false;        // spaceFail：模拟 df 失败（500 E_STATE，fail-closed）
+const imagesRemoved = new Set();          // 模拟服务端删除后清单收敛
+const imageRmBodies = [];
+let imageRmFail = null;                   // 一次性 image-rm 失败响应（{error,msg}）
+let publishQuota = null;                  // 一次性 publish E_QUOTA（{msg}：磁盘/内存两态文案）
 const ADM_USERS = { users: [
   { user: 'alice', projects: 2, keys: [
     { kid: 'kid-a1', admin: true, created: '2026-09-01T10:00:00' },
@@ -253,9 +267,21 @@ globalThis.fetch = async (url, init = {}) => {
   if (u.includes('showroom_bg.wasm')) return { ok: true, status: 200, text: async () => '', arrayBuffer: async () => wasmBytes.buffer.slice(wasmBytes.byteOffset, wasmBytes.byteOffset + wasmBytes.byteLength) };
   if (u.includes('/_api/health')) return mode === 'ok' ? resp(200, { ok: true }) : resp(404, { error: 'E_AUTH' });
   if (u.includes('/_api/projects')) { projectsN++; return resp(200, PROJECTS); }
-  if (u.includes('/_api/images')) { // §13.1：admin 钥匙全量（admin_view），普通仅本人前缀
+  if (u.includes('/_api/images')) { // §13.1：admin 钥匙全量（admin_view），普通仅本人前缀；§14.3 删除后清单收敛
     imagesN++;
-    return resp(200, { images: imagesAdminView ? IMAGES_ALL : IMAGES_SELF });
+    const src = imagesAdminView ? IMAGES_ALL : IMAGES_SELF;
+    return resp(200, { images: src.filter((s) => !imagesRemoved.has(s)) });
+  }
+  if (u.includes('/_api/space')) { // §14.1：根分区三元组（MB；available 未扣预留，控制台显示 available-reserve）
+    spaceN++;
+    return spaceFail ? resp(500, { error: 'E_STATE', msg: 'df /: 模拟失败' }) : resp(200, { available_mb: 40960, reserve_mb: 20480, total_mb: 102400 });
+  }
+  if (u.includes('/_api/image-rm')) { // §14.3：删除+内联 GC → freed_est_mb；清单即刻不含该 tag
+    const body = JSON.parse(dec2.decode(init.body));
+    imageRmBodies.push(body);
+    if (imageRmFail) { const f = imageRmFail; imageRmFail = null; return resp(f.error === 'E_QUOTA' ? 429 : 404, f); }
+    imagesRemoved.add(body.image);
+    return resp(200, { freed_est_mb: 512 });
   }
   if (u.includes('/_api/redis-dbs')) return resp(200, { dbs: [0, 1, 2, 3], admin_view: whoamiAdmin });
   if (u.includes('/_api/redis-keys')) return resp(200, { keys: ['sr_demo'] });
@@ -318,6 +344,7 @@ globalThis.fetch = async (url, init = {}) => {
     publishAttempts++;
     lastPublishBody = JSON.parse(dec2.decode(init.body));
     dpPublishSnap = { txt: $s('dp-text').textContent || '' }; // publish 时状态条应处③发布中
+    if (publishQuota) { const f = publishQuota; publishQuota = null; return resp(429, { error: 'E_QUOTA', msg: f.msg }); }
     if (publishFailOnce) { publishFailOnce = false; return resp(500, { error: 'E_NET', msg: '模拟发布失败' }); }
     publishN++;
     return resp(200, { ok: true, url: '/' + lastPublishBody.project + '/', port: 8101 });
@@ -411,6 +438,65 @@ ok(($s('dep-images-fb').textContent || '').includes('您名下的镜像 2 个'),
 click('dep-images-refresh');
 await sleep(60);
 ok(imagesN === 2, '「刷新镜像清单」强制重取');
+
+// —— §14.1/§14.3 空间条（上传区常显）+ 镜像清单删除（部署区）——
+ok(spaceN >= 1, '进入发布区：/_api/space 已拉取（空间条常显）');
+ok(($s('space-note').textContent || '') === '可用空间（已扣预留）：20.0 GB',
+  '空间条：显示 available−reserve（40960−20480 MB → 20.0 GB，一位小数）');
+let spBase = spaceN;
+click('space-refresh');
+await sleep(40);
+ok(spaceN > spBase, '「刷新空间」按钮手动重取');
+spaceFail = true;
+click('space-refresh');
+await sleep(40);
+ok(($s('space-note').textContent || '') === '空间信息不可用', '空间拉取失败：静默显示「空间信息不可用」（不上顶部条、不阻断表单）');
+spaceFail = false;
+let ilist = $s('img-list:q').innerHTML || '';
+ok(ilist.includes('alice/demo:v1') && ilist.includes('alice/demo2:v2') && ilist.includes('删除'),
+  '镜像清单（img-list）：与部署 ComboBox 同源渲染 + 每行「删除」按钮');
+const rmAct = (img) => fire($s('img-list'), 'click', { target: { closest: () => ({ dataset: { act: 'image-rm', img } }) } });
+spBase = spaceN;
+confirmMsgs.length = 0;
+rmAct('alice/demo:v1');
+await sleep(60);
+ok(imageRmBodies.length === 1 && imageRmBodies[0].image === 'alice/demo:v1', '删除镜像：image-rm 提交体 {image:"<repo:tag>"}');
+const rmConfirm = confirmMsgs.at(-1) || '';
+ok(rmConfirm.includes('确定删除镜像 alice/demo:v1 吗') && rmConfirm.includes('不受影响') && rmConfirm.includes('回滚/重建将失效'),
+  '删除镜像：confirm 文案含镜像名与影响说明（容器继续运行、回滚/重建失效）');
+ok((alertMsgs.at(-1) || '').includes('已回收约 512 MB'), '删除成功：alert「已回收约 N MB」');
+ilist = $s('img-list:q').innerHTML || '';
+ok(!ilist.includes('alice/demo:v1') && ilist.includes('alice/demo2:v2'), '删除成功：清单刷新（该行消失、其余保留）');
+ok(spaceN > spBase, '删除成功后：空间数字同步刷新');
+confirmRet = false;
+rmAct('alice/demo2:v2');
+await sleep(40);
+ok(imageRmBodies.length === 1 && !imagesRemoved.has('alice/demo2:v2'), 'confirm 取消：不提交 image-rm');
+confirmRet = true;
+imageRmFail = { error: 'E_NOTFOUND', msg: '镜像不存在（可能已被删除）' };
+rmAct('alice/demo2:v2');
+await sleep(60);
+ok(imageRmBodies.length === 2 && ($s('msg').textContent || '').includes('E_NOTFOUND'), '删除失败：顶部条报错（含错误码）');
+ok(($s('img-list:q').innerHTML || '').includes('alice/demo2:v2'), '删除失败：清单保留该镜像');
+
+// —— §14.2 磁盘 E_QUOTA：顶部条追加删除引导并刷新空间条；内存类 E_QUOTA 不追加 ——
+publishQuota = { msg: '磁盘空间不足：可用 10240 MB（已预留 20480 MB）＜ 估算需求 30720 MB（7680 MB × 膨胀因子 4）；请先删除旧镜像后重试' };
+$s('dep-project').value = 'demo5';
+$s('dep-tag').value = 'v5';
+spBase = spaceN;
+fire($s('dep-form'), 'submit', { preventDefault() {} });
+await sleep(60);
+let qmsg = $s('msg').textContent || '';
+ok(qmsg.includes('E_QUOTA') && qmsg.includes('磁盘空间不足') && qmsg.includes('膨胀因子'),
+  '磁盘 E_QUOTA：顶部条含服务端原文（可用/预留/估算需求/膨胀因子）');
+ok(qmsg.includes('可到部署区删除旧镜像后重试'), '磁盘 E_QUOTA：顶部条追加删除引导');
+ok(spaceN > spBase, '磁盘 E_QUOTA：触发空间条刷新');
+publishQuota = { msg: '可用内存不足：可用 512 MB（已预留 1536 MB）＜ 需求 2048 MB' };
+fire($s('dep-form'), 'submit', { preventDefault() {} });
+await sleep(60);
+qmsg = $s('msg').textContent || '';
+ok(qmsg.includes('E_QUOTA') && !qmsg.includes('可到部署区删除旧镜像后重试'), '内存类 E_QUOTA：不追加磁盘删除引导');
+$s('dep-project').value = 'demo'; // 还原（后续场景复用）
 
 // —— tablist 方向键切换（role=tablist 键盘约定） ——
 fire($s('tabs'), 'keydown', { key: 'ArrowRight', preventDefault() {}, target: tabBtn('proj') });
@@ -516,6 +602,7 @@ ok(($s('db-out').textContent || '').includes('三段式下载完成'), 'dbOut �
   $s('pub-tag').value = 'v2';
   $s('pub-file').files = [fakeFile(raw, 'demo-img.tar')];
   dpSnaps.length = 0; compSnaps.length = 0; dpBeginSnap = null; dpPublishSnap = null;
+  const spaceBase7a = spaceN;
   fire($s('pub-form'), 'submit', { preventDefault() {} });
   ok(await waitFor(() => publishN === 1, 30000), '一键部署：压缩 → 分片上传 → 发布全链路完成');
   ok($s('dp-s1').classList.contains('done') && $s('dp-s2').classList.contains('done')
@@ -530,6 +617,8 @@ ok(($s('db-out').textContent || '').includes('三段式下载完成'), 'dbOut �
     '本地会话记录 zsize=压缩后 / size=原文件（续传重压缩对账用）');
   ok(importChunkLens.reduce((a, b) => a + b, 0) === importBeginBody.total_bytes, '分片字节总和 = 信封总长');
   ok(importEndN === 1 && !store.has('sr.up.up-smoke-1'), 'import-end 完成：服务端会话消费、本地记录清除');
+  await sleep(40);
+  ok(spaceN > spaceBase7a, 'import-end 成功后：空间条自动刷新（§14.1）');
   ok(dpSnaps.length === 2, `上传恰好 2 个 chunk 请求（1 数据片 + 1 收尾片，实际 ${dpSnaps.length}）`);
   ok(dpSnaps.every((s) => s.m === importBeginBody.total_bytes), '②上传段进度 max = 压缩后信封总长');
   ok(dpSnaps[0].v === 0 && dpSnaps[0].s2 === true, '首片请求时：②段进行中（on）、进度 0');
@@ -824,6 +913,13 @@ ok(html.includes('list="dl-images"') && html.includes('id="dl-images"'), '§13.1
 ok(html.includes('旧版本单独部署'), '§13.1：部署表单注明旧版本单独部署入口');
 ok(html.includes('仅显示您名下项目的库') && html.includes('管理员视图'), '§13.2/13.3：Redis 浏览隔离文案 + 管理员视图标注');
 ok(html.includes('界面级/协作级隔离') || html.includes('界面级'), '§13.2：诚实边界文案（非安全边界）');
+// —— §14 磁盘空间显示 + 镜像删除 ——
+ok(html.includes('/_api/space') && html.includes('id="space-note"') && html.includes('id="space-refresh"'),
+  '§14.1：/_api/space 接线 + 空间条容器 + 手动刷新按钮');
+ok(html.includes('可用空间（已扣预留）') && html.includes('空间信息不可用'), '§14.1：空间条文案（常显口径 + 失败静默降级）');
+ok(html.includes('id="img-list"') && html.includes('/_api/image-rm'), '§14.3：镜像清单渲染容器 img-list + image-rm 接线');
+ok(html.includes('回滚/重建将失效') && html.includes('已回收约'), '§14.3：删除 confirm 影响文案 + alert 回收量文案');
+ok(html.includes('可到部署区删除旧镜像后重试'), '§14.2：磁盘 E_QUOTA 顶部条删除引导文案');
 // —— 界面规范静态断言（B 部分逐条） ——
 ok(!/<div[^>]+onclick|onclick=/.test(html), '规范：无内联事件（含 div onclick）');
 ok(!/transition\s*:\s*all/.test(html), '规范：无 transition: all（过渡列明属性）');

@@ -274,6 +274,13 @@
       </div>
       <p class="ferr" id="dep-image-err" aria-live="polite"></p>
       <datalist id="dl-images"></datalist>
+      <!-- §14.3 镜像清单：与部署 ComboBox 同源 /_api/images 数据；每行「删除」走 POST /_api/image-rm（内联 GC，秒级回收磁盘） -->
+      <div class="tbl-wrap" style="max-height:22vh">
+        <table id="img-list">
+          <thead><tr><th>镜像（同上方下拉清单 · 可删除旧镜像释放磁盘）</th><th>操作</th></tr></thead>
+          <tbody><tr><td colspan="2" class="note">未加载</td></tr></tbody>
+        </table>
+      </div>
       <form id="dep-form" class="grid" style="margin-top:.5rem">
         <label class="field" for="dep-project"><span>项目（选中镜像后自动带出，可改）</span>
           <input type="text" id="dep-project" size="12" pattern="[a-zA-Z0-9][a-zA-Z0-9-]{0,30}" aria-describedby="dep-project-err"></label>
@@ -288,7 +295,7 @@
       <p class="ferr" id="dep-project-err" aria-live="polite"></p>
       <p class="ferr" id="dep-tag-err" aria-live="polite"></p>
       <p class="fb" id="dep-fb" aria-live="polite"></p>
-      <p class="note">默认仅列出您名下的镜像；管理员钥匙可见全部账号的镜像并标注「管理员视图」。选中镜像后项目与标签自动带出（仍可修改），填写内存需求与监听端口后即可发布——旧版本单独部署、或对「仅上传」入库的镜像择时部署都从此入口。</p>
+      <p class="note">默认仅列出您名下的镜像；管理员钥匙可见全部账号的镜像并标注「管理员视图」。选中镜像后项目与标签自动带出（仍可修改），填写内存需求与监听端口后即可发布——旧版本单独部署、或对「仅上传」入库的镜像择时部署都从此入口。清单中每行可删除不再使用的旧镜像：删除即触发回收（秒级释放磁盘），正在运行的展项不受影响，但其回滚/重建将失效。</p>
     </fieldset>
 
     <fieldset style="margin-top:.8rem">
@@ -298,6 +305,11 @@
         <label class="field" for="up-id"><span>续传用的上传编号（upload_id）</span>
           <input type="text" id="up-id" list="up-ids" size="34" class="mono" placeholder="中断后填入或从列表选择…"></label>
         <datalist id="up-ids"></datalist>
+      </div>
+      <!-- §14.1 空间条：常显「可用空间（已扣预留）」；进入本区 / import-end 成功 / 删除镜像后自动刷新，亦可手动刷新 -->
+      <div class="row" style="margin-top:.6rem;gap:.5rem">
+        <div id="space-note" class="note" style="margin:0" aria-live="polite">可用空间（已扣预留）：…</div>
+        <button type="button" id="space-refresh" title="重新查询磁盘可用空间">刷新空间</button>
       </div>
       <div style="margin-top:.6rem">
         <progress id="up-prog" max="1" value="0"></progress>
@@ -459,7 +471,7 @@
       <tbody>
         <tr><td class="mono">E_AUTH</td><td>公钥未登记（或本机时间偏差过大 / 非本人项目）：把登录页公钥串交管理员登记；时钟问题可用 <span class="mono">showroom doctor</span> 排查。</td></tr>
         <tr><td class="mono">E_NAME</td><td>命名不符合规则 <span class="mono">^[a-zA-Z0-9][a-zA-Z0-9-]{0,30}$</span> 或使用了保留名（v2/_api/_bootstrap/_console）。</td></tr>
-        <tr><td class="mono">E_QUOTA</td><td>超出限额：内存需求 / 导入体积超过平台配额，或可用内存（扣除预留）小于内存需求；请调低内存需求或精简后重试。</td></tr>
+        <tr><td class="mono">E_QUOTA</td><td>超出限额：内存需求 / 导入体积 / 磁盘空间（扣除预留）不足；请调低内存需求、精简镜像，磁盘不足时可在部署区镜像清单删除旧镜像后重试。</td></tr>
         <tr><td class="mono">E_NOTFOUND</td><td>展项或上传/下载会话不存在。</td></tr>
         <tr><td class="mono">E_STATE</td><td>当前状态不允许该操作（如危险 SQL 未确认、容器状态冲突）。</td></tr>
         <tr><td class="mono">E_NET</td><td>网络或服务不可用，稍后重试。</td></tr>
@@ -606,7 +618,7 @@ function shimCStr(call, cap0) {
 const ERR_CN = {
   E_AUTH: '公钥未登记或验签未通过（非本人项目同样报此错）；请把公钥串交管理员登记后重试',
   E_NAME: '命名不符合规则或使用了保留名；请按提示修正名称后重试',
-  E_QUOTA: '超出平台限额（内存需求/导入体积，或可用内存不足）；请调低内存需求或精简镜像后重试',
+  E_QUOTA: '超出平台限额（内存需求/导入体积/磁盘空间不足）；请调低内存需求、精简镜像，磁盘不足时可先删除旧镜像',
   E_NOTFOUND: '对象不存在（展项/会话）；请确认名称或重新发起',
   E_STATE: '当前状态不允许该操作；请检查前置条件（如确认标记、容器状态）后重试',
   E_NET: '网络或服务不可用；请稍后重试，或用 showroom doctor 排查',
@@ -624,7 +636,14 @@ const errText = (e) => {
   }
   return String(e?.message || e);
 };
-const apiFail = (what, e) => showMsg(`${what}失败 — ${errText(e)}`);
+const apiFail = (what, e) => {
+  // §14.2/§14.3：磁盘空间不足的 E_QUOTA（msg 含「磁盘空间不足」）→ 顶部条追加删除引导并刷新空间条（内存类 E_QUOTA 不追加）
+  if (e && e.error === 'E_QUOTA' && (e.msg || '').includes('磁盘空间不足')) {
+    if ($('space-note')) refreshSpace();
+    return showMsg(`${what}失败 — ${errText(e)}；可到部署区删除旧镜像后重试`);
+  }
+  showMsg(`${what}失败 — ${errText(e)}`);
+};
 // —— 界面规范助手：字段级内联错误（显示于字段旁并聚焦首错）与按钮「处理中…」 ——
 function fieldErr(id, msg) {
   const err = $(`${id}-err`);
@@ -854,6 +873,7 @@ function enterApp() {
   $('app').classList.remove('hidden');
   refreshProjects();
   ensureImages();     // §13.1：进入发布区（初始标签）即惰性加载镜像清单
+  refreshSpace();     // §14.1：初始进入展项页即拉取空间条
   syncAdmin(); // §12.2：whoami 决定第五「管理」标签去留
 }
 function logout() {
@@ -913,7 +933,7 @@ function activateTab(name) {
     b.setAttribute?.('aria-selected', on ? 'true' : 'false');
   }
   for (const s of tabs) $(`tab-${s}`).classList.toggle('hidden', s !== name);
-  if (name === 'proj') ensureImages(); // §13.1：进入发布区即惰性加载镜像清单（已加载则跳过）
+  if (name === 'proj') { ensureImages(); refreshSpace(); } // §13.1 惰性加载镜像清单（已加载则跳过）；§14.1 进入展项页刷新空间条
   if (name === 'status') {
     evLive.want = true;              // 进入状态页才订阅事件流（§10.4：连接常驻 docker events）
     startEventsStream();
@@ -1109,6 +1129,8 @@ async function refreshAdminStatus() { // 平台状态面板：服务状态灯 / 
 function wireProjTab() {
   $('btn-refresh').addEventListener('click', refreshProjects);
   $('proj-tbl').addEventListener('click', onProjAction);
+  $('img-list').addEventListener('click', onImageRm);                       // §14.3：镜像清单行删除（事件委托）
+  $('space-refresh').addEventListener('click', () => refreshSpace());      // §14.1：空间条手动刷新
   $('pub-form').addEventListener('submit', onDeploy); // 入口一「一键部署」：压缩→上传→发布一条龙（§12.1）
   $('btn-upload-only').addEventListener('click', onUploadOnly); // 入口二「仅上传」：同一 tar，只入库不部署
   $('dep-form').addEventListener('submit', onDeployForm); // 入口三「部署」：选 registry 已有镜像直接发布（§13.1）
@@ -1142,6 +1164,7 @@ async function ensureImages(force = false) {
     const j = await api('GET', '/_api/images');
     const images = (j.images || []).map(String);
     $('dl-images').innerHTML = images.map((s) => `<option value="${esc(s)}">`).join('');
+    renderImageList(images); // §14.3：清单容器（删除按钮挂此）与 ComboBox 同源同刷
     imagesLoaded = true;
     const adminView = j.admin_view ?? state.admin; // 服务端标注优先，回退 whoami 结论
     $('dep-images-fb').textContent = adminView
@@ -1151,6 +1174,37 @@ async function ensureImages(force = false) {
     $('dep-images-fb').textContent = '';
     apiFail('镜像清单加载', e); // 下一步动作在错误码文案中给出
   }
+}
+/** §14.3 镜像清单渲染：部署 ComboBox 同源数据；每行尾「删除」按钮（POST /_api/image-rm，内联 GC 秒级回收）。 */
+function renderImageList(images) {
+  const tb = $('img-list').querySelector('tbody');
+  tb.innerHTML = images.length
+    ? images.map((s) => `<tr><td class="mono wrap">${esc(s)}</td><td><button class="act danger" data-act="image-rm" data-img="${esc(s)}">删除</button></td></tr>`).join('')
+    : '<tr><td colspan="2" class="note">（暂无镜像；「仅上传」入库后此处可管理）</td></tr>';
+}
+/** §14.3 删除镜像：confirm 写明镜像名与回滚失效语义 → image-rm → alert 回收量 → 刷新清单+空间条。 */
+async function onImageRm(ev) {
+  const btn = ev.target.closest('button[data-act="image-rm"]');
+  if (!btn || btn.disabled) return;
+  const image = btn.dataset.img;
+  if (!confirm(`确定删除镜像 ${image} 吗？正在使用该镜像的已发布项目不受影响（容器继续运行），但回滚/重建将失效。`)) return;
+  btn.disabled = true;
+  try {
+    const j = await api('POST', '/_api/image-rm', { image });
+    alert(`已回收约 ${Number(j.freed_est_mb ?? 0)} MB`);
+    ensureImages(true); // 清单重取：被删 tag 即刻消失
+    refreshSpace();     // 空间数字同步刷新
+  } catch (e) { apiFail(`删除镜像 ${image}`, e); }
+  btn.disabled = false;
+}
+// —— §14.1 空间条：GET /_api/space → 「可用空间（已扣预留）：X GB」（GB 一位小数）；失败静默降级 ——
+async function refreshSpace() {
+  try {
+    const j = await api('GET', '/_api/space');
+    const freeMb = Number(j.available_mb) - Number(j.reserve_mb); // 显示口径＝可用−预留（SPEC §14.1）
+    if (!Number.isFinite(freeMb)) throw new Error('bad space payload');
+    $('space-note').textContent = `可用空间（已扣预留）：${(freeMb / 1024).toFixed(1)} GB`;
+  } catch { $('space-note').textContent = '空间信息不可用'; } // 静默降级：不上顶部条、不阻断上传表单
 }
 // —— 选中镜像 → 自动带出项目与标签（形如 user/project:tag；可手改） ——
 function onImagePick() {
@@ -1551,6 +1605,7 @@ async function uploadRest(uploadId, sid, blob, startSeq, sent0, total, note) {
   await api('POST', `/_api/import-end?upload=${encodeURIComponent(uploadId)}`, null);
   localStorage.removeItem('sr.up.' + uploadId);
   refreshUpIds();
+  refreshSpace(); // §14.1：import-end 成功后刷新空间条
 }
 /** 断点续传核心（手动「恢复」与一键部署重试共用，§8.1）：查已收分片 → 重新压缩重建产物
  *  （压缩确定性 ⇒ 信封逐字节一致）→ 重放已收分片推进加密会话 → 补传剩余 → import-end 收尾。
@@ -1596,6 +1651,7 @@ async function resumeUploadCore(id, opts = {}) {
   await api('POST', `/_api/import-end?upload=${encodeURIComponent(id)}`, null);
   localStorage.removeItem('sr.up.' + id);
   refreshUpIds();
+  refreshSpace(); // §14.1：import-end 成功后刷新空间条
   return { pre, zsize: zb.size };
 }
 async function onResumeUpload() {
