@@ -70,6 +70,16 @@
   #tabs { display: flex; gap: .4rem; flex-wrap: wrap; margin-bottom: .6rem; }
   #tabs button { background: #1b1f26; border-color: #2a2f39; color: #aeb6c2; }
   #tabs button.on { background: #2b3d55; border-color: #3d5578; color: #e7edf5; }
+  /* 登录向导（§10.1）：步骤条 + 三步面板 */
+  .wz-step {
+    color: #8fa0b5; font-size: 12px; padding: .1rem .6rem;
+    border: 1px solid #2a2f39; border-radius: 999px; background: #1b1f26;
+  }
+  .wz-step.on { background: #2b3d55; border-color: #3d5578; color: #e7edf5; }
+  .wz-pane { margin-top: .6rem; }
+  #wz-key-choices { display: flex; flex-direction: column; gap: .45rem; }
+  #wz-key-choices label { cursor: pointer; }
+  #wz-pub { font-size: 16px; letter-spacing: .4px; user-select: all; }
   /* 行内反馈（操作后就近显示，错误另走顶部条） */
   .fb { font-size: 12px; color: #a9e8b8; min-height: 1.2em; margin: .3rem 0 0; }
   .fb.warn { color: #e8c37f; }
@@ -82,28 +92,57 @@
 
 <div id="msg"></div>
 
-<!-- ———— 登录门（SPEC §9.1：签名自测通过前只渲染本区块，不渲染任何管理 UI） ———— -->
+<!-- ———— 登录向导（SPEC §10.1：线性三步；签名自测通过前只渲染本区块，不渲染任何管理 UI） ———— -->
 <section id="login">
   <h1>Showroom 控制台</h1>
   <p class="note">服务器（同源代理，经 <span class="mono">/_api/*</span> 签名调用）：<span class="mono" id="lg-srv"></span></p>
-  <div class="grid" style="display:flex;flex-wrap:wrap;gap:.8rem;align-items:flex-end;margin-top:.6rem">
-    <label class="field"><span>账号</span><input type="text" id="lg-owner" placeholder="发布者账号" size="12" pattern="[a-z0-9][a-z0-9-]{0,30}"></label>
-    <label class="field"><span>密钥状态：<span id="lg-keystate" class="status-bad">未生成</span></span>
-      <span class="row" style="gap:.4rem">
-        <button id="lg-keygen">生成密钥</button>
-        <button id="lg-importkey">导入密钥（seed）</button>
-      </span>
-    </label>
-    <button id="lg-login">登录（签名自测）</button>
+  <div class="row" style="gap:.4rem;margin-top:.6rem">
+    <span class="wz-step" id="wz-s1">1/3 你是谁</span>
+    <span class="wz-step" id="wz-s2">2/3 选择密钥</span>
+    <span class="wz-step" id="wz-s3">3/3 验证</span>
   </div>
-  <div id="lg-pubinfo" class="mono hidden" style="margin-top:.6rem"></div>
-  <p class="note">
-    密钥即身份：生成或导入的 32 字节 seed 以十六进制存于浏览器 localStorage——<b>属试验性存储</b>，
-    换设备/清缓存即失效；正式场景请用 CLI <span class="mono">showroom keygen</span>。
-    把下方公钥串交给管理员登记（<span class="mono">showroomctl owner-add &lt;账号&gt; --pubkey &lt;公钥串&gt;</span>）后，
-    点「登录（签名自测）」验证；未登记前控制台不加载任何管理功能。
-  </p>
-  <p class="fb" id="lg-fb"></p>
+
+  <!-- 步骤 1「你是谁」：唯一控件 = 账号输入 + 下一步 -->
+  <div class="wz-pane" id="wz-p1">
+    <label class="field"><span>账号（发布者账号）</span>
+      <input type="text" id="wz-owner" placeholder="如 alice" size="14" pattern="[a-z0-9][a-z0-9-]{0,30}" autocomplete="username"></label>
+    <div class="row" style="margin-top:.6rem"><button id="wz-next1">下一步</button></div>
+  </div>
+
+  <!-- 步骤 2「选择密钥」：自动检测本机存量，单选三选一（导入时才出现粘贴框） -->
+  <div class="wz-pane hidden" id="wz-p2">
+    <fieldset>
+      <legend>为账号 <span class="mono" id="wz-ownerEcho"></span> 选择密钥</legend>
+      <div id="wz-key-choices">
+        <label class="row" id="wz-l-use" style="gap:.4rem"><input type="radio" name="wz-key" id="wz-r-use"><span>使用本机已有密钥（指纹 <span class="mono" id="wz-fp"></span>）</span></label>
+        <label class="row" style="gap:.4rem"><input type="radio" name="wz-key" id="wz-r-new"><span id="wz-new-text">生成新密钥</span></label>
+        <label class="row" style="gap:.4rem"><input type="radio" name="wz-key" id="wz-r-import"><span>导入密钥种子</span></label>
+      </div>
+      <label class="field hidden" id="wz-import-box" style="margin-top:.5rem"><span>粘贴 64 位十六进制密钥种子（showroom keygen 产物 / 其他设备导出）</span>
+        <textarea id="wz-seed" class="mono" spellcheck="false" placeholder="64 位十六进制字符（32 字节）"></textarea></label>
+    </fieldset>
+    <div class="row" style="margin-top:.6rem">
+      <button id="wz-back2">上一步</button>
+      <button id="wz-next2">下一步</button>
+    </div>
+    <p class="note">密钥即身份：32 字节 seed 以十六进制存于浏览器 localStorage——<b>属试验性存储</b>，换设备/清缓存即失效；正式场景请用 CLI <span class="mono">showroom keygen</span>。</p>
+  </div>
+
+  <!-- 步骤 3「验证」：自动签名自测；未登记 → 展示公钥串等待登记，点【重新检测】循环；通过 → 自动进入管理界面 -->
+  <div class="wz-pane hidden" id="wz-p3">
+    <p class="note">账号 <span class="mono" id="wz-v-owner"></span> · 密钥指纹 <span class="mono" id="wz-v-fp"></span></p>
+    <p class="fb" id="wz-v-fb"></p>
+    <div id="wz-pubbox" class="hidden">
+      <p class="note">尚未登记：把下方公钥串发给管理员登记（<span class="mono">showroomctl owner-add &lt;账号&gt; --pubkey &lt;公钥串&gt;</span>），登记后点【重新检测】。</p>
+      <div class="row" style="align-items:center;gap:.6rem;flex-wrap:nowrap">
+        <code id="wz-pub" class="pub"></code>
+        <button id="wz-copypub">复制公钥</button>
+      </div>
+    </div>
+    <div class="row" style="margin-top:.6rem">
+      <button id="wz-recheck">重新检测</button>
+    </div>
+  </div>
 </section>
 
 <!-- ———— 管理壳（模板：惰性，登录成功后才克隆进文档流；SPEC §3「登录成功前不加载管理资源」） ———— -->
@@ -155,7 +194,7 @@
           <input type="text" id="pub-slot" value="stable" list="dl-slots" required size="8" pattern="[a-z0-9][a-z0-9-]{0,30}"></label>
         <label class="field"><span>镜像标签（必填）</span>
           <input type="text" id="pub-tag" required size="10"></label>
-        <label class="field"><span>内存上限</span>
+        <label class="field"><span>内存需求</span>
           <input type="text" id="pub-mem" value="256m" list="dl-mem" size="6"></label>
         <label class="field"><span>Demo 服务监听端口（容器内）</span>
           <input type="number" id="pub-cport" value="8080" min="1" max="65535" size="5"></label>
@@ -265,6 +304,26 @@
       <label class="row" style="gap:.35rem"><input type="checkbox" id="st-logs-auto">每 10 秒自动刷新</label>
     </div>
     <pre class="out mono" id="st-logs" style="min-height:8em">（未选择展项）</pre>
+
+    <div class="sep"></div>
+    <h2>Redis 浏览（排障用，跨账号不隔离）</h2>
+    <div class="row" style="margin-bottom:.4rem">
+      <label class="field"><span>逻辑库（DB）</span><select id="rd-db"></select></label>
+      <label class="field"><span>key 前缀过滤（回车或点「刷新」）</span>
+        <input type="text" id="rd-q" class="mono" placeholder="如 sr_demo_ 或留空"></label>
+      <button id="rd-refresh">刷新 key 列表</button>
+      <span class="note" id="rd-count" style="margin:0"></span>
+    </div>
+    <div class="row" style="align-items:flex-start;gap:.8rem">
+      <select id="rd-keys" size="12" class="mono" style="flex:0 0 300px">
+        <option value="">（先刷新 key 列表）</option>
+      </select>
+      <div class="field" style="flex:1;min-width:0">
+        <span id="rd-meta">（点击左侧 key 查看类型 / 剩余生存时间 / 值）</span>
+        <pre class="out mono" id="rd-val" style="min-height:10em">（未选择 key）</pre>
+      </div>
+    </div>
+    <p class="note">仅排障用途：Redis 内容跨账号可见（不做隔离）；key 列表单次最多 200 条（可能截断），值超过 4KB 会被服务端截断。</p>
   </section>
 
   <!-- ———— 标签页 4：帮助 ———— -->
@@ -305,7 +364,7 @@
       <tbody>
         <tr><td class="mono">E_AUTH</td><td>公钥未登记（或本机时间偏差过大 / 非本人项目）：把登录页公钥串交管理员登记；时钟问题可用 <span class="mono">showroom doctor</span> 排查。</td></tr>
         <tr><td class="mono">E_NAME</td><td>命名不符合规则 <span class="mono">^[a-z0-9][a-z0-9-]{0,30}$</span> 或使用了保留名（v2/_api/_bootstrap/_console）。</td></tr>
-        <tr><td class="mono">E_QUOTA</td><td>超出限额：槽位数 / 内存上限 / 导入体积超过平台配额，请精简后重试。</td></tr>
+        <tr><td class="mono">E_QUOTA</td><td>超出限额：槽位数 / 内存需求 / 导入体积超过平台配额，或可用内存（扣除预留）小于内存需求；请调低内存需求或精简后重试。</td></tr>
         <tr><td class="mono">E_NOTFOUND</td><td>展项、槽位或上传会话不存在。</td></tr>
         <tr><td class="mono">E_STATE</td><td>当前状态不允许该操作（如危险 SQL 未确认、容器状态冲突）。</td></tr>
         <tr><td class="mono">E_NET</td><td>网络或服务不可用，稍后重试。</td></tr>
@@ -397,7 +456,7 @@ function shimCStr(call, cap0) {
 const ERR_CN = {
   E_AUTH: '公钥未登记或验签未通过（非本人项目同样报此错）',
   E_NAME: '命名不符合规则或使用了保留名',
-  E_QUOTA: '超出平台限额（槽位/内存/导入体积）',
+  E_QUOTA: '超出平台限额（槽位/内存需求/导入体积，或可用内存不足）',
   E_NOTFOUND: '对象不存在（展项/槽位/会话）',
   E_STATE: '当前状态不允许该操作',
   E_NET: '网络或服务不可用',
@@ -442,54 +501,105 @@ function loadSeed() {
     state.pub = shimCStr((p, c) => ex.sr_pub_string(sp, p, c), 128);
     unput(sp, spl);
   }
-  renderLoginState();
 }
-function renderLoginState() {
-  $('lg-owner').value = state.owner;
-  $('lg-keystate').textContent = state.seed ? '已生成' : '未生成';
-  $('lg-keystate').className = state.seed ? 'status-ok' : 'status-bad';
-  const pi = $('lg-pubinfo');
-  if (state.seed) {
-    pi.classList.remove('hidden');
-    pi.innerHTML = `公钥串（交给管理员登记）：<span class="pub">${esc(state.pub)}</span>`;
-  } else pi.classList.add('hidden');
-  $('lg-login').disabled = !(state.seed && state.owner);
-}
+// 密钥指纹 = 公钥串载荷（b64）前 8 位
+const pubFp = () => state.pub.replace(/^ed25519:/, '').slice(0, 8);
 
-// —— 登录门事件 ——
-$('lg-srv').textContent = location.origin + '/_api';
-$('lg-owner').addEventListener('input', () => { state.owner = $('lg-owner').value.trim(); localStorage.setItem('sr.owner', state.owner); renderLoginState(); });
-$('lg-keygen').addEventListener('click', () => {
-  const sp = alloc(32);
-  if (ex.sr_generate(sp) !== 0) return showMsg('密钥生成失败（垫片错误）');
-  const hex = toHex(mem().slice(sp, sp + 32));
-  unput(sp, 32);
-  localStorage.setItem('sr.seed', hex);
-  loadSeed();
-  showMsg('已生成新密钥并存入 localStorage（试验性存储）。请把公钥串交管理员登记后再登录。', 'ok');
-});
-$('lg-importkey').addEventListener('click', () => {
-  const hex = prompt('粘贴 64 位十六进制密钥种子（showroom keygen 产物 / 其他设备导出）：');
-  if (hex === null) return;
-  if (!/^[0-9a-fA-F]{64}$/.test(hex.trim())) return showMsg('seed 必须是 64 位十六进制（32 字节）');
-  localStorage.setItem('sr.seed', hex.trim().toLowerCase());
-  loadSeed();
-  showMsg('密钥已导入。请把公钥串交管理员登记后再登录。', 'ok');
-});
-$('lg-login').addEventListener('click', () => doLogin(false));
-async function doLogin(auto = false) {
-  if (!state.seed || !state.owner) return;
-  $('lg-fb').textContent = auto ? '正在自动验证密钥…' : '正在验证密钥（签名探测）…';
-  try {
-    await api('GET', '/_api/health');
-    enterApp();
-  } catch (e) {
-    $('lg-fb').textContent = '';
-    if (e.error === 'E_AUTH') {
-      showMsg(`登录失败 — 错误码 E_AUTH：${ERR_CN.E_AUTH}。公钥串：${state.pub}，请管理员登记（showroomctl owner-add）。`);
-    } else apiFail('登录（连接探测）', e);
+// —— 登录向导状态机（SPEC §10.1：线性三步，每步只出现当前控件）——
+const wiz = { step: 1, choice: 'new' };
+function gotoStep(n) {
+  wiz.step = n;
+  for (const s of [1, 2, 3]) {
+    $(`wz-p${s}`).classList.toggle('hidden', s !== n);
+    $(`wz-s${s}`).classList.toggle('on', s === n);
   }
 }
+function pickKeyChoice(v) {
+  wiz.choice = v;
+  for (const r of ['use', 'new', 'import']) $(`wz-r-${r}`).checked = r === v;
+  $('wz-import-box').classList.toggle('hidden', v !== 'import'); // 选「导入」才出现粘贴框
+}
+function setupStep2() { // 自动检测：本机已有种子 → 默认「使用已有」；否则默认「生成」
+  $('wz-ownerEcho').textContent = state.owner;
+  loadSeed();
+  const has = !!state.seed;
+  $('wz-l-use').classList.toggle('hidden', !has);
+  if (has) $('wz-fp').textContent = pubFp();
+  $('wz-new-text').textContent = has ? '重新生成新密钥' : '生成新密钥（本设备推荐）';
+  $('wz-seed').value = '';
+  pickKeyChoice(has ? 'use' : 'new');
+}
+function enterStep3(auto) {
+  gotoStep(3);
+  $('wz-v-owner').textContent = state.owner;
+  $('wz-v-fp').textContent = pubFp();
+  $('wz-pub').textContent = state.pub;
+  $('wz-pubbox').classList.add('hidden');
+  $('wz-v-fb').textContent = '';
+  if (auto) verifyLogin();
+}
+async function verifyLogin() { // 步骤 3：签名自测；E_AUTH → 公钥展示 + 手动重检循环
+  if (!state.seed || !state.owner) return;
+  $('wz-v-fb').textContent = '正在自动验证密钥（签名自测）…';
+  $('wz-recheck').disabled = true;
+  try {
+    await api('GET', '/_api/health');
+    enterApp(); // 通过 → 自动进入管理界面
+  } catch (e) {
+    $('wz-recheck').disabled = false;
+    if (e.error === 'E_AUTH') {
+      $('wz-v-fb').textContent = '未登记：密钥尚未被平台收录，公钥串见下方。';
+      $('wz-pubbox').classList.remove('hidden');
+    } else {
+      $('wz-v-fb').textContent = '';
+      apiFail('登录（连接探测）', e);
+    }
+  }
+}
+
+// —— 向导事件 ——
+$('lg-srv').textContent = location.origin + '/_api';
+$('wz-owner').addEventListener('keydown', (ev) => { if (ev.key === 'Enter') { ev.preventDefault(); $('wz-next1').click(); } });
+$('wz-next1').addEventListener('click', () => {
+  const v = $('wz-owner').value.trim();
+  if (!NAME_RE.test(v)) return showMsg(`账号「${v}」不合法（须匹配 ^[a-z0-9][a-z0-9-]{0,30}$）`);
+  state.owner = v;
+  setupStep2();
+  gotoStep(2);
+});
+for (const r of ['use', 'new', 'import']) $(`wz-r-${r}`).addEventListener('change', () => pickKeyChoice(r));
+$('wz-back2').addEventListener('click', () => gotoStep(1));
+$('wz-next2').addEventListener('click', () => {
+  if (wiz.choice === 'use') {
+    if (!state.seed) return showMsg('本机没有已有密钥，请选择生成或导入');
+  } else if (wiz.choice === 'new') {
+    const sp = alloc(32);
+    if (ex.sr_generate(sp) !== 0) { unput(sp, 32); return showMsg('密钥生成失败（垫片错误）'); }
+    const hex = toHex(mem().slice(sp, sp + 32));
+    unput(sp, 32);
+    localStorage.setItem('sr.seed', hex);
+    showMsg('已生成新密钥并存入 localStorage（试验性存储）。', 'ok');
+  } else { // 导入
+    const hex = $('wz-seed').value.trim().toLowerCase();
+    if (!/^[0-9a-f]{64}$/.test(hex)) return showMsg('seed 必须是 64 位十六进制（32 字节）');
+    localStorage.setItem('sr.seed', hex);
+    showMsg('密钥已导入本机（试验性存储）。', 'ok');
+  }
+  loadSeed();
+  localStorage.setItem('sr.owner', state.owner); // 账号与种子一起记忆：下次直达第 3 步
+  enterStep3(true);
+});
+$('wz-recheck').addEventListener('click', () => verifyLogin());
+$('wz-copypub').addEventListener('click', async () => {
+  try {
+    if (navigator.clipboard?.writeText) { await navigator.clipboard.writeText(state.pub); return showMsg('公钥串已复制。', 'ok'); }
+  } catch { /* 降级到 execCommand */ }
+  const ta = document.createElement('textarea');
+  ta.value = state.pub; document.body.appendChild(ta); ta.select();
+  try { document.execCommand('copy'); showMsg('公钥串已复制。', 'ok'); }
+  catch { showMsg('复制失败，请手动选中公钥串复制。'); }
+  ta.remove();
+});
 
 // —— SR-SIG1 签名请求（SPEC §1/§3：所有 /_api 一律签名）——
 function nonceHex() {
@@ -554,7 +664,8 @@ function logout() {
   clearInterval(logsTimer); logsTimer = null; logsTarget = null;
   $('app').classList.add('hidden');
   $('login').classList.remove('hidden');
-  $('lg-fb').textContent = '已退出登录（密钥仍保留在本机）。';
+  enterStep3(false); // 密钥仍在：回到第 3 步等待手动重检（不自动重进）
+  $('wz-v-fb').textContent = '已退出登录（密钥仍保留在本机）。点【重新检测】可重新进入。';
 }
 function buildApp() {
   $('app').append($('app-tpl').content.cloneNode(true));
@@ -577,7 +688,10 @@ function wireTabs() {
     if (!btn) return;
     for (const b of $('tabs').querySelectorAll('button')) b.classList.toggle('on', b === btn);
     for (const s of ['proj', 'db', 'status', 'help']) $(`tab-${s}`).classList.toggle('hidden', s !== btn.dataset.tab);
-    if (btn.dataset.tab === 'status' && !$('st-auto').checked) refreshStatus();
+    if (btn.dataset.tab === 'status') {
+      if (!$('st-auto').checked) refreshStatus();
+      ensureRedisDbs(); // Redis 浏览区：首次进入状态页时拉取库编号
+    }
     if (btn.dataset.tab === 'db') fillDbTargets();
   });
 }
@@ -1013,7 +1127,7 @@ async function onDbDump() {
     a.click();
     setTimeout(() => URL.revokeObjectURL(a.href), 60000);
     $('db-fb').textContent = `备份已下载：${t.project}_${t.slot}.dump（${total} 字节）`;
-    dbOut(j.out || `pg_dump -Fc 完成：信封 ${envelope.length} 字节 → 解密 ${total} 字节。`);
+    dbOut(`pg_dump -Fc 完成：信封 ${envelope.length} 字节 → 解密 ${total} 字节。`);
   } catch (e) { $('db-fb').textContent = ''; apiFail('备份下载', e); }
 }
 async function onDbRestore() {
@@ -1074,6 +1188,10 @@ function wireStatusTab() {
     if (!btn) return;
     pickLogs(btn.dataset.p, btn.dataset.s);
   });
+  // Redis 浏览（§10.3）
+  $('rd-refresh').addEventListener('click', refreshRedisKeys);
+  $('rd-q').addEventListener('keydown', (ev) => { if (ev.key === 'Enter') { ev.preventDefault(); refreshRedisKeys(); } });
+  $('rd-keys').addEventListener('change', onRedisKeyPick);
 }
 async function refreshStatus() {
   const tb = $('st-tbl').querySelector('tbody');
@@ -1106,10 +1224,63 @@ async function fetchLogs() {
   } catch (e) { $('st-logs').textContent = errText(e); }
 }
 
-// —— 初始化：有密钥则自动签名自测（失败停在登录门）——
+// —— Redis 浏览（SPEC §10.3：排障用，跨 owner 不隔离；错误一律走顶部条）——
+let rdDbsLoaded = false;
+async function ensureRedisDbs() {
+  if (rdDbsLoaded) return;
+  try {
+    const j = await api('GET', '/_api/redis-dbs');
+    const dbs = (j.dbs ?? []).map(Number).filter(Number.isInteger);
+    $('rd-db').innerHTML = [...(dbs.length ? dbs : Array.from({ length: 16 }, (_, i) => i))]
+      .map((n) => `<option value="${n}">${n}</option>`).join('');
+    rdDbsLoaded = true;
+  } catch (e) { apiFail('Redis 库编号获取', e); }
+}
+async function refreshRedisKeys() {
+  await ensureRedisDbs();
+  if (!rdDbsLoaded) return;
+  const db = $('rd-db').value;
+  const q = $('rd-q').value.trim();
+  $('rd-keys').innerHTML = '<option value="">加载中…</option>';
+  try {
+    const j = await api('GET', `/_api/redis-keys?db=${encodeURIComponent(db)}&q=${encodeURIComponent(q)}&limit=200`);
+    const keys = j.keys || [];
+    $('rd-keys').innerHTML = keys.length
+      ? keys.map((k) => `<option value="${esc(k)}">${esc(k)}</option>`).join('')
+      : '<option value="">（无匹配 key）</option>';
+    $('rd-count').textContent = `共 ${keys.length} 个 key（可能截断）`;
+    $('rd-meta').textContent = '（点击左侧 key 查看类型 / 剩余生存时间 / 值）';
+    $('rd-val').textContent = '（未选择 key）';
+  } catch (e) {
+    $('rd-keys').innerHTML = ''; $('rd-count').textContent = '';
+    apiFail('Redis key 列表获取', e);
+  }
+}
+async function onRedisKeyPick() {
+  const key = $('rd-keys').value;
+  if (!key) return;
+  const db = $('rd-db').value;
+  $('rd-meta').textContent = `${key}：读取中…`;
+  try {
+    const j = await api('GET', `/_api/redis-get?db=${encodeURIComponent(db)}&key=${encodeURIComponent(key)}`);
+    const ttl = Number(j.ttl);
+    const ttlCn = Number.isFinite(ttl) ? (ttl === -1 ? '永久（-1）' : `${ttl} ms`) : '未知';
+    let v = j.value;
+    if (Array.isArray(v)) v = v.join('\n');
+    else if (v != null && typeof v !== 'string') v = JSON.stringify(v, null, 2);
+    else v = v ?? '';
+    const cut = v.length >= 4096; // 服务端按 4KB 截断：达到阈值即提示
+    $('rd-meta').textContent = `${key} · 类型 ${j.type ?? '未知'} · 剩余生存 ${ttlCn}${cut ? ' · 值已截断（≥4KB）' : ''}`;
+    $('rd-val').textContent = v === '' ? '（空值）' : v;
+  } catch (e) { $('rd-meta').textContent = ''; apiFail('Redis 值读取', e); }
+}
+
+// —— 初始化（SPEC §10.1）：本机已有「账号+种子」→ 直达第 3 步自测；否则从第 1 步走完整向导 ——
 state.owner = localStorage.getItem('sr.owner') || '';
 loadSeed();
-if (state.seed && state.owner) doLogin(true);
+$('wz-owner').value = state.owner;
+if (state.seed && NAME_RE.test(state.owner)) enterStep3(true);
+else gotoStep(1);
 </script>
 </body>
 </html>
