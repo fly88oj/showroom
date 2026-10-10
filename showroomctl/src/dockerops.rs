@@ -56,6 +56,16 @@ pub fn run_fail_ok(cmd: &str, args: &[&str]) -> bool {
     Command::new(cmd).args(args).output().map(|o| o.status.success()).unwrap_or(false)
 }
 
+/// 容忍非零退出码取 stdout（admin status 用）：`systemctl is-active` 对 inactive/failed
+/// 服务退出码 3/非零，但 stdout 的 "inactive"/"failed" 本身就是答案；spawn 失败返回空串。
+pub fn run_tolerant(cmd: &str, args: &[&str]) -> String {
+    Command::new(cmd)
+        .args(args)
+        .output()
+        .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
+        .unwrap_or_default()
+}
+
 pub fn run_stdin(cmd: &str, args: &[&str], what: &str, stdin: &[u8]) -> R<String> {
     let mut child = Command::new(cmd)
         .args(args)

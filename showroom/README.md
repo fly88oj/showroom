@@ -19,9 +19,13 @@ showroom config --owner alice --server-lan http://your-host.example.com \
     --server-public http://your-frp-server.example.com:your-frp-port \
     --registry-user alice --registry-password <registry密码>  # 写 ~/.showroom/config.toml（0600）
 showroom push demo v1                                      # 推镜像：lan 可达走 registry，否则加密 import 通道
-showroom publish demo stable v1 --wait                     # 发布并等待 running，打印完整 URL
-showroom env demo stable                                   # 查看注入容器的连接信息（DB/Redis）
+showroom deploy demo v1                                    # 一键部署：push + publish --wait + 大字打印最终 URL（§12.1）
+showroom publish demo v1 --wait                            # 仅发布并等待 running，打印完整 URL（项目名可省略=自动随机）
+showroom env demo                                          # 查看注入容器的连接信息（DB/Redis）
 ```
+
+`deploy [项目] <tag> [--mem --cpu --container-port]`：任一步失败即停，报错标明已到第几步
+（「deploy: 第 N 步(push|publish) 失败」）；项目名省略时自动生成随机 8 位并醒目打印。
 
 日常命令：`ps`（列表，--json）、`url`、`logs [--tail N] [-f]`、`rollback`、`stop`、`start`、`rm --yes`、`doctor`（体检：密钥/配置/服务端/签名/docker）。
 全局 `--server lan|public` 可强制通道；默认自动探测（优先 lan，探不通回落 public）。

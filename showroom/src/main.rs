@@ -65,11 +65,24 @@ enum Cmd {
         #[arg(long, value_enum, default_value = "auto")]
         via: Via,
     },
-    /// 发布/更新展项（省略 project 时自动生成随机 8 位项目名）
+    /// 一键部署（SPEC §12.1）= push（--via auto 语义）+ publish --wait + 打印最终 URL；
+    /// 任一步失败即停，报错标明已到第几步
+    Deploy {
+        /// [项目名] tag：给 1 个参数视为 tag（自动生成随机 8 位项目名并醒目展示），2 个为 项目名 tag
+        #[arg(required = true, num_args = 1..=2)]
+        project_tag: Vec<String>,
+        #[arg(long)]
+        mem: Option<String>,
+        #[arg(long, value_parser = parse_cpu)]
+        cpu: Option<f64>,
+        #[arg(long)]
+        container_port: Option<u16>,
+    },
+    /// 发布/更新展项（一个参数=tag，项目名自动随机；两个=项目名 tag）
     Publish {
-        /// 展项项目名（省略时自动生成随机 8 位名并醒目展示）
-        project: Option<String>,
-        tag: String,
+        /// [项目名] tag：给 1 个参数视为 tag（自动生成随机 8 位项目名并醒目展示），2 个为 项目名 tag
+        #[arg(required = true, num_args = 1..=2)]
+        project_tag: Vec<String>,
         #[arg(long)]
         mem: Option<String>,
         /// CPU 配额（核数，如 0.5、2；与服务端 cpu 数字字段对齐）
@@ -137,6 +150,29 @@ fn main() {
     }
 }
 
+// ———— publish/deploy 共用的 positional 解析 ————
+
+/// positional（clap num_args=1..=2）→ (Option<project>, tag)：末位恒为 tag，前位（有则）为项目名。
+/// 单参数即「项目名省略=自动随机」（§11/§12.1）。
+fn split_project_tag(args: &[String]) -> (Option<String>, String) {
+    match args.split_last() {
+        Some((tag, head)) => (head.first().cloned(), tag.clone()),
+        None => (None, String::new()), // 不可达：clap required + num_args ≥1
+    }
+}
+
+/// None → 生成随机 8 位项目名并醒目打印；Some 原样返回。
+fn pick_project(project: Option<String>) -> String {
+    match project {
+        Some(p) => p,
+        None => {
+            let p = random_project();
+            println!("项目名：{p}（已自动生成，可显式指定）");
+            p
+        }
+    }
+}
+
 fn run(cli: &Cli) -> Result<(), String> {
     let cfg = Config::load()?;
     match &cli.cmd {
@@ -145,24 +181,16 @@ fn run(cli: &Cli) -> Result<(), String> {
             config_cmd(&cfg, owner, server_lan, server_public, registry_user, registry_password)
         }
         Cmd::Push { project, tag, via } => push(&cfg, cli.server, project, tag, *via),
-        Cmd::Publish { project, tag, mem, cpu, container_port, wait } => {
-            let project = match project {
-                Some(p) => p.clone(),
-                None => {
-                    let p = random_project();
-                    println!("项目名：{p}（已自动生成，可显式指定）");
-                    p
-                }
-            };            publish(
-                &cfg,
-                cli.server,
-                &project,
-                tag,
-                mem.as_deref(),
-                *cpu,
-                *container_port,
-                *wait,
-            )
+        Cmd::Deploy { project_tag, mem, cpu, container_port } => {
+            let (project, tag) = split_project_tag(project_tag);
+            let project = pick_project(project);
+            deploy(&cfg, cli.server, &project, &tag, mem.as_deref(), *cpu, *container_port)
+        }
+        Cmd::Publish { project_tag, mem, cpu, container_port, wait } => {
+            let (project, tag) = split_project_tag(project_tag);
+            let project = pick_project(project);
+            publish(&cfg, cli.server, &project, &tag, mem.as_deref(), *cpu, *container_port, *wait)?;
+            Ok(())
         }
         Cmd::Ps { json } => ps(&cfg, cli.server, *json),
         Cmd::Url { project } => url_cmd(&cfg, cli.server, project),
@@ -434,7 +462,7 @@ fn publish(
     cpu: Option<f64>,
     container_port: Option<u16>,
     wait: bool,
-) -> Result<(), String> {
+) -> Result<String, String> {
     check_project(project)?;
     check_tag(tag)?;
     let api = Api::connect(cfg, force)?;
@@ -450,11 +478,16 @@ fn publish(
     }
     let v = api
         .signed_post_json("/_api/publish", &body)?;
-    if let Some(u) = v["url"].as_str().filter(|s| !s.is_empty()) {
-        println!("发布成功: {u}");
-    } else {
-        println!("发布成功");
-    }
+    let url = match v["url"].as_str().filter(|s| !s.is_empty()) {
+        Some(u) => {
+            println!("发布成功: {u}");
+            u.to_string()
+        }
+        None => {
+            println!("发布成功");
+            String::new()
+        }
+    };
     if wait {
         let deadline = Instant::now() + Duration::from_secs(90);
         let mut last = String::new();
@@ -463,8 +496,9 @@ fn publish(
                 .signed_get("/_api/projects")?;
             match project_status(&projects, project) {
                 Some(st) if st == "running" => {
-                    println!("{}", api::project_url(&api.base, project));
-                    return Ok(());
+                    let final_url = api::project_url(&api.base, project);
+                    println!("{final_url}");
+                    return Ok(final_url);
                 }
                 Some(st) => {
                     if st != last {
@@ -480,7 +514,42 @@ fn publish(
             std::thread::sleep(Duration::from_secs(2));
         }
     }
-    Ok(())
+    Ok(url)
+}
+
+// ———— deploy（SPEC §12.1：push + publish --wait + URL 大字，任一步失败即停）————
+
+/// 失败步骤报错前缀：「deploy: 第 N 步(name) 失败：原始错误」（部署者据此知道停在哪步）。
+fn deploy_err(step: u8, name: &str, e: &str) -> String {
+    format!("deploy: 第 {step} 步({name}) 失败：{e}")
+}
+
+/// 最终 URL 大字横幅（成功收尾，醒目展示）。
+fn banner(url: &str) -> String {
+    let bar = "═".repeat(url.chars().count().max(20) + 4);
+    format!("\n{bar}\n  部署成功\n  {url}\n{bar}")
+}
+
+fn deploy(
+    cfg: &Config,
+    force: Option<Which>,
+    project: &str,
+    tag: &str,
+    mem: Option<&str>,
+    cpu: Option<f64>,
+    container_port: Option<u16>,
+) -> Result<(), String> {
+    // 复用 push/publish 现有函数（不复制逻辑）；push 内部自带 --via auto 的探测与回落
+    if let Err(e) = push(cfg, force, project, tag, Via::Auto) {
+        return Err(deploy_err(1, "push", &e));
+    }
+    match publish(cfg, force, project, tag, mem, cpu, container_port, true) {
+        Ok(url) => {
+            println!("{}", banner(&url));
+            Ok(())
+        }
+        Err(e) => Err(deploy_err(2, "publish", &e)),
+    }
 }
 
 fn project_status(projects: &Value, project: &str) -> Option<String> {
@@ -719,5 +788,74 @@ mod tests {
         }
         let cpu: Option<f64> = serde_json::from_value(json!(parse_cpu("2").unwrap())).unwrap();
         assert_eq!(cpu, Some(2.0));
+    }
+
+    // §12.1 deploy 参数解析：项目可省略（=None 自动随机）；flags 与 publish 对齐。
+    // 注：publish/deploy 用单一 1..=2 positional + split_project_tag——可选位在必选位前的
+    // 双 positional 会触发 clap debug 断言（既单有 Publish 的隐性坑，本次一并修正）。
+    #[test]
+    fn deploy_arg_parsing() {
+        // 仅 tag → project_tag=[tag]（项目自动随机）
+        let c = Cli::try_parse_from(["showroom", "deploy", "v1"]).unwrap();
+        match &c.cmd {
+            Cmd::Deploy { project_tag, mem, cpu, container_port } => {
+                assert_eq!(project_tag, &["v1".to_string()]);
+                assert_eq!((mem.is_none(), cpu.is_none(), container_port.is_none()), (true, true, true));
+            }
+            _ => panic!("expected Deploy"),
+        }
+        // 项目 + tag + 全量 flags
+        let c = Cli::try_parse_from([
+            "showroom", "deploy", "demo", "v2", "--mem", "512m", "--cpu", "0.5",
+            "--container-port", "3000",
+        ])
+        .unwrap();
+        match &c.cmd {
+            Cmd::Deploy { project_tag, mem, cpu, container_port } => {
+                assert_eq!(project_tag, &["demo".to_string(), "v2".to_string()]);
+                assert_eq!(mem.as_deref(), Some("512m"));
+                assert_eq!(*cpu, Some(0.5));
+                assert_eq!(*container_port, Some(3000));
+            }
+            _ => panic!("expected Deploy"),
+        }
+        // publish 同形：单参数 = tag
+        let c = Cli::try_parse_from(["showroom", "publish", "v9", "--wait"]).unwrap();
+        match &c.cmd {
+            Cmd::Publish { project_tag, wait, .. } => {
+                assert_eq!(project_tag, &["v9".to_string()]);
+                assert!(*wait);
+            }
+            _ => panic!("expected Publish"),
+        }
+        // 缺参 / 超量 / 非法 cpu / 非 u16 端口 → 解析失败
+        assert!(Cli::try_parse_from(["showroom", "deploy"]).is_err());
+        assert!(Cli::try_parse_from(["showroom", "deploy", "a", "b", "c"]).is_err());
+        assert!(Cli::try_parse_from(["showroom", "deploy", "demo", "v1", "--cpu", "-1"]).is_err());
+        assert!(Cli::try_parse_from(["showroom", "deploy", "demo", "v1", "--container-port", "x"]).is_err());
+    }
+
+    // positional → (project, tag) 拆分
+    #[test]
+    fn split_project_tag_rules() {
+        let s = |v: &[&str]| v.iter().map(|x| x.to_string()).collect::<Vec<_>>();
+        assert_eq!(
+            split_project_tag(&s(&["v1"])),
+            (None, "v1".to_string()),
+            "单参数 = tag，项目自动随机"
+        );
+        assert_eq!(split_project_tag(&s(&["demo", "v1"])), (Some("demo".into()), "v1".into()));
+    }
+
+    // §12.1 步骤报错格式 + URL 横幅
+    #[test]
+    fn deploy_error_and_banner() {
+        assert_eq!(deploy_err(1, "push", "docker push 失败"), "deploy: 第 1 步(push) 失败：docker push 失败");
+        assert_eq!(deploy_err(2, "publish", "E_NOTFOUND: xx"), "deploy: 第 2 步(publish) 失败：E_NOTFOUND: xx");
+        let b = banner("http://h/demo/");
+        assert!(b.contains("部署成功"));
+        assert!(b.contains("http://h/demo/"));
+        assert!(b.trim_start().starts_with('═') && b.trim_end().ends_with('═'), "上下双线包夹: {b}");
+        assert!(banner("").lines().count() == banner("http://h/demo/").lines().count(), "空 URL 同样成形");
     }
 }

@@ -5,7 +5,7 @@ use std::collections::BTreeMap;
 use std::fs;
 use std::path::{Path, PathBuf};
 
-use serde_json::Value;
+use serde_json::{json, Value};
 
 use crate::dockerops;
 use crate::publish::{self, PublishOpts, PublishOut};
@@ -439,10 +439,18 @@ pub fn import_check(image_id: &str) -> bool {
     dockerops::run_fail_ok("docker", &["image", "inspect", image_id])
 }
 
-// —— owner 管理 ——
+// —— owner 管理（CLI 与 /_api/admin/* 端点共用；owner/kid 均过名字校验防路径拼接）——
 
-/// 登记公钥（kid=sha256(pubkey) 前 8 hex）+ 生成 registry 密码（bcrypt cost 10 进 htpasswd，明文 0600 进 reg.cred）。
-pub fn owner_add(root: &Path, name: &str, pubkey: &str, replace: bool) -> R<String> {
+/// owner_add 产物：kid + registry 明文密码（密码只此一次返回给远程发卡方；本机 reg.cred 常驻）。
+#[derive(Debug)]
+pub struct OwnerAdded {
+    pub kid: String,
+    pub password: String,
+}
+
+/// 登记发布者公钥（kid=sha256(pubkey) 前 8 hex）+ 生成 registry 密码（bcrypt cost 10 进
+/// htpasswd，明文 0600 进 reg.cred）；admin=true 时同时落 `<kid>.admin` 空标记（SPEC §12.2）。
+pub fn owner_add(root: &Path, name: &str, pubkey: &str, admin: bool, replace: bool) -> R<OwnerAdded> {
     state::check_name("owner", name)?;
     let vk = showroom_common::OwnerKey::from_pub_string(pubkey.trim())
         .map_err(|e| ApiError::new("E_NAME", format!("bad pubkey: {e}")))?;
@@ -453,6 +461,9 @@ pub fn owner_add(root: &Path, name: &str, pubkey: &str, replace: bool) -> R<Stri
     }
     fs::create_dir_all(&dir)?;
     fs::write(dir.join(format!("{kid}.pub")), format!("{}\n", pubkey.trim()))?;
+    if admin {
+        fs::write(state::admin_marker_path(root, name, &kid), "")?;
+    }
     let pw = state::rand_hex(16);
     let hash = bcrypt::hash(&pw, 10).map_err(|e| ApiError::state(format!("bcrypt: {e}")))?;
     state::upsert_htpasswd(root, name, &hash)?;
@@ -460,23 +471,154 @@ pub fn owner_add(root: &Path, name: &str, pubkey: &str, replace: bool) -> R<Stri
         &root.join(format!("state/owners/{name}/reg.cred")),
         &format!("{name}:{pw}\n"),
     )?;
-    Ok(kid)
+    Ok(OwnerAdded { kid, password: pw })
 }
 
+/// 删除发布者某把公钥；`.admin` 标记随钥匙一并清（无钥匙的孤儿标记无意义）。
 pub fn owner_key_rm(root: &Path, owner: &str, kid: &str) -> R<()> {
+    state::check_name("owner", owner)?;
+    if !state::valid_kid(kid) {
+        return Err(ApiError::new("E_NAME", format!("bad kid '{kid}'")));
+    }
     let p = state::tokens_dir(root, owner).join(format!("{kid}.pub"));
     if !p.exists() {
         return Err(ApiError::new("E_NOTFOUND", format!("no kid '{kid}' for owner '{owner}'")));
     }
-    Ok(fs::remove_file(p)?)
+    fs::remove_file(p)?;
+    let _ = fs::remove_file(state::admin_marker_path(root, owner, kid));
+    Ok(())
+}
+
+/// 授权/收权管理员（SPEC §12.2）：钥匙须存在；收权幂等（标记不存在也 Ok）。
+pub fn key_set_admin(root: &Path, owner: &str, kid: &str, admin: bool) -> R<()> {
+    state::check_name("owner", owner)?;
+    if !state::valid_kid(kid) {
+        return Err(ApiError::new("E_NAME", format!("bad kid '{kid}'")));
+    }
+    let dir = state::tokens_dir(root, owner);
+    if !dir.join(format!("{kid}.pub")).exists() {
+        return Err(ApiError::new("E_NOTFOUND", format!("no kid '{kid}' for owner '{owner}'")));
+    }
+    let marker = state::admin_marker_path(root, owner, kid);
+    if admin {
+        fs::write(&marker, "")?;
+    } else {
+        let _ = fs::remove_file(&marker);
+    }
+    Ok(())
+}
+
+/// 该钥匙是否管理员（标记文件存在即真；owner/kid 非法恒假——serve 只喂自家派生的值）。
+pub fn key_is_admin(root: &Path, owner: &str, kid: &str) -> bool {
+    state::check_name("owner", owner).is_ok() && state::admin_marker_path(root, owner, kid).exists()
+}
+
+/// owner_list 一行：账号 / 钥匙（kid+admin+登记时间=.pub mtime）/ 项目数（conf 归属计数）。
+#[derive(serde::Serialize)]
+pub struct OwnerKeyInfo {
+    pub kid: String,
+    pub admin: bool,
+    pub since: u64,
+}
+
+#[derive(serde::Serialize)]
+pub struct OwnerInfo {
+    pub owner: String,
+    pub keys: Vec<OwnerKeyInfo>,
+    pub projects: usize,
+}
+
+/// 全部账号聚合（GET /_api/admin/owners 与 CLI admin owners 共用）。
+/// 钥匙 kid 由公钥内容派生（与验签侧一致）；坏 .pub 跳过；owner 目录即账号。
+pub fn owner_list(root: &Path) -> Vec<OwnerInfo> {
+    let projects: BTreeMap<String, usize> = state::all_confs(root).into_iter().fold(
+        BTreeMap::new(),
+        |mut m, (_, c)| {
+            *m.entry(c.owner).or_default() += 1;
+            m
+        },
+    );
+    let mut out = vec![];
+    if let Ok(rd) = fs::read_dir(root.join("state/tokens")) {
+        for e in rd.filter_map(|e| e.ok()) {
+            let path = e.path();
+            if !path.is_dir() {
+                continue;
+            }
+            let Some(owner) = path.file_name().and_then(|o| o.to_str()).map(str::to_string) else {
+                continue;
+            };
+            let keys = state::owner_keys_with_kid(root, &owner)
+                .into_iter()
+                .map(|(kid, _)| OwnerKeyInfo {
+                    admin: key_is_admin(root, &owner, &kid),
+                    since: state::file_mtime(&path.join(format!("{kid}.pub"))),
+                    kid,
+                })
+                .collect();
+            out.push(OwnerInfo { projects: projects.get(&owner).copied().unwrap_or(0), owner, keys });
+        }
+    }
+    out.sort_by(|a, b| a.owner.cmp(&b.owner));
+    out
 }
 
 /// 吊销：registry 登录失效 + 全部公钥失效；已发布的展项不动。
 pub fn owner_revoke(root: &Path, owner: &str) -> R<()> {
+    state::check_name("owner", owner)?;
     state::remove_htpasswd_user(root, owner)?;
     let _ = fs::remove_dir_all(state::tokens_dir(root, owner));
     let _ = fs::remove_dir_all(root.join(format!("state/owners/{owner}")));
     Ok(())
+}
+
+// —— admin status（SPEC §12.2）：systemctl/df/docker 子进程 + state 纯解析拼装 ——
+
+/// 平台依赖的 systemd 服务（is-active 四件：容器引擎/运行时/边缘/控制面）。
+pub const STATUS_SERVICES: [&str; 4] = ["docker", "containerd", "caddy", "showroom-api"];
+
+/// GET /_api/admin/status 数据源（全部 subprocess，serve 经 blk() 调用）：
+/// 服务 systemctl is-active（非零退出仍取 stdout，"inactive" 也是答案）；磁盘 df -B1
+/// --output=size,used（coreutils 无 total 字段，size 同义；根分区 + @showroom 子卷各一行）；
+/// 内存 /proc/meminfo MemAvailable；容器 docker ps -a；timers systemctl list-timers（'showroom-*'，
+/// 只列平台自身，不外泄宿主无关单元）。
+pub fn admin_status(root: &Path) -> R<Value> {
+    let mut services = serde_json::Map::new();
+    for svc in STATUS_SERVICES {
+        let st = dockerops::run_tolerant("systemctl", &["is-active", svc]);
+        services.insert(svc.into(), Value::String(if st.is_empty() { "unknown".into() } else { st }));
+    }
+    let mut disk = serde_json::Map::new();
+    let paths = [("root", "/"), ("showroom", &root.to_string_lossy())];
+    for (label, path) in paths {
+        let entry = match dockerops::run("df", &["-B1", "--output=size,used", path])
+            .ok()
+            .and_then(|out| state::parse_df_bytes(&out))
+        {
+            Some((total, used)) => json!({"total": total, "used": used}),
+            None => Value::Null,
+        };
+        disk.insert(label.into(), entry);
+    }
+    let mem_mb = fs::read_to_string("/proc/meminfo")
+        .ok()
+        .and_then(|t| state::parse_meminfo_available_kb(&t))
+        .map(|kb| kb / 1024);
+    let containers = dockerops::run("docker", &["ps", "-a", "--format", "{{.Names}}\t{{.State}}"])
+        .map(|out| state::parse_container_lines(&out).into_iter()
+            .map(|(name, status)| json!({"name": name, "status": status}))
+            .collect::<Vec<_>>())
+        .unwrap_or_default();
+    let timers = dockerops::run_tolerant("systemctl", &["list-timers", "--no-legend", "showroom-*"]);
+    let timers: Vec<_> = state::parse_list_timers(&timers)
+        .into_iter()
+        .map(|(name, next)| json!({"name": name, "next": next}))
+        .collect();
+    Ok(json!({
+        "services": services, "disk": disk,
+        "mem": {"available_mb": mem_mb},
+        "containers": containers, "timers": timers,
+    }))
 }
 
 /// 平台 RSA 对（首次生成；已存在则不覆盖）。serve 启动时缺失会自动调用。
@@ -495,6 +637,27 @@ pub fn init_keys(root: &Path) -> R<PathBuf> {
 mod tests {
     use super::*;
 
+    fn troot(name: &str) -> PathBuf {
+        let d = std::env::temp_dir().join(format!("srctl-ops-test-{}-{name}", std::process::id()));
+        let _ = fs::remove_dir_all(&d);
+        fs::create_dir_all(&d).unwrap();
+        d
+    }
+
+    /// 直接落一对钥匙文件（免 bcrypt，单测用）；返回 kid。
+    fn put_key(root: &Path, owner: &str, admin: bool) -> String {
+        let k = showroom_common::OwnerKey::generate();
+        let vk = showroom_common::OwnerKey::from_pub_string(&k.pub_string()).unwrap();
+        let kid = state::kid_of(&vk);
+        let dir = state::tokens_dir(root, owner);
+        fs::create_dir_all(&dir).unwrap();
+        fs::write(dir.join(format!("{kid}.pub")), k.pub_string()).unwrap();
+        if admin {
+            fs::write(state::admin_marker_path(root, owner, &kid), "").unwrap();
+        }
+        kid
+    }
+
     // Redis 内核的白名单拒绝路径（校验先于 docker 调用，不碰容器）：
     // q / key 出白名单 → E_NAME；合法入参不在此测（需 sr-redis，e2e 域）
     #[test]
@@ -507,5 +670,118 @@ mod tests {
             let e = redis_get(0, bad_k).unwrap_err();
             assert_eq!(e.code, "E_NAME", "{bad_k:?}: {}", e.msg);
         }
+    }
+
+    // admin 标记存在性判定：有 `<kid>.admin` 才是管理员钥匙；普通钥匙/他人 owner/非法名恒假
+    #[test]
+    fn admin_marker_existence() {
+        let root = troot("is-admin");
+        let admin_kid = put_key(&root, "alice", true);
+        let plain_kid = put_key(&root, "alice", false);
+        assert!(key_is_admin(&root, "alice", &admin_kid));
+        assert!(!key_is_admin(&root, "alice", &plain_kid));
+        assert!(!key_is_admin(&root, "alice", "ffffffff"), "不存在的 kid 恒假");
+        assert!(!key_is_admin(&root, "bob", &admin_kid), "他人 owner 恒假");
+        assert!(!key_is_admin(&root, "Bad Name", &admin_kid), "非法 owner 名恒假");
+        assert!(!key_is_admin(&root, "alice", "../x"), "非法 kid 恒假（防穿越探测）");
+    }
+
+    // owner_add（上收公共函数）：admin 标记、htpasswd/reg.cred、密码只此一次返回
+    #[test]
+    fn owner_add_with_admin_flag() {
+        let root = troot("owner-add");
+        let k = showroom_common::OwnerKey::generate();
+
+        let added = owner_add(&root, "root", &k.pub_string(), true, false).unwrap();
+        assert_eq!(added.kid.len(), 8);
+        assert!(!added.password.is_empty());
+        // 标记 + 公钥落位
+        assert!(state::admin_marker_path(&root, "root", &added.kid).exists());
+        assert!(state::tokens_dir(&root, "root").join(format!("{}.pub", added.kid)).exists());
+        // 密码与 reg.cred 一致；htpasswd 有 bcrypt 行
+        let cred = fs::read_to_string(root.join("state/owners/root/reg.cred")).unwrap();
+        assert_eq!(cred, format!("root:{}\n", added.password));
+        let htpasswd = fs::read_to_string(state::htpasswd_path(&root)).unwrap();
+        assert!(htpasswd.starts_with("root:$2"), "bcrypt 行: {htpasswd}");
+
+        // 非 admin：无标记
+        let k2 = showroom_common::OwnerKey::generate();
+        let added2 = owner_add(&root, "bob", &k2.pub_string(), false, false).unwrap();
+        assert!(!state::admin_marker_path(&root, "bob", &added2.kid).exists());
+
+        // 坏 owner 名 / 坏公钥
+        assert_eq!(owner_add(&root, "Bad", &k2.pub_string(), false, false).unwrap_err().code, "E_NAME");
+        assert_eq!(owner_add(&root, "ok", "junk", false, false).unwrap_err().code, "E_NAME");
+    }
+
+    // key_set_admin：授权/收权幂等；钥匙不存在 E_NOTFOUND；kid 非法 E_NAME
+    #[test]
+    fn key_set_admin_grant_revoke() {
+        let root = troot("set-admin");
+        let kid = put_key(&root, "alice", false);
+
+        assert!(!key_is_admin(&root, "alice", &kid));
+        key_set_admin(&root, "alice", &kid, true).unwrap();
+        assert!(key_is_admin(&root, "alice", &kid));
+        key_set_admin(&root, "alice", &kid, true).unwrap(); // 重复授权幂等
+        assert!(key_is_admin(&root, "alice", &kid));
+
+        key_set_admin(&root, "alice", &kid, false).unwrap();
+        assert!(!key_is_admin(&root, "alice", &kid));
+        key_set_admin(&root, "alice", &kid, false).unwrap(); // 重复收权幂等
+
+        assert_eq!(key_set_admin(&root, "alice", "ffffffff", true).unwrap_err().code, "E_NOTFOUND");
+        assert_eq!(key_set_admin(&root, "alice", "../evil", true).unwrap_err().code, "E_NAME");
+        assert_eq!(key_set_admin(&root, "Bad", &kid, true).unwrap_err().code, "E_NAME");
+    }
+
+    // key_rm：公钥+admin 标记双清；不存在 E_NOTFOUND；kid 非法 E_NAME
+    #[test]
+    fn key_rm_clears_both_files() {
+        let root = troot("key-rm");
+        let kid = put_key(&root, "alice", true);
+        let plain = put_key(&root, "alice", false);
+
+        owner_key_rm(&root, "alice", &kid).unwrap();
+        assert!(!state::tokens_dir(&root, "alice").join(format!("{kid}.pub")).exists());
+        assert!(!state::admin_marker_path(&root, "alice", &kid).exists(), "标记随钥匙清");
+
+        assert_eq!(owner_key_rm(&root, "alice", &kid).unwrap_err().code, "E_NOTFOUND");
+        assert_eq!(owner_key_rm(&root, "alice", "../x").unwrap_err().code, "E_NAME");
+        assert_eq!(owner_key_rm(&root, "Bad", &plain).unwrap_err().code, "E_NAME");
+    }
+
+    // owner_list 聚合：账号/钥匙（kid+admin+since）/项目数；无钥匙账号也列出；字典序
+    #[test]
+    fn owner_list_aggregation() {
+        let root = troot("list");
+        let a_admin = put_key(&root, "alice", true);
+        let a_plain = put_key(&root, "alice", false);
+        put_key(&root, "bob", false);
+        fs::create_dir_all(state::tokens_dir(&root, "empty")).unwrap(); // 钥匙删光的账号
+        // 两个项目归 alice、一个归 bob（owner_list 只读 conf，不碰 docker）
+        for (p, owner) in [("demo1", "alice"), ("demo2", "alice"), ("demo3", "bob")] {
+            let mut c = crate::state::Conf {
+                owner: owner.into(), tag: "v1".into(), port: 8100, cport: 8080,
+                mem: "256m".into(), cpu: 1.0, redisdb: 0, updated: 1,
+                stopped: false, legacyslot: None,
+            };
+            c.owner = owner.into();
+            c.save(&root, p).unwrap();
+        }
+
+        let l = owner_list(&root);
+        assert_eq!(l.iter().map(|o| o.owner.as_str()).collect::<Vec<_>>(), ["alice", "bob", "empty"]);
+        let alice = &l[0];
+        assert_eq!(alice.projects, 2);
+        assert_eq!(alice.keys.len(), 2);
+        let admin_key = alice.keys.iter().find(|k| k.kid == a_admin).unwrap();
+        assert!(admin_key.admin);
+        assert!(admin_key.since > 0, "since=登记 mtime");
+        let plain_key = alice.keys.iter().find(|k| k.kid == a_plain).unwrap();
+        assert!(!plain_key.admin);
+        assert_eq!(l[1].projects, 1);
+        assert!(l[2].keys.is_empty(), "无钥匙账号仍列出（projects=0）");
+        assert_eq!(l[2].projects, 0);
     }
 }

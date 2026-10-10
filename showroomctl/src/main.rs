@@ -29,18 +29,35 @@ struct Cli {
 enum Cmd {
     /// 启动 HTTP 控制面（127.0.0.1:8090；所有 /_api 端点强制 SR-SIG1 签名）
     Serve,
-    /// 登记发布者公钥 + 生成 registry 凭据（bcrypt 入 registry.htpasswd，明文 0600 入 reg.cred）
+    /// 登记发布者公钥 + 生成 registry 凭据（bcrypt 入 registry.htpasswd，明文 0600 入 reg.cred）；
+    /// --admin 同时授管理员钥匙（SPEC §12.2，首个管理员引导用）
     OwnerAdd {
         name: String,
+        /// 发布者公钥串（showroom keygen 打印的那串；省略时给出提示）
         #[arg(long)]
-        pubkey: String,
+        pubkey: Option<String>,
         #[arg(long)]
         replace_key: bool,
+        /// 授予管理员钥匙（可远程授权/发卡）
+        #[arg(long)]
+        admin: bool,
     },
-    /// 删除发布者某把公钥
+    /// 删除发布者某把公钥（admin 标记随钥匙一并清）
     OwnerKeyRm { owner: String, kid: String },
+    /// 授/收管理员权限（--admin true|false，SPEC §12.2）
+    KeyAdmin {
+        owner: String,
+        kid: String,
+        #[arg(long, action = clap::ArgAction::Set)]
+        admin: bool,
+    },
     /// 吊销发布者（auth 与 registry 登录全失效，已发布展项不动）
     OwnerRevoke { owner: String },
+    /// 管理员视图（本机调试用，幂等）：owners=账号/钥匙清单，status=主机状态面板
+    Admin {
+        #[command(subcommand)]
+        cmd: AdminCmd,
+    },
     /// 发布/滚动更新（管理员直发通道，serve 的 /_api/publish 复用同一内核）
     Publish {
         owner: String,
@@ -91,6 +108,14 @@ enum Cmd {
     InitKeys,
 }
 
+#[derive(Subcommand)]
+enum AdminCmd {
+    /// 账号 / 钥匙（kid+admin+登记时间）/ 项目数清单
+    Owners,
+    /// 服务 / 磁盘 / 内存 / 容器 / timers 状态面板（GET /_api/admin/status 同源）
+    Status,
+}
+
 fn main() {
     let cli = Cli::parse();
     if let Err(e) = dispatch(&cli) {
@@ -115,14 +140,19 @@ fn dispatch(cli: &Cli) -> R<()> {
             .map_err(|e| ApiError::state(e.to_string()))?
             .block_on(serve::run(root)),
 
-        Cmd::OwnerAdd { name, pubkey, replace_key } => {
-            let kid = ops::owner_add(&root, name, pubkey, *replace_key)?;
+        Cmd::OwnerAdd { name, pubkey, replace_key, admin } => {
+            let pubkey = pubkey.as_deref().ok_or_else(|| {
+                ApiError::new("E_NAME", format!("缺少 --pubkey <公钥串>（发布者跑 showroom keygen 打印的那串；示例：showroomctl owner-add {name} --pubkey <串> --admin）"))
+            })?;
+            let added = ops::owner_add(&root, name, pubkey, *admin, *replace_key)?;
             out(
                 j,
                 &format!(
-                    "owner {name} added: kid={kid}; registry creds in state/owners/{name}/reg.cred (user {name})"
+                    "owner {name} added: kid={}{}; registry creds in state/owners/{name}/reg.cred (user {name})",
+                    added.kid,
+                    if *admin { " [ADMIN]" } else { "" }
                 ),
-                json!({"ok": true, "owner": name, "kid": kid}),
+                json!({"ok": true, "owner": name, "kid": added.kid, "admin": admin}),
             );
             Ok(())
         }
@@ -131,11 +161,66 @@ fn dispatch(cli: &Cli) -> R<()> {
             out(j, &format!("removed {owner}/{kid}"), json!({"ok": true}));
             Ok(())
         }
+        Cmd::KeyAdmin { owner, kid, admin } => {
+            ops::key_set_admin(&root, owner, kid, *admin)?;
+            out(
+                j,
+                &format!("{} admin: {owner}/{kid}", if *admin { "granted" } else { "revoked" }),
+                json!({"ok": true, "owner": owner, "kid": kid, "admin": admin}),
+            );
+            Ok(())
+        }
         Cmd::OwnerRevoke { owner } => {
             ops::owner_revoke(&root, owner)?;
             out(j, &format!("owner {owner} revoked"), json!({"ok": true}));
             Ok(())
         }
+        Cmd::Admin { cmd } => match cmd {
+            AdminCmd::Owners => {
+                let owners = ops::owner_list(&root);
+                if j {
+                    println!("{}", json!({"owners": owners}));
+                } else {
+                    for o in &owners {
+                        println!("{:<16} projects={:<3} keys={}", o.owner, o.projects, o.keys.len());
+                        for k in &o.keys {
+                            println!("  {:<10} {} since={}", k.kid, if k.admin { "[ADMIN]" } else { "      " }, k.since);
+                        }
+                    }
+                }
+                Ok(())
+            }
+            AdminCmd::Status => {
+                let v = ops::admin_status(&root)?;
+                if j {
+                    println!("{v}");
+                } else {
+                    let services = ops::STATUS_SERVICES
+                        .iter()
+                        .map(|s| format!("{s}={}", v["services"][s].as_str().unwrap_or("?")))
+                        .collect::<Vec<_>>()
+                        .join(" ");
+                    println!("services: {services}");
+                    for label in ["root", "showroom"] {
+                        let d = &v["disk"][label];
+                        println!("disk {label}: total={} used={}", d["total"], d["used"]);
+                    }
+                    println!("mem: available_mb={}", v["mem"]["available_mb"]);
+                    let gs = |v: &serde_json::Value, k: &str| v[k].as_str().unwrap_or("?").to_string();
+                    let cons: Vec<String> = v["containers"]
+                        .as_array()
+                        .map(|a| a.iter().map(|c| format!("{}({})", gs(c, "name"), gs(c, "status"))).collect())
+                        .unwrap_or_default();
+                    println!("containers: {}", if cons.is_empty() { "-".to_string() } else { cons.join(" ") });
+                    if let Some(ts) = v["timers"].as_array() {
+                        for t in ts {
+                            println!("timer: {} next={}", gs(t, "name"), gs(t, "next"));
+                        }
+                    }
+                }
+                Ok(())
+            }
+        },
 
         Cmd::Publish { owner, project, tag, mem, cpu, container_port } => {
             let o = publish::publish(

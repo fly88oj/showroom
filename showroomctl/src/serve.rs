@@ -115,7 +115,7 @@ async fn dispatch(
     collected: &Collected,
 ) -> Result<Response, ApiError> {
     // 一切端点先验签（含未知路径/方法；SPEC §3 零信息暴露）
-    let owner = auth(s, method.as_str(), &uri_str(uri), sha, headers).await?;
+    let Verified { owner, kid } = auth(s, method.as_str(), &uri_str(uri), sha, headers).await?;
     if matches!(collected, Collected::Overflow) {
         return Err(ApiError::new("E_QUOTA", "body exceeds limit (json 1MB / import IMPORT_MAX_GB)"));
     }
@@ -157,6 +157,64 @@ async fn dispatch(
     }
     let r: Result<Json<serde_json::Value>, ApiError> = match (method.as_str(), path, collected) {
         ("GET", "/_api/health", _) => Ok(Json(json!({"ok": true}))),
+
+        // —— 身份（SPEC §12.2）：whoami 用当前请求命中的 kid 判定 admin ——
+        ("GET", "/_api/whoami", _) => Ok(Json(json!({
+            "owner": owner, "kid": kid,
+            "admin": ops::key_is_admin(&s.root, &owner, &kid),
+        }))),
+
+        // —— 管理组（SPEC §12.2）：统一验签后再过 admin_guard，非管理员与 E_AUTH 同 404 ——
+
+        ("GET", "/_api/admin/owners", _) => {
+            admin_guard(&s, &owner, &kid)?;
+            let root = s.root.clone();
+            let owners = blk(move || Ok(ops::owner_list(&root))).await?;
+            Ok(Json(json!({"owners": owners})))
+        }
+
+        ("POST", "/_api/admin/owner-add", Collected::Mem(b)) => {
+            admin_guard(&s, &owner, &kid)?; // 先守卫后解析 body：非管理员不因 body 畸形泄露 E_NAME/E_AUTH 差异
+            let req: AdminOwnerAddReq = jbody(b)?;
+            let root = s.root.clone();
+            let added = blk(move || {
+                ops::owner_add(&root, &req.owner, &req.pubkey, req.admin.unwrap_or(false), false)
+            })
+            .await?;
+            // 密码只此一次返回（远程发卡；本机 reg.cred 常驻，不再可查）
+            Ok(Json(json!({"ok": true, "kid": added.kid, "registry_password": added.password})))
+        }
+
+        ("POST", "/_api/admin/owner-revoke", Collected::Mem(b)) => {
+            admin_guard(&s, &owner, &kid)?; // 先守卫后解析 body：非管理员不因 body 畸形泄露 E_NAME/E_AUTH 差异
+            let req: AdminOwnerReq = jbody(b)?;
+            let root = s.root.clone();
+            blk(move || ops::owner_revoke(&root, &req.owner)).await?;
+            Ok(Json(json!({"ok": true})))
+        }
+
+        ("POST", "/_api/admin/key-rm", Collected::Mem(b)) => {
+            admin_guard(&s, &owner, &kid)?; // 先守卫后解析 body：非管理员不因 body 畸形泄露 E_NAME/E_AUTH 差异
+            let req: AdminKeyReq = jbody(b)?;
+            let root = s.root.clone();
+            blk(move || ops::owner_key_rm(&root, &req.owner, &req.kid)).await?;
+            Ok(Json(json!({"ok": true})))
+        }
+
+        ("POST", "/_api/admin/key-admin", Collected::Mem(b)) => {
+            admin_guard(&s, &owner, &kid)?; // 先守卫后解析 body：非管理员不因 body 畸形泄露 E_NAME/E_AUTH 差异
+            let req: AdminKeyAdminReq = jbody(b)?;
+            let root = s.root.clone();
+            blk(move || ops::key_set_admin(&root, &req.owner, &req.kid, req.admin)).await?;
+            Ok(Json(json!({"ok": true})))
+        }
+
+        ("GET", "/_api/admin/status", _) => {
+            admin_guard(&s, &owner, &kid)?;
+            let root = s.root.clone();
+            let status = blk(move || ops::admin_status(&root)).await?;
+            Ok(Json(status))
+        }
 
         ("GET", "/_api/projects", _) => {
             let root = s.root.clone();
@@ -479,6 +537,12 @@ async fn collect_body(root: &Path, body: Body, to_file: bool) -> R<(String, Coll
 
 // —— SR-SIG1 验签（common::verify_with_hash，预计算哈希版）+ nonce 查重 ——
 
+/// auth 产物：owner + 命中钥匙的 kid（whoami / admin_guard 据此判定，SPEC §12.2）。
+pub struct Verified {
+    pub owner: String,
+    pub kid: String,
+}
+
 /// nonce 查重 + 惰性清理（过期条目随每次插入移除）。
 fn nonce_fresh(m: &mut HashMap<String, i64>, owner: &str, nonce: &str, now: i64) -> bool {
     m.retain(|_, exp| *exp > now);
@@ -490,23 +554,44 @@ fn nonce_fresh(m: &mut HashMap<String, i64>, owner: &str, nonce: &str, now: i64)
     true
 }
 
-async fn auth(s: &S, method: &str, uri: &str, body_sha: &str, headers: &HeaderMap) -> R<String> {
+async fn auth(s: &S, method: &str, uri: &str, body_sha: &str, headers: &HeaderMap) -> R<Verified> {
     let now = state::unix_now() as i64;
     let authv = headers
         .get(axum::http::header::AUTHORIZATION)
         .and_then(|v| v.to_str().ok())
         .ok_or_else(|| ApiError::new("E_AUTH", "missing Authorization"))?;
     let owner = authv.strip_prefix("SR-SIG1 ").and_then(|r| r.split(':').next()).unwrap_or("");
-    let pubkeys = if owner.is_empty() { vec![] } else { state::owner_pubkeys(&s.root, owner) };
+    // 钥匙带 kid（kid 由公钥内容派生，与 tokens/<owner>/<kid>.pub 文件名约定一致）
+    let keys = if owner.is_empty() { vec![] } else { state::owner_keys_with_kid(&s.root, owner) };
+    let pubkeys: Vec<_> = keys.iter().map(|(_, vk)| *vk).collect();
     let v = common::verify_with_hash(authv, &pubkeys, method, uri, body_sha, now).map_err(|e| {
         eprintln!("showroomctl: auth fail: {e:?} {method} {uri}");
         ApiError::new("E_AUTH", e.to_string())
     })?;
+    // 定位命中钥匙：单把复验（owner 钥匙数 handful、ed25519 验签微秒级，开销可忽略）
+    let kid = keys
+        .iter()
+        .find(|(_, vk)| {
+            common::verify_with_hash(authv, std::slice::from_ref(vk), method, uri, body_sha, now)
+                .is_ok()
+        })
+        .map(|(kid, _)| kid.clone())
+        .ok_or_else(|| ApiError::new("E_AUTH", "matching key vanished mid-auth"))?;
     let mut m = s.nonces.lock().unwrap();
     if !nonce_fresh(&mut m, &v.owner, &v.nonce, now) {
         return Err(ApiError::new("E_AUTH", format!("nonce replay: {}:{}", v.owner, v.nonce)));
     }
-    Ok(v.owner)
+    Ok(Verified { owner: v.owner, kid })
+}
+
+/// 管理员钥匙校验（SPEC §12.2）：非管理员返回 E_AUTH → 与未登记/验签失败同一 404
+/// `{"error":"E_AUTH"}`（IntoResponse 对 E_AUTH 丢弃 msg），不泄露 /_api/admin/* 端点存在。
+fn admin_guard(s: &S, owner: &str, kid: &str) -> R<()> {
+    if ops::key_is_admin(&s.root, owner, kid) {
+        Ok(())
+    } else {
+        Err(ApiError::new("E_AUTH", format!("not an admin key: {owner}/{kid}")))
+    }
 }
 
 // —— 小工具 ——
@@ -607,6 +692,31 @@ struct DbResetReq {
     confirm: Option<bool>,
 }
 
+#[derive(Deserialize)]
+struct AdminOwnerAddReq {
+    owner: String,
+    pubkey: String,
+    admin: Option<bool>,
+}
+
+#[derive(Deserialize)]
+struct AdminOwnerReq {
+    owner: String,
+}
+
+#[derive(Deserialize)]
+struct AdminKeyReq {
+    owner: String,
+    kid: String,
+}
+
+#[derive(Deserialize)]
+struct AdminKeyAdminReq {
+    owner: String,
+    kid: String,
+    admin: bool,
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -646,5 +756,49 @@ mod tests {
         assert!(nonce_fresh(&mut m, "bob", "n1", 1005), "per-owner namespace");
         // 过期条目被清理后同 nonce 可再用（签名本身已过窗，无法重放）
         assert!(nonce_fresh(&mut m, "alice", "n1", 1000 + 2 * common::SIG_WINDOW_SECS + 1));
+    }
+
+    // admin_guard 判定：管理员钥匙放行；普通钥匙 / 他人 owner / 未登记 → E_AUTH
+    #[test]
+    fn admin_guard_allows_admin_key_only() {
+        let root = std::env::temp_dir().join(format!("srctl-guard-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).unwrap();
+        let s: S = Arc::new(AppState { root: root.clone(), nonces: Mutex::new(HashMap::new()) });
+
+        let k = showroom_common::OwnerKey::generate();
+        let added = crate::ops::owner_add(&s.root, "root", &k.pub_string(), true, false).unwrap();
+        assert!(admin_guard(&s, "root", &added.kid).is_ok());
+
+        let k2 = showroom_common::OwnerKey::generate();
+        let plain = crate::ops::owner_add(&s.root, "root", &k2.pub_string(), false, false).unwrap();
+        assert_eq!(admin_guard(&s, "root", &plain.kid).unwrap_err().code, "E_AUTH");
+        assert_eq!(admin_guard(&s, "nobody", &added.kid).unwrap_err().code, "E_AUTH");
+        assert_eq!(admin_guard(&s, "root", "ffffffff").unwrap_err().code, "E_AUTH");
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    // 零信息暴露（SPEC §3/§12.2）：admin_guard 的 404 与普通 E_AUTH 逐字节一致
+    //（状态码同 404、body 同 {"error":"E_AUTH"}、无 msg——非管理员探测管理端点不可区分）
+    #[tokio::test]
+    async fn admin_guard_404_byte_identical_to_auth() {
+        let body = |r: Response| async move {
+            let (parts, b) = r.into_parts();
+            let bytes = axum::body::to_bytes(b, 1024).await.unwrap();
+            (parts.status.as_u16(), bytes.to_vec())
+        };
+        let guard = admin_guard(
+            &Arc::new(AppState { root: PathBuf::from("/nonexistent"), nonces: Mutex::new(HashMap::new()) }),
+            "alice", "ab12cd34",
+        )
+        .unwrap_err()
+        .into_response();
+        assert_eq!(
+            body(guard).await,
+            body(ApiError::new("E_AUTH", "missing Authorization").into_response()).await,
+            "guard 与普通 E_AUTH 响应逐字节一致"
+        );
+        let (_, bytes) = body(ApiError::new("E_AUTH", "x").into_response()).await;
+        assert_eq!(bytes, br#"{"error":"E_AUTH"}"#.to_vec(), "body 恰为无 msg 的 E_AUTH");
     }
 }

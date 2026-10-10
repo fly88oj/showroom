@@ -500,15 +500,40 @@ pub fn kid_of(vk: &VerifyingKey) -> String {
     sha256_hex(&vk.to_bytes())[..8].to_string()
 }
 
-pub fn owner_pubkeys(root: &Path, owner: &str) -> Vec<VerifyingKey> {
+/// kid 形如 sha256(pubkey) 前 8 hex（owner_add 生成）；入参校验防路径拼接穿越。
+pub fn valid_kid(kid: &str) -> bool {
+    kid.len() == 8 && kid.bytes().all(|b| b.is_ascii_hexdigit())
+}
+
+/// owner 全部公钥配 kid（`(kid, key)`，kid 由公钥内容派生，与文件名约定一致）。
+/// 无法解析的 .pub（坏文件）跳过——它本就过不了验签。
+pub fn owner_keys_with_kid(root: &Path, owner: &str) -> Vec<(String, VerifyingKey)> {
     let dir = tokens_dir(root, owner);
     let Ok(rd) = fs::read_dir(&dir) else { return vec![] };
     rd.filter_map(|e| e.ok())
         .map(|e| e.path())
         .filter(|p| p.extension().and_then(|o| o.to_str()) == Some("pub"))
-        .filter_map(|p| fs::read_to_string(p).ok())
-        .filter_map(|s| OwnerKey::from_pub_string(s.trim()).ok())
+        .filter_map(|p| {
+            let s = fs::read_to_string(p).ok()?;
+            let vk = OwnerKey::from_pub_string(s.trim()).ok()?;
+            Some((kid_of(&vk), vk))
+        })
         .collect()
+}
+
+/// 管理员标记：`tokens/<owner>/<kid>.admin` 空文件存在 = 该钥匙为管理员（SPEC §12.2）。
+pub fn admin_marker_path(root: &Path, owner: &str, kid: &str) -> PathBuf {
+    tokens_dir(root, owner).join(format!("{kid}.admin"))
+}
+
+/// 文件 mtime（unix 秒；读不到给 0）——owner_list 的 key 登记时间来源。
+pub fn file_mtime(p: &Path) -> u64 {
+    fs::metadata(p)
+        .ok()
+        .and_then(|md| md.modified().ok())
+        .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+        .map(|d| d.as_secs())
+        .unwrap_or(0)
 }
 
 /// bcrypt 行 upsert（同 user 只留最新一行）。
@@ -725,6 +750,52 @@ pub fn prune_snapshots(names: &[String], keep: usize) -> Vec<String> {
     v.sort();
     let del = v.len().saturating_sub(keep);
     v.into_iter().take(del).collect()
+}
+
+// —— admin status 纯解析（SPEC §12.2：df / docker ps / list-timers 样例文本 → 结构）——
+
+/// `df -B1 --output=size,used <path>` 输出 → (总字节, 已用字节)。
+/// 注意：coreutils 9.4 无 `total` 字段，用 `size`（同为 1B 块总量）；取最后一个非空行，
+/// 两列空白分隔的 u64——多路径调用时与传入路径一一对应，单路径取末行即本路径。
+pub fn parse_df_bytes(text: &str) -> Option<(u64, u64)> {
+    let last = text.lines().filter(|l| !l.trim().is_empty()).last()?;
+    let mut it = last.split_whitespace();
+    let total: u64 = it.next()?.parse().ok()?;
+    let used: u64 = it.next()?.parse().ok()?;
+    Some((total, used))
+}
+
+/// `docker ps -a --format '{{.Names}}\t{{.State}}'` 输出 → (容器名, 状态) 列表。
+pub fn parse_container_lines(text: &str) -> Vec<(String, String)> {
+    text.lines()
+        .filter_map(|l| l.split_once('\t').map(|(n, s)| (n.to_string(), s.trim().to_string())))
+        .collect()
+}
+
+/// `systemctl list-timers --no-legend` 一行 → (名, NEXT)。整表解析见 parse_list_timers。
+///
+/// 行形如 `Sun 2026-10-11 01:11:21 +08  23s Sun 2026-10-11 00:11:24 +08  59min ago x.timer x.service`：
+/// NEXT=前 4 token（周几 日期 时间 时区；时区 token 个数随版本，这里按实测 4 个），
+/// 名=行内唯一 `.timer` 结尾 token（`.service` 结尾的是 ACTIVATES，不误取）；LEFT/PASSED
+/// 可含空格（"1h 32min"），故从 NEXT 端与 UNIT token 两头锚定、中段不碰。
+/// NEXT 为 "n/a"（未排程）时原样带回。
+fn parse_timer_line(line: &str) -> Option<(String, String)> {
+    let toks: Vec<&str> = line.split_whitespace().collect();
+    if toks.is_empty() {
+        return None;
+    }
+    let pos = toks.iter().position(|t| t.ends_with(".timer"))?;
+    let name = toks[pos].trim_end_matches(".timer").to_string();
+    let next = if toks[0] == "n/a" || toks.len() < 4 {
+        toks[0].to_string()
+    } else {
+        toks[..4].join(" ")
+    };
+    Some((name, next))
+}
+
+pub fn parse_list_timers(text: &str) -> Vec<(String, String)> {
+    text.lines().filter_map(parse_timer_line).collect()
 }
 
 #[cfg(test)]
@@ -1201,5 +1272,78 @@ Cached:         13121516 kB
         assert!(clipped_cjk.ends_with("...(截断)"));
         assert!(clipped_cjk.len() < REDIS_VALUE_MAX + 15, "多字节按边界截短");
         assert_eq!(clipped_cjk.matches('中').count() * 3 + "...(截断)".len(), clipped_cjk.len());
+    }
+
+    // 11. admin status 纯解析（SPEC §12.2）：df / docker ps / list-timers 样例文本
+    #[test]
+    fn admin_status_parsers() {
+        // df -B1 --output=size,used：表头行 + 数据行（多行时取末行；1B 块无千分位逗号）
+        let df = "    1B-blocks          Used\n3935730991104 3102217924608\n";
+        assert_eq!(parse_df_bytes(df), Some((3_935_730_991_104, 3_102_217_924_608)));
+        assert_eq!(parse_df_bytes("1B-blocks  Used\n1024 512\n2048 1536\n"), Some((2048, 1536)));
+        assert_eq!(parse_df_bytes(""), None);
+        assert_eq!(parse_df_bytes("only header\n"), None, "无数据行 → None");
+        assert_eq!(parse_df_bytes("abc def\n"), None, "非数字 → None");
+        assert_eq!(parse_df_bytes("1024\n"), None, "缺列 → None");
+
+        // docker ps --format '{{.Names}}\t{{.State}}'
+        let ps = "sr-demo\trunning\nsr-postgres\texited\n";
+        assert_eq!(
+            parse_container_lines(ps),
+            vec![("sr-demo".into(), "running".into()), ("sr-postgres".into(), "exited".into())]
+        );
+        assert!(parse_container_lines("").is_empty());
+        assert_eq!(parse_container_lines("garbage-no-tab\n"), vec![], "无 tab 的行跳过");
+
+        // list-timers：NEXT 4 token（含时区）、LEFT/PASSED 含空格、.service 不误当 timer 名
+        let timers = "\
+Sun 2026-10-11 01:11:21 +08      23s Sun 2026-10-11 00:11:24 +08    59min ago fwupd-refresh.timer fwupd-refresh.service
+Mon 2026-10-12 00:00:00 +08  1h 32min Sun 2026-10-10 23:00:12 +08   2h 3min ago showroom-snapshot-hourly.timer showroom-snapshot-hourly.service
+";
+        assert_eq!(
+            parse_list_timers(timers),
+            vec![
+                ("fwupd-refresh".into(), "Sun 2026-10-11 01:11:21 +08".into()),
+                ("showroom-snapshot-hourly".into(), "Mon 2026-10-12 00:00:00 +08".into()),
+            ]
+        );
+        // n/a（未排程）与空行/无 timer 行
+        assert_eq!(
+            parse_list_timers("n/a  — n/a  — x.timer x.service\n"),
+            vec![("x".into(), "n/a".into())]
+        );
+        assert!(parse_list_timers("no timers here\n\n").is_empty());
+    }
+
+    // 12. kid 形状（防 admin 标记路径拼接穿越）+ mtime 读取
+    #[test]
+    fn kid_shape_and_mtime() {
+        for good in ["ab12cd34", "01234567", "deadbeef"] {
+            assert!(valid_kid(good), "{good}");
+        }
+        for bad in ["", "ab12cd3", "ab12cd345", "zzzzzzzz", "aG12cd34", "../demo", "a b"] {
+            assert!(!valid_kid(bad), "{bad}");
+        }
+        let root = troot("mtime");
+        let p = root.join("k");
+        fs::write(&p, "x").unwrap();
+        assert!(file_mtime(&p) >= 1_700_000_000, "新文件 mtime 是近年时间戳");
+        assert_eq!(file_mtime(&root.join("nope")), 0);
+    }
+
+    // 13. owner_keys_with_kid：kid 由公钥内容派生；坏 .pub 跳过；无 owner 空
+    #[test]
+    fn owner_keys_with_kid_pairs() {
+        let root = troot("kids");
+        let k = showroom_common::OwnerKey::generate();
+        let dir = tokens_dir(&root, "alice");
+        fs::create_dir_all(&dir).unwrap();
+        fs::write(dir.join("whatever.pub"), format!("{}\n", k.pub_string())).unwrap();
+        fs::write(dir.join("broken.pub"), "not a key\n").unwrap();
+        let want = kid_of(&showroom_common::OwnerKey::from_pub_string(&k.pub_string()).unwrap());
+        let got = owner_keys_with_kid(&root, "alice");
+        assert_eq!(got.len(), 1, "坏 .pub 跳过: {got:?}");
+        assert_eq!(got[0].0, want);
+        assert!(owner_keys_with_kid(&root, "nobody").is_empty());
     }
 }

@@ -15,8 +15,10 @@ Showroom 主机侧唯一管理工具：HTTP 控制面（`serve`）+ 全部运维
 | 命令 | 用途 |
 |---|---|
 | `serve` | HTTP 控制面（127.0.0.1:8090） |
-| `owner-add <name> --pubkey <ed25519:…> [--replace-key]` | 登记公钥（kid=sha256 前 8 hex）+ 生成 registry 凭据（bcrypt cost 10 入 `state/registry.htpasswd`，明文 0600 入 `state/owners/<name>/reg.cred`） |
-| `owner-key-rm <owner> <kid>` / `owner-revoke <owner>` | 删公钥 / 整体吊销（展项不动） |
+| `owner-add <name> --pubkey <ed25519:…> [--admin] [--replace-key]` | 登记公钥（kid=sha256 前 8 hex）+ 生成 registry 凭据（bcrypt cost 10 入 `state/registry.htpasswd`，明文 0600 入 `state/owners/<name>/reg.cred`）；`--admin` 落 `tokens/<owner>/<kid>.admin` 空标记=管理员钥匙（SPEC §12.2，首个管理员引导） |
+| `key-admin <owner> <kid> --admin true\|false` | 授/收管理员权限（幂等；`/_api/admin/key-admin` 同一内核） |
+| `owner-key-rm <owner> <kid>` / `owner-revoke <owner>` | 删公钥（admin 标记随钥匙清）/ 整体吊销（展项不动） |
+| `admin owners` / `admin status` | 管理员视图（本机调试用，幂等）：账号/钥匙（kid+admin+登记时间）/项目数；服务/磁盘/内存/容器/timers 面板（`GET /_api/admin/*` 同源，均支持 `--json`） |
 | `publish <owner> <project> <slot> <tag> [--mem --cpu --container-port]` | 管理员直发通道（与 `/_api/publish` 同一内核） |
 | `stop` / `start` / `rm` / `rollback` / `ps` / `logs` / `env` | 槽位生命周期与查看（均带 `--json`） |
 | `reconcile` / `autoheal` / `gc-images` / `gc-registry` / `registry-gc` | systemd timer 运维（见 deploy/*.timer）；gc-images 末尾顺带清 `_tmp` 下 >24h 的 `*.bin`/`*.meta`（分片导入陈旧会话与孤儿） |
