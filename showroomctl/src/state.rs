@@ -220,10 +220,27 @@ pub fn parse_kv(text: &str) -> BTreeMap<String, String> {
         .collect()
 }
 
-// —— 环境变量契约（SPEC §6，值全部具体化）——
+// —— 环境变量契约（SPEC §6，值全部具体化；SPEC §9 库名归一化）——
 
+/// 归一化库名/角色名（SPEC §9）：`sr_` + project/slot 中 `-`→`_`
+/// （psql -d、CREATE、env 的 DB_NAME/DB_USER/DATABASE_URL 一律用它）。
 pub fn db_ident(p: &str, s: &str) -> String {
+    format!("sr_{}_{}", p.replace('-', "_"), s.replace('-', "_"))
+}
+
+/// v1.2 前旧命名（连字符原样保留）。仅用于 legacy 存量库的存在性查找。
+pub fn legacy_db_ident(p: &str, s: &str) -> String {
     format!("sr_{p}_{s}")
+}
+
+/// 库名解析（纯函数，存在性由调用方喂 dockerops::db_exists 的结果）：
+/// 新名已存在 → 新名；仅旧名存在 → 沿用旧名（存量库直到 db-reset 重建为新名）；皆无 → 新名（首建路径）。
+pub fn resolve_db_ident(p: &str, s: &str, new_exists: bool, legacy_exists: bool) -> String {
+    if new_exists || !legacy_exists {
+        db_ident(p, s)
+    } else {
+        legacy_db_ident(p, s)
+    }
 }
 
 /// stable 槽位路径不带 slot（SPEC §5 URL 规则）。
@@ -241,8 +258,8 @@ pub fn public_url(p: &str, s: &str) -> String {
     format!("{}/{}", base.trim_end_matches('/'), bp.trim_start_matches('/'))
 }
 
-pub fn env_file_contents(p: &str, s: &str, db_pass: &str, redis_db: u8) -> String {
-    let db = db_ident(p, s);
+/// env 文件内容（db 传**已解析**的库名：归一化新名，或沿用的 legacy 旧名）。
+pub fn env_file_contents(p: &str, s: &str, db: &str, db_pass: &str, redis_db: u8) -> String {
     format!(
         "DB_HOST=sr-postgres\n\
          DB_PORT=5432\n\
@@ -569,7 +586,7 @@ mod tests {
     // 2b. env 文件往返（§6 全字段具体化；stable 与非 stable 的 BASE_PATH）
     #[test]
     fn env_file_roundtrip() {
-        let txt = env_file_contents("demo", "next", "s3cret", 3);
+        let txt = env_file_contents("demo", "next", &db_ident("demo", "next"), "s3cret", 3);
         let m = parse_kv(&txt);
         assert_eq!(m["DB_HOST"], "sr-postgres");
         assert_eq!(m["DB_PORT"], "5432");
@@ -588,9 +605,13 @@ mod tests {
         assert_eq!(m["SHOWROOM_SLOT"], "next");
         assert_eq!(m["SHOWROOM_BASE_PATH"], "/demo/next/");
 
-        let stable = parse_kv(&env_file_contents("demo", "stable", "x", 0));
+        let stable = parse_kv(&env_file_contents("demo", "stable", &db_ident("demo", "stable"), "x", 0));
         assert_eq!(stable["SHOWROOM_BASE_PATH"], "/demo/");
         assert_eq!(stable["DB_NAME"], "sr_demo_stable");
+        // legacy 库名沿用时 env 同样指向旧名（§9 归一化过渡期）
+        let lg = parse_kv(&env_file_contents("skill-demo", "stable", &legacy_db_ident("skill-demo", "stable"), "pw", 1));
+        assert_eq!(lg["DB_NAME"], "sr_skill-demo_stable");
+        assert_eq!(lg["DATABASE_URL"], "postgresql://sr_skill-demo_stable:pw@sr-postgres:5432/sr_skill-demo_stable");
         for k in [
             "DB_HOST", "DB_PORT", "DB_NAME", "DB_USER", "DB_PASSWORD", "DATABASE_URL",
             "REDIS_HOST", "REDIS_PORT", "REDIS_DB", "REDIS_URL", "SHOWROOM_PROJECT",
@@ -598,6 +619,22 @@ mod tests {
         ] {
             assert!(stable.contains_key(k), "missing {k}");
         }
+    }
+
+    // 2c. 库名归一化 + legacy 查找（§9：纯函数，存在性由调用方喂）
+    #[test]
+    fn db_ident_normalization_and_legacy() {
+        assert_eq!(db_ident("demo", "stable"), "sr_demo_stable");
+        assert_eq!(db_ident("skill-demo", "pr-42"), "sr_skill_demo_pr_42");
+        assert_eq!(legacy_db_ident("skill-demo", "stable"), "sr_skill-demo_stable");
+        assert_eq!(db_ident("demo", "stable"), legacy_db_ident("demo", "stable"), "无连字符时新旧同形");
+
+        // 解析：新名在 → 新名（两者并存时新名优先）；仅旧名在 → 沿用旧名；皆无 → 新名（首建）
+        assert_eq!(resolve_db_ident("skill-demo", "stable", true, false), "sr_skill_demo_stable");
+        assert_eq!(resolve_db_ident("skill-demo", "stable", true, true), "sr_skill_demo_stable");
+        assert_eq!(resolve_db_ident("skill-demo", "stable", false, true), "sr_skill-demo_stable");
+        assert_eq!(resolve_db_ident("skill-demo", "stable", false, false), "sr_skill_demo_stable");
+        assert_eq!(resolve_db_ident("demo", "stable", false, true), "sr_demo_stable", "无连字符新旧同形");
     }
 
     // 3. caddy 片段：stable 与非 stable，路径正确含 308 重定向行

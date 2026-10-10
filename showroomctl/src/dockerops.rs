@@ -25,6 +25,19 @@ fn fail(what: &str, o: &Output) -> ApiError {
     ))
 }
 
+/// 取文本尾部若干行（psql/pg_restore 报错裁剪进 ApiError.msg，防膨胀）。
+pub fn tail_lines(s: &str, n: usize) -> String {
+    let v: Vec<&str> = s.lines().collect();
+    let start = v.len().saturating_sub(n);
+    v[start..].join("\n")
+}
+
+/// 提前返回前杀掉并回收子进程（防僵尸；对已退出进程 kill/wait 只是 Err，忽略）。
+pub fn kill_wait(child: &mut std::process::Child) {
+    let _ = child.kill();
+    let _ = child.wait();
+}
+
 pub fn run(cmd: &str, args: &[&str]) -> R<String> {
     let what = format!("{cmd} {}", args.join(" "));
     let out = Command::new(cmd)
@@ -80,6 +93,70 @@ pub fn psql(sql: &str) -> R<()> {
         sql.as_bytes(),
     )
     .map(|_| ())
+}
+
+// —— SPEC §9 数据库维护：定库 psql / pg_dump（pg_restore 的流式管道在 dbmaint）——
+
+/// `docker exec -i sr-postgres <args>` 执行底座：stdin 全量送入（独立线程，防大 SQL 与大输出管道互锁），
+/// stdout/stderr 全量收集（wait_with_output 内部并行排空），返回 (成功?, stdout, stderr)。
+fn exec_pg(args: &[&str], stdin_data: &[u8]) -> R<(bool, Vec<u8>, Vec<u8>)> {
+    let mut child = Command::new("docker")
+        .args(["exec", "-i", "sr-postgres"])
+        .args(args)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .map_err(|e| ApiError::state(format!("spawn docker exec: {e}")))?;
+    let mut stdin = child.stdin.take().unwrap();
+    let data = stdin_data.to_vec();
+    let writer = std::thread::spawn(move || {
+        let _ = stdin.write_all(&data); // EPIPE（子进程早退）忽略，退出状态兜底
+    });
+    let out = child
+        .wait_with_output()
+        .map_err(|e| ApiError::state(format!("docker exec wait: {e}")))?;
+    let _ = writer.join();
+    Ok((out.status.success(), out.stdout, out.stderr))
+}
+
+/// 定库 psql：SQL 恒走 stdin（绝不进 argv）；extra 为固定旗标（-t -A -F …）。
+/// 成功返回 stdout 全文（psql 文本格式）；失败 E_STATE 附 stderr 尾部几行。
+pub fn psql_db(db: &str, extra: &[&str], sql: &[u8]) -> R<String> {
+    let mut args: Vec<&str> = vec!["psql", "-U", "postgres", "-d", db, "-v", "ON_ERROR_STOP=1"];
+    args.extend_from_slice(extra);
+    let (ok, out, err) = exec_pg(&args, sql)?;
+    if ok {
+        Ok(String::from_utf8_lossy(&out).to_string())
+    } else {
+        let tail = tail_lines(&String::from_utf8_lossy(&err), 8);
+        Err(ApiError::state(format!("psql -d {db} failed: {tail}")))
+    }
+}
+
+/// 库是否存在：在 postgres 维护库上查 pg_database（db 名来自已校验名字的归一化，无注入面）。
+pub fn db_exists(db: &str) -> R<bool> {
+    let sql = format!("SELECT 1 FROM pg_database WHERE datname = '{db}'");
+    let (ok, out, err) = exec_pg(
+        &["psql", "-U", "postgres", "-d", "postgres", "-t", "-A", "-v", "ON_ERROR_STOP=1"],
+        sql.as_bytes(),
+    )?;
+    if !ok {
+        let tail = tail_lines(&String::from_utf8_lossy(&err), 8);
+        return Err(ApiError::state(format!("psql pg_database: {tail}")));
+    }
+    Ok(String::from_utf8_lossy(&out).trim() == "1")
+}
+
+/// pg_dump -Fc（自定义压缩格式）：stdout 全量收集（二进制安全），失败附 stderr 尾部。
+pub fn pg_dump_fc(db: &str) -> R<Vec<u8>> {
+    let (ok, out, err) = exec_pg(&["pg_dump", "-U", "postgres", "-Fc", db], b"")?;
+    if ok {
+        Ok(out)
+    } else {
+        let tail = tail_lines(&String::from_utf8_lossy(&err), 8);
+        Err(ApiError::state(format!("pg_dump -Fc {db} failed: {tail}")))
+    }
 }
 
 /// 容器状态（docker inspect .State.Status）；容器不存在 → None。

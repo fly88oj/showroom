@@ -45,14 +45,18 @@ pub fn start(root: &Path, p: &str, s: &str) -> R<()> {
 }
 
 /// rm：容器、路由、conf/env/last2、端口与 redisdb 登记、DB/角色，全清（幂等尽力）。
+/// DB 新旧名（归一化 + legacy，SPEC §9）都清，防存量旧名库残留。
 pub fn rm(root: &Path, p: &str, s: &str) -> R<()> {
     conf_of(root, p, s)?; // 确认槽位存在（未登记的槽位不产生副作用）
     let name = publish::container_name(p, s);
     let _ = dockerops::run_fail_ok("docker", &["rm", "-f", &name]);
-    let db = state::db_ident(p, s);
-    let _ = dockerops::psql(
-        &format!("DROP DATABASE IF EXISTS \"{db}\" WITH (FORCE);\nDROP ROLE IF EXISTS \"{db}\";\n"),
-    );
+    let new_db = state::db_ident(p, s);
+    let legacy_db = state::legacy_db_ident(p, s);
+    let mut sql = String::new();
+    for db in [&legacy_db, &new_db] {
+        sql.push_str(&format!("DROP DATABASE IF EXISTS \"{db}\" WITH (FORCE);\nDROP ROLE IF EXISTS \"{db}\";\n"));
+    }
+    let _ = dockerops::psql(&sql);
     let _ = fs::remove_file(state::route_path(root, p, s));
     for path in [
         state::conf_path(root, p, s),

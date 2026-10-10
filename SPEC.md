@@ -101,12 +101,13 @@ POST /_api/import-end?upload=<id>             → 拼接后走单发 import 同�
 
 ## 9. 数据库维护（v1.2）：发布者自助管理 Schema 与数据
 **原则**：owner 只能碰自己 project×slot 的库 `sr_<p>_<s>`；全端点签名；下行数据（dump）端到端加密（客户端一次性 RSA 公钥上行，信封同 §2 布局）；publish 改为**首建不重建**（数据保留），显式重置走 db-reset。
+**库名归一化**：db_ident = `sr_` + project/slot 中 `-`→`_`（psql -d、CREATE、env 的 DB_NAME/DB_USER/DATABASE_URL 一律用它）；v1.2 前带连字符的存量库在供给/访问时检测旧名存在则沿用，直到 db-reset 重建为新名。
 | 端点 | 请求 | 行为 |
 |---|---|---|
 | POST /_api/db-sql | `{project,slot,sql,confirm}` | `docker exec -i sr-postgres psql -d sr_<p>_<s> -v ON_ERROR_STOP=1` 执行（stdin 传 sql，禁 argv）；confirm!=true 且语句含 DROP/TRUNCATE/DELETE 时拒（E_STATE 提示确认）；返回 `{out}`（psql 文本输出）|
 | GET /_api/db-tables | `?project=&slot=` | 列表查询（\dt 等价 SQL）→ `{"tables":[...]}`（控制台 ComboBox 数据源）|
 | POST /_api/db-preview | `{project,slot,table,limit≤200}` | `SELECT * LIMIT n` → `{columns,rows}` |
-| POST /_api/db-dump | `{project,slot,client_pub_pem}` | pg_dump -Fc → 用 client_pub 按 §2 信封加密 → `{payload_b64}` |
+| POST /_api/db-dump | `{project,slot,client_pub_pem}` | pg_dump -Fc → 用 client_pub 按 §2 信封加密 → `{payload_b64}`（>256MB 拒 E_QUOTA）|
 | POST /_api/db-restore | query `?project=&slot=&confirm=` body=信封（客户端用平台公钥 seal 的 -Fc dump） | 验签→解密到 _tmp→`pg_restore --clean --if-exists`→删临时；走 import 同管道与大帽 |
 | POST /_api/db-reset | `{project,slot,confirm}` | DROP DATABASE WITH (FORCE)+重建+重发凭据（env 文件密码不变） |
 CLI 对应：`showroom db sql|tables|preview|dump|restore|reset`。公网全可用（签名+加密），无需内网。

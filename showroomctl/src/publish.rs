@@ -105,22 +105,30 @@ pub fn publish(
         ));
     }
 
-    // DB 供给：幂等重建（WITH (FORCE) 清掉旧容器残留连接；PostgreSQL >= 13）
-    let db = state::db_ident(project, slot);
+    // DB 供给（SPEC §9.2 首建不重建，数据保留）：存量库（归一化新名或 legacy 旧名）存在则
+    // 沿用并仅对齐角色密码（下方 env 全量重写 + 容器滚动重启使新凭据生效）；不存在才 CREATE。
+    // 归一化切换（旧名 → 新名）由 db-reset 终结，publish 不做迁移。
+    let new_db = state::db_ident(project, slot);
+    let legacy_db = state::legacy_db_ident(project, slot);
+    let new_exists = dockerops::db_exists(&new_db)?;
+    let legacy_exists = legacy_db != new_db && dockerops::db_exists(&legacy_db)?;
+    let db = state::resolve_db_ident(project, slot, new_exists, legacy_exists);
     let db_pass = state::rand_hex(16);
-    let sql = format!(
-        "DROP DATABASE IF EXISTS \"{db}\" WITH (FORCE);\n\
-         DROP ROLE IF EXISTS \"{db}\";\n\
-         CREATE ROLE \"{db}\" LOGIN PASSWORD '{db_pass}';\n\
-         CREATE DATABASE \"{db}\" OWNER \"{db}\";\n"
-    );
+    let sql = if new_exists || legacy_exists {
+        format!("ALTER ROLE \"{db}\" LOGIN PASSWORD '{db_pass}';\n")
+    } else {
+        format!(
+            "CREATE ROLE \"{db}\" LOGIN PASSWORD '{db_pass}';\n\
+             CREATE DATABASE \"{db}\" OWNER \"{db}\";\n"
+        )
+    };
     dockerops::psql(&sql)?;
 
-    // env 文件（SPEC §6 全字段具体化）
+    // env 文件（SPEC §6 全字段具体化；DB_NAME/DATABASE_URL 指向已解析的库名）
     fs::create_dir_all(state::projects_dir(root).join(project))?;
     fs::write(
         state::env_path(root, project, slot),
-        state::env_file_contents(project, slot, &db_pass, redisdb),
+        state::env_file_contents(project, slot, &db, &db_pass, redisdb),
     )?;
 
     // 容器：同槽位唯一 host 端口 → 先停旧、以 -new 起新、健康后删旧改名
@@ -249,12 +257,6 @@ pub fn import_from_file(
     res
 }
 
-/// 提前返回前杀掉并回收 docker load 子进程（防僵尸；对已退出进程 kill/wait 只是 Err，忽略）。
-fn kill_wait(child: &mut std::process::Child) {
-    let _ = child.kill();
-    let _ = child.wait();
-}
-
 fn import_inner(root: &Path, owner: &str, project: &str, _slot: &str, tag: &str, sealed: &Path) -> R<String> {
     use showroom_common::rsa::pkcs8::DecodePrivateKey;
 
@@ -276,7 +278,7 @@ fn import_inner(root: &Path, owner: &str, project: &str, _slot: &str, tag: &str,
     let mut zw = match zstd::stream::write::Decoder::new(stdin) {
         Ok(z) => z,
         Err(e) => {
-            kill_wait(&mut child);
+            dockerops::kill_wait(&mut child);
             return Err(ApiError::state(format!("zstd decoder init: {e}")));
         }
     };
@@ -284,27 +286,27 @@ fn import_inner(root: &Path, owner: &str, project: &str, _slot: &str, tag: &str,
         let sealed_file = match fs::File::open(sealed) {
             Ok(f) => f,
             Err(e) => {
-                kill_wait(&mut child);
+                dockerops::kill_wait(&mut child);
                 return Err(ApiError::state(format!("open sealed envelope: {e}")));
             }
         };
         match showroom_common::open(&priv_key, sealed_file, &mut zw) {
             Ok(n) => n,
             Err(e) => {
-                kill_wait(&mut child);
+                dockerops::kill_wait(&mut child);
                 return Err(ApiError::state(format!("decrypt envelope: {e}")));
             }
         }
     };
     if plain_bytes > cap {
-        kill_wait(&mut child);
+        dockerops::kill_wait(&mut child);
         return Err(ApiError::new(
             "E_QUOTA",
             format!("decrypted payload exceeds IMPORT_MAX_GB={}GB", cap >> 30),
         ));
     }
     if let Err(e) = zw.flush() {
-        kill_wait(&mut child);
+        dockerops::kill_wait(&mut child);
         return Err(ApiError::state(format!("zstd flush: {e}")));
     }
     drop(zw); // write::Decoder 无 finish()：flush 排空缓冲，drop 关闭 docker load 的 stdin（EOF）

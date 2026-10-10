@@ -23,6 +23,7 @@ use tokio::io::AsyncWriteExt;
 
 use showroom_common as common;
 
+use crate::dbmaint;
 use crate::state::{self, ApiError, R};
 use crate::{ops, publish};
 
@@ -87,7 +88,8 @@ async fn api(
 
 async fn api_inner(s: &S, method: &Method, uri: &OriginalUri, headers: &HeaderMap, body: Body) -> Result<Response, ApiError> {
     let path = uri.path().to_string();
-    let to_file = method == Method::POST && matches!(path.as_str(), "/_api/import" | "/_api/import-chunk");
+    let to_file = method == Method::POST
+        && matches!(path.as_str(), "/_api/import" | "/_api/import-chunk" | "/_api/db-restore");
     let (sha, collected) = collect_body(&s.root, body, to_file).await?;
     // _tmp 落盘文件的兜底清理：验签失败/名字校验拒绝等任何提前返回都不留尸体
     //（import/import_chunk 正常路径自删；remove 幂等，二次删除 NotFound 忽略）
@@ -235,6 +237,73 @@ async fn dispatch(
             let o = owner.clone();
             let digest = blk(move || publish::import_end(&root, &o, &id)).await?;
             Ok(Json(json!({"ok": true, "digest": digest})))
+        }
+
+        // —— 数据库维护（SPEC §9）：统一验签 + own_check 后进 dbmaint 内核 ——
+
+        ("POST", "/_api/db-sql", Collected::Mem(b)) => {
+            let req: DbSqlReq = jbody(b)?;
+            state::check_name("project", &req.project)?;
+            state::check_name("slot", &req.slot)?;
+            own_check(&s.root, &req.project, &req.slot, &owner)?;
+            let (p, sl, sql, confirm) = (req.project, req.slot, req.sql, req.confirm.unwrap_or(false));
+            let out = blk(move || dbmaint::sql(&p, &sl, &sql, confirm)).await?;
+            Ok(Json(json!({"out": out})))
+        }
+
+        ("GET", "/_api/db-tables", _) => {
+            let project = qget(&q, "project")?;
+            let slot = qget(&q, "slot")?;
+            state::check_name("project", &project)?;
+            state::check_name("slot", &slot)?;
+            own_check(&s.root, &project, &slot, &owner)?;
+            let tables = blk(move || dbmaint::tables(&project, &slot)).await?;
+            Ok(Json(json!({"tables": tables})))
+        }
+
+        ("POST", "/_api/db-preview", Collected::Mem(b)) => {
+            let req: DbPreviewReq = jbody(b)?;
+            state::check_name("project", &req.project)?;
+            state::check_name("slot", &req.slot)?;
+            own_check(&s.root, &req.project, &req.slot, &owner)?;
+            let (p, sl, table, limit) = (req.project, req.slot, req.table, req.limit.unwrap_or(50));
+            let (columns, rows) = blk(move || dbmaint::preview(&p, &sl, &table, limit)).await?;
+            Ok(Json(json!({"columns": columns, "rows": rows})))
+        }
+
+        ("POST", "/_api/db-dump", Collected::Mem(b)) => {
+            let req: DbDumpReq = jbody(b)?;
+            state::check_name("project", &req.project)?;
+            state::check_name("slot", &req.slot)?;
+            own_check(&s.root, &req.project, &req.slot, &owner)?;
+            let (p, sl, pem) = (req.project, req.slot, req.client_pub_pem);
+            let payload_b64 = blk(move || dbmaint::dump(&p, &sl, &pem)).await?;
+            Ok(Json(json!({"payload_b64": payload_b64})))
+        }
+
+        ("POST", "/_api/db-restore", Collected::File(tmp)) => {
+            let project = qget(&q, "project")?;
+            let slot = qget(&q, "slot")?;
+            let confirm = q.get("confirm").map(|v| v == "true").unwrap_or(false);
+            state::check_name("project", &project)?;
+            state::check_name("slot", &slot)?;
+            own_check(&s.root, &project, &slot, &owner)?;
+            let root = s.root.clone();
+            let (p, sl) = (project, slot);
+            let tmp = tmp.clone();
+            blk(move || dbmaint::restore(&root, &p, &sl, confirm, &tmp)).await?;
+            Ok(Json(json!({"ok": true})))
+        }
+
+        ("POST", "/_api/db-reset", Collected::Mem(b)) => {
+            let req: DbResetReq = jbody(b)?;
+            state::check_name("project", &req.project)?;
+            state::check_name("slot", &req.slot)?;
+            own_check(&s.root, &req.project, &req.slot, &owner)?;
+            let root = s.root.clone();
+            let (p, sl, confirm) = (req.project, req.slot, req.confirm.unwrap_or(false));
+            blk(move || dbmaint::reset(&root, &p, &sl, confirm)).await?;
+            Ok(Json(json!({"ok": true})))
         }
 
         ("GET", "/_api/logs", _) => {
@@ -453,6 +522,36 @@ struct BeginReq {
     tag: String,
     image_id: String,
     total_bytes: u64,
+}
+
+#[derive(Deserialize)]
+struct DbSqlReq {
+    project: String,
+    slot: String,
+    sql: String,
+    confirm: Option<bool>,
+}
+
+#[derive(Deserialize)]
+struct DbPreviewReq {
+    project: String,
+    slot: String,
+    table: String,
+    limit: Option<u32>,
+}
+
+#[derive(Deserialize)]
+struct DbDumpReq {
+    project: String,
+    slot: String,
+    client_pub_pem: String,
+}
+
+#[derive(Deserialize)]
+struct DbResetReq {
+    project: String,
+    slot: String,
+    confirm: Option<bool>,
 }
 
 #[cfg(test)]

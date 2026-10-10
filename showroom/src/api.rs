@@ -84,6 +84,14 @@ pub fn import_query(project: &str, slot: &str, tag: &str) -> String {
     format!("/_api/import?project={project}&slot={slot}&tag={tag}")
 }
 
+pub fn db_tables_query(project: &str, slot: &str) -> String {
+    format!("/_api/db-tables?project={project}&slot={slot}")
+}
+
+pub fn db_restore_query(project: &str, slot: &str, confirm: bool) -> String {
+    format!("/_api/db-restore?project={project}&slot={slot}&confirm={confirm}")
+}
+
 // —— 错误 ——
 
 pub struct ApiError {
@@ -112,21 +120,27 @@ fn net_err(msg: String) -> ApiError {
     ApiError { code: "E_NET".into(), msg }
 }
 
+/// 非 2xx 响应 → ApiError（取 {"error","msg"}；非 JSON 退回 E_NET 带状态与片段）。
+fn error_from(resp: reqwest::blocking::Response) -> ApiError {
+    let status = resp.status();
+    let text = resp.text().unwrap_or_default();
+    match serde_json::from_str::<Value>(&text) {
+        Ok(v) => ApiError {
+            code: v["error"].as_str().unwrap_or("E_NET").to_string(),
+            msg: v["msg"].as_str().unwrap_or(&format!("HTTP {status}")).to_string(),
+        },
+        Err(_) => net_err(format!("HTTP {status}: {}", text.chars().take(200).collect::<String>())),
+    }
+}
+
 /// 解析响应：2xx 取 JSON；4xx/5xx 取 {"error","msg"}。
 fn check(resp: reqwest::blocking::Response) -> Result<Value, ApiError> {
     let status = resp.status();
-    let text = resp.text().map_err(|e| net_err(e.to_string()))?;
-    match serde_json::from_str::<Value>(&text) {
-        Ok(v) if status.is_success() => Ok(v),
-        Ok(v) => Err(ApiError {
-            code: v["error"].as_str().unwrap_or("E_NET").to_string(),
-            msg: v["msg"].as_str().unwrap_or(&format!("HTTP {status}")).to_string(),
-        }),
-        Err(_) => Err(net_err(format!(
-            "HTTP {status}: {}",
-            text.chars().take(200).collect::<String>()
-        ))),
+    if !status.is_success() {
+        return Err(error_from(resp));
     }
+    let text = resp.text().map_err(|e| net_err(e.to_string()))?;
+    serde_json::from_str(&text).map_err(|e| net_err(format!("HTTP {status}: 非 JSON 响应: {e}")))
 }
 
 /// 可达性探测：签名 GET /_api/health（3s 超时；收到任何 HTTP 响应即视为可达）。
@@ -187,7 +201,7 @@ impl Api {
     }
 
     /// 错误渲染收口：E_AUTH 附登记/时间偏差提示与公钥串，其余原样。
-    fn finish(&self, r: Result<Value, ApiError>) -> Result<Value, String> {
+    fn finish<T>(&self, r: Result<T, ApiError>) -> Result<T, String> {
         r.map_err(|e| e.render(&self.key.pub_string()))
     }
 
@@ -218,6 +232,40 @@ impl Api {
             .send()
             .map_err(|e| net_err(format!("{}{path_q}: {e}", self.base)))
             .and_then(check)
+    }
+
+    /// signed POST JSON，2xx 时返回**原始响应**供调用方流式读取（db-dump 大响应用）。
+    /// 上传体仍是小 JSON；下载侧用 24h 宽超时客户端（同 signed_post_file 的大传输语义）。
+    pub fn signed_post_json_raw(
+        &self,
+        path_q: &str,
+        body: &Value,
+    ) -> Result<reqwest::blocking::Response, String> {
+        self.finish(self.post_json_raw_inner(path_q, body))
+    }
+
+    fn post_json_raw_inner(
+        &self,
+        path_q: &str,
+        body: &Value,
+    ) -> Result<reqwest::blocking::Response, ApiError> {
+        let bytes = serde_json::to_vec(body).map_err(|e| net_err(e.to_string()))?;
+        let auth = sign(&self.owner, &self.key, "POST", path_q, &bytes, now_unix(), &nonce_hex());
+        let resp = reqwest::blocking::Client::builder()
+            .timeout(Duration::from_secs(24 * 3600))
+            .build()
+            .map_err(|e| net_err(e.to_string()))?
+            .post(format!("{}{}", self.base, path_q))
+            .header("Authorization", auth)
+            .header("Content-Type", "application/json")
+            .body(bytes)
+            .send()
+            .map_err(|e| net_err(format!("{}{path_q}: {e}", self.base)))?;
+        if resp.status().is_success() {
+            Ok(resp)
+        } else {
+            Err(error_from(resp))
+        }
     }
 
     /// 大文件流式上传：先流式 sha256，再对哈希签名（与 sign 同格式，避免整文件进内存）。
@@ -316,6 +364,18 @@ mod tests {
         assert_eq!(
             import_query("demo", "stable", "v1"),
             "/_api/import?project=demo&slot=stable&tag=v1"
+        );
+        assert_eq!(
+            db_tables_query("demo", "pr42"),
+            "/_api/db-tables?project=demo&slot=pr42"
+        );
+        assert_eq!(
+            db_restore_query("demo", "stable", true),
+            "/_api/db-restore?project=demo&slot=stable&confirm=true"
+        );
+        assert_eq!(
+            db_restore_query("demo", "stable", false),
+            "/_api/db-restore?project=demo&slot=stable&confirm=false"
         );
     }
 }

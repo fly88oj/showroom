@@ -1,6 +1,7 @@
 //! showroomctl：主机侧唯一管理工具（SPEC §3 HTTP 控制面 + §7 全部运维行为）。
 //! 子命令是唯一对外接缝；内部 state / dockerops / publish / ops / serve 深模块。
 
+mod dbmaint;
 mod dockerops;
 mod ops;
 mod publish;

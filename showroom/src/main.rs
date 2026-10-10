@@ -3,6 +3,7 @@
 
 mod api;
 mod config;
+mod db;
 
 use std::fs;
 use std::io::Write as _;
@@ -128,6 +129,11 @@ enum Cmd {
         #[arg(long)]
         yes: bool,
     },
+    /// 数据库维护（SPEC §9）：sql/tables/preview/dump/restore/reset
+    Db {
+        #[command(subcommand)]
+        cmd: db::DbCmd,
+    },
     /// 体检：密钥/配置/服务端可达/签名自测/docker
     Doctor,
 }
@@ -178,6 +184,7 @@ fn run(cli: &Cli) -> Result<(), String> {
             }
             slot_action(&cfg, cli.server, "/_api/rm", project, slot)
         }
+        Cmd::Db { cmd } => db::run(&cfg, cli.server, cmd),
         Cmd::Doctor => doctor(&cfg),
     }
 }
