@@ -1,0 +1,7 @@
+[workspace]
+resolver = "2"
+members = ["showroom-common", "showroomctl", "showroom"]
+
+[profile.release]
+lto = "thin"
+strip = true

@@ -1,0 +1,484 @@
+//! showroom-common：showroomctl / showroom / 本 crate 共享的协议契约层。
+//! 实现 SPEC.md §1（SR-SIG1 签名认证）与 §2（加密信封 v1）。公共 API 见 README.md。
+
+#![forbid(unsafe_code)]
+
+use std::fmt;
+use std::fs;
+use std::io::{self, BufReader, Read, Write};
+use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
+use std::path::{Path, PathBuf};
+
+use aes_gcm::aead::generic_array::GenericArray;
+use aes_gcm::aead::{Aead, KeyInit};
+use aes_gcm::Aes256Gcm;
+use base64::engine::general_purpose::{STANDARD_NO_PAD, URL_SAFE_NO_PAD};
+use base64::engine::Engine as _;
+use ed25519_dalek::{Signature, Signer, SigningKey, Verifier, VerifyingKey};
+use rand::rngs::OsRng;
+use rand::RngCore;
+use rsa::pkcs8::{DecodePrivateKey, EncodePrivateKey, EncodePublicKey, LineEnding};
+use rsa::{Oaep, RsaPrivateKey, RsaPublicKey};
+use sha2::{Digest, Sha256};
+
+/// 下游直接复用 common 锁定的密码学依赖，避免另引版本导致类型不兼容。
+pub use {ed25519_dalek, rsa};
+
+/// 密钥文件读写/解析类操作的统一错误（seal/open 用 std::io::Result，verify 用 AuthError）。
+pub type Result<T> = std::result::Result<T, Box<dyn std::error::Error>>;
+
+/// SR-SIG1 时间戳容差：|now − ts| ≤ 300s（SPEC §1）。
+pub const SIG_WINDOW_SECS: i64 = 300;
+
+// —— 信封 v1 常量（SPEC §2）——
+const KEY_LEN: usize = 32; // AES-256
+const NONCE_LEN: usize = 12;
+const TAG_LEN: usize = 16;
+const SEG: usize = 4 * 1024 * 1024; // 每段明文 4MiB
+const WRAP_LEN: usize = 384; // RSA-3072 模长
+
+pub fn sha256_hex(data: &[u8]) -> String {
+    hex::encode(Sha256::digest(data))
+}
+
+// ———— SR-SIG1（SPEC §1）————
+
+pub struct OwnerKey(SigningKey);
+
+impl OwnerKey {
+    pub fn generate() -> Self {
+        let mut seed = [0u8; KEY_LEN];
+        OsRng.fill_bytes(&mut seed);
+        OwnerKey(SigningKey::from_bytes(&seed))
+    }
+
+    /// 读取裸 32B seed 文件（`save_seed` 写出的格式）。
+    pub fn from_seed_file(path: &Path) -> Result<Self> {
+        let seed = fs::read(path)?;
+        let seed: [u8; KEY_LEN] = seed.as_slice().try_into().map_err(|_| {
+            io::Error::new(io::ErrorKind::InvalidData, "seed file must be exactly 32 bytes")
+        })?;
+        Ok(OwnerKey(SigningKey::from_bytes(&seed)))
+    }
+
+    pub fn save_seed(&self, path: &Path) -> Result<()> {
+        if let Some(dir) = path.parent() {
+            if !dir.as_os_str().is_empty() {
+                fs::create_dir_all(dir)?;
+            }
+        }
+        let mut f = fs::OpenOptions::new()
+            .write(true)
+            .create(true)
+            .truncate(true)
+            .mode(0o600)
+            .open(path)?;
+        f.write_all(&self.0.to_bytes())?;
+        // 覆盖已存在文件可能偏宽的旧权限
+        fs::set_permissions(path, fs::Permissions::from_mode(0o600))?;
+        Ok(())
+    }
+
+    /// "ed25519:<base64(pubkey)>"（base64 无 padding）。
+    pub fn pub_string(&self) -> String {
+        format!(
+            "ed25519:{}",
+            STANDARD_NO_PAD.encode(self.0.verifying_key().as_bytes())
+        )
+    }
+
+    pub fn from_pub_string(s: &str) -> Result<VerifyingKey> {
+        let raw = STANDARD_NO_PAD
+            .decode(s.strip_prefix("ed25519:").ok_or("missing ed25519: prefix")?)?;
+        let raw: [u8; KEY_LEN] = raw
+            .as_slice()
+            .try_into()
+            .map_err(|_| "public key must be exactly 32 bytes")?;
+        Ok(VerifyingKey::from_bytes(&raw)?)
+    }
+}
+
+/// canonical = "SR-SIG1\n<owner>\n<ts>\n<nonce>\n<METHOD>\n<path_with_query>\n<sha256_hex(body)>"。
+pub fn build_canonical(
+    owner: &str,
+    ts: i64,
+    nonce: &str,
+    method: &str,
+    path_with_query: &str,
+    body_sha256_hex: &str,
+) -> String {
+    format!("SR-SIG1\n{owner}\n{ts}\n{nonce}\n{method}\n{path_with_query}\n{body_sha256_hex}")
+}
+
+/// 生成完整 Authorization 值 `SR-SIG1 <owner>:<ts>:<nonce>:<sig_b64url>`（sig 为 base64url 无 padding）。
+/// nonce 由调用方生成（SPEC 建议 8 随机字节的 hex16）；method 传大写。
+pub fn sign(
+    owner: &str,
+    key: &OwnerKey,
+    method: &str,
+    path_with_query: &str,
+    body: &[u8],
+    now_unix: i64,
+    nonce: &str,
+) -> String {
+    let canonical = build_canonical(owner, now_unix, nonce, method, path_with_query, &sha256_hex(body));
+    let sig = key.0.sign(canonical.as_bytes()).to_bytes();
+    format!("SR-SIG1 {owner}:{now_unix}:{nonce}:{}", URL_SAFE_NO_PAD.encode(sig))
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Verified {
+    pub owner: String,
+    pub ts: i64,
+    pub nonce: String,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AuthError {
+    Format,
+    Stale,
+    BadSignature,
+}
+
+impl fmt::Display for AuthError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(match self {
+            AuthError::Format => "E_AUTH: malformed SR-SIG1 header",
+            AuthError::Stale => "E_AUTH: timestamp outside ±300s window",
+            AuthError::BadSignature => "E_AUTH: signature verification failed",
+        })
+    }
+}
+
+impl std::error::Error for AuthError {}
+
+/// 验证 SR-SIG1：格式解析 → ±300s 时间窗 → 依次尝试登记公钥（owner 可多把，任一命中即过）。
+/// nonce 查重（per-owner LRU，SPEC §1）由调用方按返回的 `Verified.nonce` 自行完成。
+pub fn verify(
+    auth_value: &str,
+    pubkeys: &[VerifyingKey],
+    method: &str,
+    path_with_query: &str,
+    body: &[u8],
+    now_unix: i64,
+) -> std::result::Result<Verified, AuthError> {
+    let rest = auth_value.strip_prefix("SR-SIG1 ").ok_or(AuthError::Format)?;
+    let mut parts = rest.splitn(4, ':');
+    let (owner, ts, nonce, sig_b64) = match (parts.next(), parts.next(), parts.next(), parts.next())
+    {
+        (Some(a), Some(b), Some(c), Some(d)) => (a, b, c, d),
+        _ => return Err(AuthError::Format),
+    };
+    if owner.is_empty() || nonce.is_empty() {
+        return Err(AuthError::Format);
+    }
+    let ts: i64 = ts.parse().map_err(|_| AuthError::Format)?;
+    let raw = URL_SAFE_NO_PAD.decode(sig_b64).map_err(|_| AuthError::Format)?;
+    let sig_arr: [u8; 64] = raw.try_into().map_err(|_| AuthError::Format)?;
+    let sig = Signature::from_bytes(&sig_arr);
+    if (now_unix - ts).abs() > SIG_WINDOW_SECS {
+        return Err(AuthError::Stale);
+    }
+    let canonical = build_canonical(owner, ts, nonce, method, path_with_query, &sha256_hex(body));
+    for vk in pubkeys {
+        if vk.verify(canonical.as_bytes(), &sig).is_ok() {
+            return Ok(Verified {
+                owner: owner.to_owned(),
+                ts,
+                nonce: nonce.to_owned(),
+            });
+        }
+    }
+    Err(AuthError::BadSignature)
+}
+
+// ———— 加密信封 v1（SPEC §2）————
+
+pub struct PlatformKeys(RsaPrivateKey);
+
+impl PlatformKeys {
+    pub fn generate() -> Self {
+        PlatformKeys(RsaPrivateKey::new(&mut OsRng, 3072).expect("rsa-3072 keygen"))
+    }
+
+    /// 写 `<dir>/platform_rsa`（PKCS#8 PEM，0600）与 `<dir>/platform_rsa.pub`，返回私钥路径。
+    pub fn save_pem(&self, dir: &Path) -> Result<PathBuf> {
+        fs::create_dir_all(dir)?;
+        let priv_path = dir.join("platform_rsa");
+        let pem = self.0.to_pkcs8_pem(LineEnding::LF)?;
+        let mut f = fs::OpenOptions::new()
+            .write(true)
+            .create(true)
+            .truncate(true)
+            .mode(0o600)
+            .open(&priv_path)?;
+        f.write_all(pem.as_bytes())?;
+        fs::set_permissions(&priv_path, fs::Permissions::from_mode(0o600))?;
+        fs::write(dir.join("platform_rsa.pub"), self.public_pem().as_bytes())?;
+        Ok(priv_path)
+    }
+
+    pub fn load_pem(dir: &Path) -> Result<Self> {
+        let pem = fs::read_to_string(dir.join("platform_rsa"))?;
+        Ok(PlatformKeys(RsaPrivateKey::from_pkcs8_pem(&pem)?))
+    }
+
+    pub fn public_pem(&self) -> String {
+        self.0
+            .to_public_key()
+            .to_public_key_pem(LineEnding::LF)
+            .expect("encode public pem")
+            .as_str()
+            .to_owned()
+    }
+}
+
+/// 加密封装：`[384B RSA-OAEP-SHA256 封装的 k] || 每段[12B nonce][密文+16B tag]`，段=4MiB 明文。
+/// 返回写出的总字节数（含 384B 封装头）。zstd 压缩不在本 crate（调用方在 docker save 管道自行压缩）。
+pub fn seal<W: Write>(
+    platform_pub: &RsaPublicKey,
+    mut plain: impl Read,
+    mut out: W,
+) -> std::io::Result<u64> {
+    let mut k = [0u8; KEY_LEN];
+    OsRng.fill_bytes(&mut k);
+    let wrapped = platform_pub
+        .encrypt(&mut OsRng, Oaep::new::<Sha256>(), &k)
+        .map_err(|e| io::Error::other(format!("rsa-oaep wrap key: {e}")))?;
+    if wrapped.len() != WRAP_LEN {
+        return Err(io::Error::other(format!(
+            "expected 384-byte rsa-3072 wrap, got {}",
+            wrapped.len()
+        )));
+    }
+    out.write_all(&wrapped)?;
+    let mut total = wrapped.len() as u64;
+    let cipher = Aes256Gcm::new(GenericArray::from_slice(&k));
+    let mut buf = vec![0u8; SEG];
+    loop {
+        let n = read_full(&mut plain, &mut buf)?;
+        if n == 0 {
+            return Ok(total);
+        }
+        let mut nonce = [0u8; NONCE_LEN];
+        OsRng.fill_bytes(&mut nonce);
+        let ct = cipher
+            .encrypt(GenericArray::from_slice(&nonce), &buf[..n])
+            .map_err(|_| io::Error::other("aes-gcm encrypt segment"))?;
+        out.write_all(&nonce)?;
+        out.write_all(&ct)?;
+        total += (NONCE_LEN + ct.len()) as u64;
+    }
+}
+
+/// 解封：读 384B 封装头解出 k，逐段解密写出。任何封装/tag 校验失败返回 Err（不 panic）。
+/// 返回写出的明文总字节数。空信封（仅 384B 头）合法，对应 0 字节明文。
+pub fn open(
+    platform_priv: &RsaPrivateKey,
+    sealed: impl Read,
+    mut out: impl Write,
+) -> std::io::Result<u64> {
+    let mut r = BufReader::with_capacity(SEG + NONCE_LEN + TAG_LEN, sealed);
+    let mut wrap = [0u8; WRAP_LEN];
+    if read_full(&mut r, &mut wrap)? != WRAP_LEN {
+        return Err(io::Error::new(
+            io::ErrorKind::UnexpectedEof,
+            "sealed: truncated 384-byte header",
+        ));
+    }
+    let k = platform_priv
+        .decrypt(Oaep::new::<Sha256>(), &wrap)
+        .map_err(|e| io::Error::other(format!("rsa-oaep unwrap key: {e}")))?;
+    let k: [u8; KEY_LEN] = k
+        .as_slice()
+        .try_into()
+        .map_err(|_| io::Error::other("unwrapped key not 32 bytes"))?;
+    let cipher = Aes256Gcm::new(GenericArray::from_slice(&k));
+    let mut total: u64 = 0;
+    let mut nonce = [0u8; NONCE_LEN];
+    let mut ct = vec![0u8; SEG + TAG_LEN];
+    loop {
+        match read_full(&mut r, &mut nonce)? {
+            0 => return Ok(total), // 干净收尾（段边界上的 EOF）
+            NONCE_LEN => {}
+            _ => return Err(io::Error::new(io::ErrorKind::UnexpectedEof, "sealed: truncated nonce")),
+        }
+        let n = read_full(&mut r, &mut ct)?;
+        if n < TAG_LEN {
+            return Err(io::Error::new(
+                io::ErrorKind::UnexpectedEof,
+                "sealed: truncated segment",
+            ));
+        }
+        let pt = cipher
+            .decrypt(GenericArray::from_slice(&nonce), &ct[..n])
+            .map_err(|_| {
+                io::Error::other("aes-gcm segment auth failed (tag mismatch / tampered data)")
+            })?;
+        out.write_all(&pt)?;
+        total += pt.len() as u64;
+    }
+}
+
+/// 循环 read 直至填满 buf 或 EOF，返回已读字节数（管道短读安全）。
+fn read_full(r: &mut impl Read, buf: &mut [u8]) -> io::Result<usize> {
+    let mut off = 0;
+    while off < buf.len() {
+        match r.read(&mut buf[off..])? {
+            0 => break,
+            n => off += n,
+        }
+    }
+    Ok(off)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::io::Cursor;
+
+    fn platform() -> &'static PlatformKeys {
+        static K: std::sync::OnceLock<PlatformKeys> = std::sync::OnceLock::new();
+        K.get_or_init(PlatformKeys::generate)
+    }
+
+    fn tmp(name: &str) -> PathBuf {
+        let d = std::env::temp_dir().join(format!("showroom-common-test-{}", std::process::id()));
+        fs::create_dir_all(&d).unwrap();
+        d.join(name)
+    }
+
+    // 1. sign→verify 往返（body 非空 / 空）
+    #[test]
+    fn sign_verify_roundtrip() {
+        let k = OwnerKey::generate();
+        let vk = [k.0.verifying_key()];
+        for body in [b"{\"project\":\"demo\"}".as_slice(), b""] {
+            let auth = sign("alice", &k, "POST", "/_api/publish", body, 1_000_000, "0123456789abcdef");
+            let v = verify(&auth, &vk, "POST", "/_api/publish", body, 1_000_000).unwrap();
+            assert_eq!(
+                (v.owner.as_str(), v.ts, v.nonce.as_str()),
+                ("alice", 1_000_000, "0123456789abcdef")
+            );
+        }
+    }
+
+    // 2. 篡改 body 一个字节 → BadSignature
+    #[test]
+    fn tampered_body_rejected() {
+        let k = OwnerKey::generate();
+        let auth = sign("alice", &k, "POST", "/_api/publish", b"body-0", 1_000_000, "0123456789abcdef");
+        assert_eq!(
+            verify(&auth, &[k.0.verifying_key()], "POST", "/_api/publish", b"body-1", 1_000_000),
+            Err(AuthError::BadSignature)
+        );
+    }
+
+    // 3. ts 超窗（now±301）→ Stale；±300 边界通过
+    #[test]
+    fn stale_ts_rejected() {
+        let k = OwnerKey::generate();
+        let vk = [k.0.verifying_key()];
+        let auth = sign("alice", &k, "POST", "/_api/publish", b"", 1_000_000, "0123456789abcdef");
+        for now in [1_000_000 + 301, 1_000_000 - 301] {
+            assert_eq!(
+                verify(&auth, &vk, "POST", "/_api/publish", b"", now),
+                Err(AuthError::Stale)
+            );
+        }
+        for now in [1_000_000 + 300, 1_000_000 - 300] {
+            assert!(verify(&auth, &vk, "POST", "/_api/publish", b"", now).is_ok());
+        }
+    }
+
+    // 4. 错误公钥 → BadSignature；多把公钥时第二把命中可通过
+    #[test]
+    fn wrong_key_and_multi_key() {
+        let k = OwnerKey::generate();
+        let auth = sign("alice", &k, "GET", "/_api/logs?project=demo&tail=100", b"", 5, "aabbccddeeff0011");
+        let wrong = OwnerKey::generate();
+        assert_eq!(
+            verify(
+                &auth,
+                &[wrong.0.verifying_key()],
+                "GET",
+                "/_api/logs?project=demo&tail=100",
+                b"",
+                5
+            ),
+            Err(AuthError::BadSignature)
+        );
+        verify(
+            &auth,
+            &[wrong.0.verifying_key(), k.0.verifying_key()],
+            "GET",
+            "/_api/logs?project=demo&tail=100",
+            b"",
+            5,
+        )
+        .unwrap();
+    }
+
+    // 5. seal→open 往返：空 / 恰好 4MiB / >8MiB（跨多段），并核对封装总长
+    #[test]
+    fn envelope_roundtrip() {
+        for len in [0, SEG, SEG * 2 + 1234] {
+            let plain: Vec<u8> = (0..len as u32).map(|i| (i % 251) as u8).collect();
+            let mut sealed = Vec::new();
+            let n = seal(&platform().0.to_public_key(), Cursor::new(plain.as_slice()), &mut sealed).unwrap();
+            let segs = len.div_ceil(SEG);
+            assert_eq!(n as usize, WRAP_LEN + segs * (NONCE_LEN + TAG_LEN) + len);
+            let mut out = Vec::new();
+            let m = open(&platform().0, Cursor::new(sealed.as_slice()), &mut out).unwrap();
+            assert_eq!(m as usize, len);
+            assert_eq!(out, plain);
+        }
+    }
+
+    // 6. sealed 输入翻转一个字节（密文区 / 封装头区）→ 报错不 panic
+    #[test]
+    fn tampered_envelope_rejected() {
+        let plain = vec![7u8; SEG + 100];
+        let mut sealed = Vec::new();
+        seal(&platform().0.to_public_key(), Cursor::new(plain.as_slice()), &mut sealed).unwrap();
+
+        let mut t = sealed.clone();
+        t[WRAP_LEN + NONCE_LEN + 10] ^= 1; // 第一段密文区内
+        let mut out = Vec::new();
+        let e = open(&platform().0, Cursor::new(t.as_slice()), &mut out);
+        assert!(e.is_err(), "flipped ciphertext byte must error");
+        assert!(out.is_empty());
+
+        let mut t2 = sealed;
+        t2[10] ^= 1; // 384B 封装头内
+        let mut out2 = Vec::new();
+        assert!(open(&platform().0, Cursor::new(t2.as_slice()), &mut out2).is_err());
+    }
+
+    // 7. OwnerKey seed save/load + pub_string/from_pub_string 往返（0600 权限）
+    #[test]
+    fn owner_key_roundtrip() {
+        let k = OwnerKey::generate();
+        let p = tmp("id_ed25519");
+        k.save_seed(&p).unwrap();
+        let k2 = OwnerKey::from_seed_file(&p).unwrap();
+        assert_eq!(k2.pub_string(), k.pub_string());
+        assert_eq!(fs::metadata(&p).unwrap().permissions().mode() & 0o777, 0o600);
+
+        let vk = OwnerKey::from_pub_string(&k.pub_string()).unwrap();
+        assert_eq!(vk.to_bytes(), *k.0.verifying_key().as_bytes());
+        let _ = fs::remove_file(&p);
+    }
+
+    // 8. PlatformKeys pem save/load 往返（文件接缝）
+    #[test]
+    fn platform_pem_roundtrip() {
+        let dir = tmp("platform-dir");
+        let priv_path = platform().save_pem(&dir).unwrap();
+        assert_eq!(priv_path, dir.join("platform_rsa"));
+        assert!(dir.join("platform_rsa.pub").exists());
+        let loaded = PlatformKeys::load_pem(&dir).unwrap();
+        assert_eq!(loaded.public_pem(), platform().public_pem());
+        let _ = fs::remove_dir_all(&dir);
+    }
+}
