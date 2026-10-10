@@ -1,0 +1,54 @@
+name: CI
+
+on:
+  push:
+    branches: ["**"]
+  pull_request:
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  build-and-test:
+    name: 工作区测试与发布构建
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions-rust-lang/setup-rust-toolchain@v1
+        with:
+          toolchain: stable
+          targets: wasm32-unknown-unknown
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: cargo test --workspace
+        run: cargo test --workspace
+
+      - name: cargo build --release
+        run: cargo build --release
+
+      - name: 构建 WASM 控制台垫片（wasm32-unknown-unknown）
+        run: cargo build -p showroom-common --target wasm32-unknown-unknown --release
+
+  web-smoke:
+    name: 控制台冒烟（node）
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+
+      # smoke.mjs 用系统 zstd CLI 解压比对（node 无内置 zstd）
+      - name: 安装 zstd
+        run: sudo apt-get update && sudo apt-get install -y zstd
+
+      - name: node smoke.mjs（密码学垫片往返）
+        working-directory: showroom-web
+        run: node smoke.mjs
+
+      - name: node smoke-wizard.mjs（登录向导/流式/上传状态机）
+        working-directory: showroom-web
+        run: node smoke-wizard.mjs
