@@ -3,9 +3,14 @@
 
 mod dbmaint;
 mod dockerops;
+// plan-15 步 1-3 先落纯函数与编排内核，步 4 CLI/serve 接线后移除本 allow
+#[allow(dead_code)]
+mod middleware;
 mod ops;
 mod publish;
 mod serve;
+#[allow(dead_code)]
+mod setup;
 mod state;
 mod streams;
 mod unpack;
