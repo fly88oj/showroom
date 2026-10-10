@@ -44,7 +44,6 @@ enum Cmd {
     Publish {
         owner: String,
         project: String,
-        slot: String,
         tag: String,
         #[arg(long)]
         mem: Option<String>,
@@ -53,26 +52,25 @@ enum Cmd {
         #[arg(long)]
         container_port: Option<u16>,
     },
-    /// 停止槽位容器（conf 标记 stopped=1，autoheal 跳过）
-    Stop { project: String, slot: String },
-    /// 启动槽位容器（容器缺失则按 conf 重建）
-    Start { project: String, slot: String },
-    /// 彻底移除槽位（容器/路由/DB/凭据/登记全清）
-    Rm { project: String, slot: String },
+    /// 停止项目容器（conf 标记 stopped=1，autoheal 跳过）
+    Stop { project: String },
+    /// 启动项目容器（容器缺失则按 conf 重建）
+    Start { project: String },
+    /// 彻底移除项目（容器/路由/DB/凭据/登记全清）
+    Rm { project: String },
     /// 回滚到 last2 记录的上一 tag
-    Rollback { project: String, slot: String },
-    /// 列出全部槽位与容器实况
+    Rollback { project: String },
+    /// 列出全部项目与容器实况
     Ps,
     /// 查看容器日志
     Logs {
         project: String,
-        slot: String,
         #[arg(long, default_value_t = 100)]
         tail: u32,
     },
-    /// 查看槽位环境变量（§6）
-    Env { project: String, slot: String },
-    /// 遍历 slot.conf 幂等重建缺失容器/路由（systemd timer）
+    /// 查看项目环境变量（§6）
+    Env { project: String },
+    /// 遍历 project.conf 幂等重建缺失容器/路由；先跑 v1.4 槽位布局迁移（systemd timer）
     Reconcile,
     /// 自愈：容器缺失重建 / 退出拉起 / unhealthy 重启（systemd timer）
     Autoheal,
@@ -85,7 +83,7 @@ enum Cmd {
     /// registry:2 garbage-collect --delete-untagged（停-扫-启）
     RegistryGc,
     /// 从 stdin 读加密信封导入镜像（内部通道；serve 的 /_api/import 复用同一内核）
-    Import { owner: String, project: String, slot: String, tag: String },
+    Import { owner: String, project: String, tag: String },
     /// 检查镜像是否已在本机 docker（present true/false）
     ImportCheck { image_id: String },
     /// 生成平台 RSA 对（serve 启动缺失时自动生成；已存在不覆盖）
@@ -138,42 +136,41 @@ fn dispatch(cli: &Cli) -> R<()> {
             Ok(())
         }
 
-        Cmd::Publish { owner, project, slot, tag, mem, cpu, container_port } => {
+        Cmd::Publish { owner, project, tag, mem, cpu, container_port } => {
             let o = publish::publish(
                 &root,
                 owner,
                 project,
-                slot,
                 tag,
                 publish::PublishOpts { mem: mem.clone(), cpu: *cpu, cport: *container_port },
             )?;
             out(
                 j,
-                &format!("published {project}/{slot} tag {tag} -> {} (port {})", o.url, o.port),
+                &format!("published {project} tag {tag} -> {} (port {})", o.url, o.port),
                 json!({"ok": true, "url": o.url, "port": o.port}),
             );
             Ok(())
         }
-        Cmd::Stop { project, slot } => {
-            ops::stop(&root, project, slot)?;
-            out(j, &format!("stopped {project}/{slot}"), json!({"ok": true}));
+        Cmd::Stop { project } => {
+            ops::stop(&root, project)?;
+            out(j, &format!("stopped {project}"), json!({"ok": true}));
             Ok(())
         }
-        Cmd::Start { project, slot } => {
-            ops::start(&root, project, slot)?;
-            out(j, &format!("started {project}/{slot}"), json!({"ok": true}));
+        Cmd::Start { project } => {
+            ops::start(&root, project)?;
+            out(j, &format!("started {project}"), json!({"ok": true}));
             Ok(())
         }
-        Cmd::Rm { project, slot } => {
-            ops::rm(&root, project, slot)?;
-            out(j, &format!("removed {project}/{slot}"), json!({"ok": true}));
+        Cmd::Rm { project } => {
+            ops::rm(&root, project)?;
+            out(j, &format!("removed {project}"), json!({"ok": true}));
             Ok(())
         }
-        Cmd::Rollback { project, slot } => {
-            let o = ops::rollback(&root, project, slot)?;
+        Cmd::Rollback { project } => {
+            let o = ops::rollback(&root, project)?;
             out(
                 j,
-                &format!("rolled back {project}/{slot} -> {} (port {})", o.url, o.port),
+                &format!("rolled back {project} -> {} (port {})", o.url, o.port),
                 json!({"ok": true, "url": o.url, "port": o.port}),
             );
             Ok(())
@@ -182,29 +179,29 @@ fn dispatch(cli: &Cli) -> R<()> {
         Cmd::Ps => {
             let rows = ops::ps(&root);
             if j {
-                let v: Vec<_> = rows.iter().map(|(p, s, c, st)| c.to_json(p, s, st)).collect();
+                let v: Vec<_> = rows.iter().map(|(p, c, st)| c.to_json(p, st)).collect();
                 println!("{}", json!({"projects": v}));
             } else {
                 println!(
-                    "{:<20} {:<12} {:<12} {:<18} {:<9} {:<5} {:<6} {:<5} {:<10} {}",
-                    "PROJECT", "SLOT", "OWNER", "TAG", "STATUS", "PORT", "MEM", "CPU", "UPDATED", "URL"
+                    "{:<24} {:<12} {:<20} {:<9} {:<5} {:<6} {:<5} {:<10} {}",
+                    "PROJECT", "OWNER", "TAG", "STATUS", "PORT", "MEM", "CPU", "UPDATED", "URL"
                 );
-                for (p, s, c, st) in rows {
+                for (p, c, st) in rows {
                     println!(
-                        "{:<20} {:<12} {:<12} {:<18} {:<9} {:<5} {:<6} {:<5} {:<10} {}",
-                        p, s, c.owner, c.tag, st, c.port, c.mem, c.cpu, c.updated,
-                        state::public_url(&p, &s)
+                        "{:<24} {:<12} {:<20} {:<9} {:<5} {:<6} {:<5} {:<10} {}",
+                        p, c.owner, c.tag, st, c.port, c.mem, c.cpu, c.updated,
+                        state::public_url(&p)
                     );
                 }
             }
             Ok(())
         }
-        Cmd::Logs { project, slot, tail } => {
-            print!("{}", ops::logs(&root, project, slot, *tail)?);
+        Cmd::Logs { project, tail } => {
+            print!("{}", ops::logs(&root, project, *tail)?);
             Ok(())
         }
-        Cmd::Env { project, slot } => {
-            let m = ops::env_of(&root, project, slot)?;
+        Cmd::Env { project } => {
+            let m = ops::env_of(&root, project)?;
             if j {
                 println!("{}", json!({"env": m}));
             } else {
@@ -254,9 +251,9 @@ fn dispatch(cli: &Cli) -> R<()> {
             out(j, "registry garbage-collect done", json!({"ok": true}));
             Ok(())
         }
-        Cmd::Import { owner, project, slot, tag } => {
+        Cmd::Import { owner, project, tag } => {
             let (path, _sha) = publish::receive_envelope(&root, std::io::stdin())?;
-            let d = publish::import_from_file(&root, owner, project, slot, tag, &path)?;
+            let d = publish::import_from_file(&root, owner, project, tag, &path)?;
             out(j, &format!("imported digest={d}"), json!({"ok": true, "digest": d}));
             Ok(())
         }

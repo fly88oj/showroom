@@ -97,11 +97,22 @@ pub fn write_private(path: &Path, bytes: &[u8]) -> io::Result<()> {
     Ok(())
 }
 
-// ———— 名字校验（SPEC §4：正则同 project/slot；保留名只约束 project，slot 仅正则）————
+// ———— 名字校验（SPEC §4 + §11 v1.4：project 正则放宽、随机项目名；辅助名沿用旧正则）————
 
 pub mod names {
-    /// `^[a-z0-9][a-z0-9-]{0,30}$`（总长 1..=31，ASCII，手写避免 regex 依赖）。
-    pub fn valid_name(s: &str) -> bool {
+    /// project 正则（§11 放宽）：`^[a-zA-Z0-9][a-zA-Z0-9-]{0,30}$`（总长 1..=31，ASCII，
+    /// 手写避免 regex 依赖）。大写放开提升随机名空间（62^8）与字典遍历门槛。
+    pub fn valid_project(s: &str) -> bool {
+        let b = s.as_bytes();
+        !b.is_empty()
+            && b.len() <= 31
+            && b[0].is_ascii_alphanumeric()
+            && b.iter().all(|&c| c.is_ascii_alphanumeric() || c == b'-')
+    }
+
+    /// 辅助名字（owner 等）沿用旧正则：`^[a-z0-9][a-z0-9-]{0,30}$`。
+    /// owner 进 registry 镜像路径与 htpasswd，保持小写（docker 仓库名禁大写）。
+    pub fn valid_aux(s: &str) -> bool {
         let b = s.as_bytes();
         !b.is_empty()
             && b.len() <= 31
@@ -120,22 +131,35 @@ pub mod names {
 
     pub const RESERVED: [&str; 4] = ["v2", "_api", "_bootstrap", "_console"];
 
-    /// slot 仅正则（保留名不约束 slot）。
-    pub fn check_slot(s: &str) -> Result<(), String> {
-        if valid_name(s) {
+    /// 辅助名（owner 等）仅正则（保留名不约束）。
+    pub fn check_aux(s: &str) -> Result<(), String> {
+        if valid_aux(s) {
             Ok(())
         } else {
-            Err(format!("非法 slot '{s}'：须匹配 ^[a-z0-9][a-z0-9-]{{0,30}}$"))
+            Err(format!("非法名字 '{s}'：须匹配 ^[a-z0-9][a-z0-9-]{{0,30}}$"))
         }
     }
 
-    /// project = slot 正则 + 保留名。
+    /// project = §11 放宽正则 + 保留名。
     pub fn check_project(s: &str) -> Result<(), String> {
-        check_slot(s).map_err(|_| format!("非法 project '{s}'：须匹配 ^[a-z0-9][a-z0-9-]{{0,30}}$"))?;
+        if !valid_project(s) {
+            return Err(format!("非法 project '{s}'：须匹配 ^[a-zA-Z0-9][a-zA-Z0-9-]{{0,30}}$"));
+        }
         if RESERVED.contains(&s) {
             return Err(format!("project '{s}' 是保留名"));
         }
         Ok(())
+    }
+
+    /// 随机项目名（§11 发布入口默认预填）：`[a-zA-Z0-9]{8}`。
+    pub fn random_project() -> String {
+        use rand::distributions::Alphanumeric;
+        use rand::Rng;
+        rand::rngs::OsRng
+            .sample_iter(Alphanumeric)
+            .take(8)
+            .map(char::from)
+            .collect()
     }
 
     pub fn check_tag(s: &str) -> Result<(), String> {
@@ -597,19 +621,29 @@ mod tests {
         let _ = fs::remove_dir_all(&dir);
     }
 
-    // 9. 名字规则统一（SPEC §4）：保留名只约束 project；slot 仅正则。
-    //    （_api/_bootstrap/_console 首字符即不合正则，真正的分歧点只有 v2）
+    // 9. 名字规则（SPEC §4 + §11 v1.4）：project 放宽正则（大写/连字符）+ 保留名；
+    //    辅助名（owner 等）沿用旧小写正则。tag 规则不变。
     #[test]
-    fn names_reserved_project_only() {
+    fn names_project_regex_relaxed_and_reserved() {
         assert!(names::check_project("demo").is_ok());
-        assert!(names::check_slot("pr42").is_ok());
+        assert!(names::check_project("Demo42").is_ok(), "§11 放宽：大写合法");
+        assert!(names::check_project("A-b-9").is_ok());
+        assert!(names::check_project("0").is_ok());
+        assert!(names::check_project(&"a".repeat(31)).is_ok());
         for r in names::RESERVED {
             assert!(names::check_project(r).is_err(), "project 保留名应拒: {r}");
         }
-        assert!(names::check_slot("v2").is_ok(), "slot 不受保留名约束");
-        for bad in ["", "-a", "Aa", "a_b", "a b", "a.b", "a/b", "中文", &"a".repeat(32)] {
-            assert!(names::check_slot(bad).is_err(), "slot 应拒: {bad}");
+        for bad in [
+            "", "-a", "a_b", "a b", "a.b", "a/b", "中文", &"a".repeat(32), "_x", "-demo",
+        ] {
             assert!(names::check_project(bad).is_err(), "project 应拒: {bad}");
+        }
+        // 辅助名：旧小写正则（owner 进 registry 路径，保持小写约束）
+        assert!(names::check_aux("alice-2").is_ok());
+        assert!(names::check_aux("pr42").is_ok());
+        assert!(names::check_aux("v2").is_ok(), "辅助名不受保留名约束");
+        for bad in ["", "-a", "Aa", "a_", "a b", "a.b", "a/b", "中文", &"a".repeat(32)] {
+            assert!(names::check_aux(bad).is_err(), "辅助名应拒: {bad}");
         }
         for t in ["v1", "1.0.0", "latest", "a_b.c-d", "0", &"a".repeat(128)] {
             assert!(names::check_tag(t).is_ok(), "tag 应合法: {t}");
@@ -617,6 +651,24 @@ mod tests {
         for t in ["", ".x", "-x", "a b", "a/b", "中", &"a".repeat(129)] {
             assert!(names::check_tag(t).is_err(), "tag 应拒: {t}");
         }
+    }
+
+    // 9b. 随机项目名（§11 发布入口默认预填）：恒 8 位、字符集 [A-Za-z0-9]、样本间有差异
+    #[test]
+    fn random_project_shape() {
+        let mut seen = std::collections::BTreeSet::new();
+        for _ in 0..64 {
+            let p = names::random_project();
+            assert_eq!(p.len(), 8, "长度恒 8");
+            assert!(
+                p.bytes().all(|b| b.is_ascii_alphanumeric()),
+                "字符集 [a-zA-Z0-9]: {p}"
+            );
+            assert!(names::check_project(&p).is_ok(), "随机名必须通过 project 校验");
+            seen.insert(p);
+        }
+        // 62^8 空间，64 个样本必有相异对（碰撞概率 ~1e-11）
+        assert!(seen.len() > 1, "随机性：64 个样本出现 {}/64 个不同名字", seen.len());
     }
 
     // 10. 预哈希签名 / 流式哈希：与 sign/verify 同语义往返 + 已知向量
@@ -629,7 +681,7 @@ mod tests {
             "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
         );
         let k = OwnerKey::generate();
-        let pq = "/_api/import?project=demo&slot=stable&tag=v1";
+        let pq = "/_api/import?project=demo&tag=v1";
         let auth = sign_prehashed("alice", &k, "POST", pq, &hash, 7, "aabb0011ccdd2233");
         let vk = [k.0.verifying_key()];
         let v = verify_with_hash(&auth, &vk, "POST", pq, &hash, 7).unwrap();

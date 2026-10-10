@@ -9,73 +9,83 @@ use serde_json::Value;
 
 use crate::dockerops;
 use crate::publish::{self, PublishOpts, PublishOut};
-use crate::state::{self, ApiError, R, SlotConf};
+use crate::state::{self, ApiError, Conf, R};
 
-fn conf_of(root: &Path, p: &str, s: &str) -> R<SlotConf> {
-    state::SlotConf::load(root, p, s)
-        .map_err(|_| ApiError::new("E_NOTFOUND", format!("no slot '{p}/{s}'")))
+fn conf_of(root: &Path, p: &str) -> R<Conf> {
+    state::Conf::load(root, p)
+        .map_err(|_| ApiError::new("E_NOTFOUND", format!("no project '{p}'")))
 }
 
 /// stop：停容器 + conf 标记 stopped=1（autoheal/reconcile 据此跳过）。
-pub fn stop(root: &Path, p: &str, s: &str) -> R<()> {
-    let mut c = conf_of(root, p, s)?;
-    let name = publish::container_name(p, s);
+pub fn stop(root: &Path, p: &str) -> R<()> {
+    let mut c = conf_of(root, p)?;
+    let name = publish::container_name(p);
     if dockerops::container_status(&name).is_some() {
         dockerops::docker(&["stop", &name])?;
     }
     c.stopped = true;
-    c.save(root, p, s)
+    c.save(root, p)
 }
 
 /// start：清 stopped 标记；容器缺失则按 conf 的 tag 走 publish 内核重建。
-pub fn start(root: &Path, p: &str, s: &str) -> R<()> {
-    let mut c = conf_of(root, p, s)?;
-    let name = publish::container_name(p, s);
+pub fn start(root: &Path, p: &str) -> R<()> {
+    let mut c = conf_of(root, p)?;
+    let name = publish::container_name(p);
     if dockerops::container_status(&name).is_some() {
         dockerops::docker(&["start", &name])?;
     } else {
-        publish::publish(root, &c.owner, p, s, &c.tag, PublishOpts {
+        publish::publish(root, &c.owner, p, &c.tag, PublishOpts {
             mem: Some(c.mem.clone()),
             cpu: Some(c.cpu),
             cport: Some(c.cport),
         })?;
     }
     c.stopped = false;
-    c.save(root, p, s)
+    c.save(root, p)
 }
 
-/// rm：容器、路由、conf/env/last2、端口与 redisdb 登记、DB/角色，全清（幂等尽力）。
-/// DB 新旧名（归一化 + legacy，SPEC §9）都清，防存量旧名库残留。
-pub fn rm(root: &Path, p: &str, s: &str) -> R<()> {
-    conf_of(root, p, s)?; // 确认槽位存在（未登记的槽位不产生副作用）
-    let name = publish::container_name(p, s);
+/// rm：容器（新旧名）、路由、conf/env/last2、端口与 redisdb 登记、DB/角色，全清（幂等尽力）。
+/// DB：归一化新名 + legacyslot 旧候选（§9 双名）都清，防存量旧名库残留。
+pub fn rm(root: &Path, p: &str) -> R<()> {
+    let c = conf_of(root, p)?; // 确认项目存在（未登记的项目不产生副作用）
+    let name = publish::container_name(p);
     let _ = dockerops::run_fail_ok("docker", &["rm", "-f", &name]);
-    let new_db = state::db_ident(p, s);
-    let legacy_db = state::legacy_db_ident(p, s);
+    if let Some(s) = &c.legacyslot {
+        let old = format!("sr-{p}-{s}");
+        let _ = dockerops::run_fail_ok("docker", &["rm", "-f", &old]);
+    }
+    let mut dbs = vec![state::db_ident(p)];
+    if let Some(s) = &c.legacyslot {
+        for d in state::legacy_db_idents(p, s) {
+            if !dbs.contains(&d) {
+                dbs.push(d);
+            }
+        }
+    }
     let mut sql = String::new();
-    for db in [&legacy_db, &new_db] {
+    for db in &dbs {
         sql.push_str(&format!("DROP DATABASE IF EXISTS \"{db}\" WITH (FORCE);\nDROP ROLE IF EXISTS \"{db}\";\n"));
     }
     let _ = dockerops::psql(&sql);
-    let _ = fs::remove_file(state::route_path(root, p, s));
+    let _ = fs::remove_file(state::route_path(root, p));
     for path in [
-        state::conf_path(root, p, s),
-        state::env_path(root, p, s),
-        state::last2_path(root, p, s),
+        state::conf_path(root, p),
+        state::env_path(root, p),
+        state::last2_path(root, p),
     ] {
         let _ = fs::remove_file(path);
     }
-    state::release_port(root, p, s)?; // redisdb 随 conf 删除自动释放
+    state::release_port(root, p)?; // redisdb 随 conf 删除自动释放
     let _ = dockerops::caddy_reload();
     Ok(())
 }
 
 /// rollback：读 last2 按其 tag 重跑 publish 内核；内核自身会把旧 tag 写回 last2（SPEC §7）。
-pub fn rollback(root: &Path, p: &str, s: &str) -> R<PublishOut> {
-    let c = conf_of(root, p, s)?;
-    let prev = state::read_last2(root, p, s)
-        .ok_or_else(|| ApiError::new("E_NOTFOUND", format!("no last2 for '{p}/{s}'")))?;
-    publish::publish(root, &c.owner, p, s, &prev, PublishOpts {
+pub fn rollback(root: &Path, p: &str) -> R<PublishOut> {
+    let c = conf_of(root, p)?;
+    let prev = state::read_last2(root, p)
+        .ok_or_else(|| ApiError::new("E_NOTFOUND", format!("no last2 for '{p}'")))?;
+    publish::publish(root, &c.owner, p, &prev, PublishOpts {
         mem: Some(c.mem.clone()),
         cpu: Some(c.cpu),
         cport: Some(c.cport),
@@ -83,31 +93,78 @@ pub fn rollback(root: &Path, p: &str, s: &str) -> R<PublishOut> {
 }
 
 /// ps / GET /_api/projects 的数据源：conf 全量 + docker 实况。
-pub fn ps(root: &Path) -> Vec<(String, String, SlotConf, String)> {
+pub fn ps(root: &Path) -> Vec<(String, Conf, String)> {
     state::all_confs(root)
         .into_iter()
-        .map(|(p, s, c)| {
-            let st = dockerops::container_status(&publish::container_name(&p, &s))
+        .map(|(p, c)| {
+            let st = dockerops::container_status(&publish::container_name(&p))
                 .unwrap_or_else(|| "missing".into());
-            (p, s, c, st)
+            (p, c, st)
         })
         .collect()
 }
 
-pub fn logs(root: &Path, p: &str, s: &str, tail: u32) -> R<String> {
-    let _ = conf_of(root, p, s)?;
-    let name = publish::container_name(p, s);
+pub fn logs(root: &Path, p: &str, tail: u32) -> R<String> {
+    let _ = conf_of(root, p)?;
+    let name = publish::container_name(p);
     if dockerops::container_status(&name).is_none() {
         return Err(ApiError::new("E_NOTFOUND", format!("no container '{name}'")));
     }
     dockerops::logs(&name, tail)
 }
 
-pub fn env_of(root: &Path, p: &str, s: &str) -> R<BTreeMap<String, String>> {
-    let _ = conf_of(root, p, s)?;
-    let text = fs::read_to_string(state::env_path(root, p, s))
-        .map_err(|_| ApiError::new("E_NOTFOUND", format!("no env for '{p}/{s}'")))?;
+pub fn env_of(root: &Path, p: &str) -> R<BTreeMap<String, String>> {
+    let _ = conf_of(root, p)?;
+    let text = fs::read_to_string(state::env_path(root, p))
+        .map_err(|_| ApiError::new("E_NOTFOUND", format!("no env for '{p}'")))?;
     Ok(state::parse_kv(&text))
+}
+
+// —— v1.4 迁移编排（§11）：state 布局上提（state 层）+ caddy reload + 容器收养 ——
+
+/// 迁移编排（幂等；serve 启动、reconcile/autoheal 前调用）：
+/// 1. state::migrate_legacy_layout 上提 conf/env/last2、去 ports.reg slot 列、重写路由文件（stderr 记录）；
+/// 2. 有变更则 reload caddy（旧路由文件已删，新路由须重载生效）；
+/// 3. 容器收养：旧名 sr-<p>-<legacyslot> 存在且新名 sr-<p> 不存在 → docker rename；
+///    其余 sr-<p>-<x> 孤儿容器（被弃槽位）删除（排除滚动中的 sr-<p>-new）。
+pub fn migrate_legacy(root: &Path) -> Vec<String> {
+    let mut log = vec![];
+    if state::migrate_legacy_layout(root) {
+        log.push("legacy slot layout migrated to project-level".into());
+        match dockerops::caddy_reload() {
+            Ok(()) => log.push("caddy reloaded".into()),
+            Err(e) => log.push(format!("E_STATE caddy reload: {e}")),
+        }
+    }
+    let names = dockerops::all_container_names();
+    for (p, c) in state::all_confs(root) {
+        let new_name = format!("sr-{p}");
+        let legacy: Option<String> = c.legacyslot.map(|s| format!("sr-{p}-{s}"));
+        if legacy.is_some() && dockerops::container_status(&new_name).is_none() {
+            if let Some(old) = &legacy {
+                if dockerops::container_status(old).is_some() {
+                    match dockerops::docker(&["rename", old, &new_name]) {
+                        Ok(_) => log.push(format!("{p}: container renamed {old} -> {new_name}")),
+                        Err(e) => log.push(format!("{p}: E_STATE rename {old}: {e}")),
+                    }
+                }
+            }
+        }
+        if legacy.is_some() {
+            let prefix = format!("sr-{p}-");
+            let rolling = format!("{new_name}-new");
+            for n in &names {
+                if n.starts_with(&prefix) && Some(n) != legacy.as_ref() && *n != rolling {
+                    if dockerops::run_fail_ok("docker", &["rm", "-f", n]) {
+                        log.push(format!("{p}: removed legacy container {n}"));
+                    } else {
+                        log.push(format!("{p}: E_STATE rm legacy container {n}"));
+                    }
+                }
+            }
+        }
+    }
+    log
 }
 
 // —— Redis 浏览内核（SPEC §10.3，排障用；跨 owner 不隔离——SPEC 已注明）——
@@ -144,37 +201,37 @@ pub fn redis_get(db: u8, key: &str) -> R<(String, i64, String)> {
     Ok((t, ttl_ms, state::clip_value(&raw)))
 }
 
-/// reconcile：遍历 slot.conf，容器/路由缺失按 conf 重建（幂等）。
+/// reconcile：先跑 v1.4 迁移编排（§11，幂等），再遍历项目 conf，容器/路由缺失按 conf 重建。
 pub fn reconcile(root: &Path) -> Vec<String> {
-    let mut log = vec![];
-    for (p, s, c) in state::all_confs(root) {
+    let mut log = migrate_legacy(root);
+    for (p, c) in state::all_confs(root) {
         if c.stopped {
             continue;
         }
-        let name = publish::container_name(&p, &s);
+        let name = publish::container_name(&p);
         match dockerops::container_status(&name) {
-            None => match publish::publish(root, &c.owner, &p, &s, &c.tag, PublishOpts {
+            None => match publish::publish(root, &c.owner, &p, &c.tag, PublishOpts {
                 mem: Some(c.mem.clone()),
                 cpu: Some(c.cpu),
                 cport: Some(c.cport),
             }) {
-                Ok(_) => log.push(format!("{p}/{s}: rebuilt (container was missing)")),
-                Err(e) => log.push(format!("{p}/{s}: E_STATE rebuild failed: {e}")),
+                Ok(_) => log.push(format!("{p}: rebuilt (container was missing)")),
+                Err(e) => log.push(format!("{p}: E_STATE rebuild failed: {e}")),
             },
             Some(st) if st != "running" => {
                 if dockerops::run_fail_ok("docker", &["start", &name]) {
-                    log.push(format!("{p}/{s}: started (was {st})"));
+                    log.push(format!("{p}: started (was {st})"));
                 } else {
-                    log.push(format!("{p}/{s}: E_STATE start failed (was {st})"));
+                    log.push(format!("{p}: E_STATE start failed (was {st})"));
                 }
             }
             Some(_) => {
-                let want = state::caddy_route(&p, &s, c.port);
-                let rp = state::route_path(root, &p, &s);
+                let want = state::caddy_route(&p, c.port);
+                let rp = state::route_path(root, &p);
                 if fs::read_to_string(&rp).unwrap_or_default() != want {
-                    match publish::apply_route(root, &p, &s, c.port) {
-                        Ok(()) => log.push(format!("{p}/{s}: route rewritten + caddy reloaded")),
-                        Err(e) => log.push(format!("{p}/{s}: E_STATE route: {e}")),
+                    match publish::apply_route(root, &p, c.port) {
+                        Ok(()) => log.push(format!("{p}: route rewritten + caddy reloaded")),
+                        Err(e) => log.push(format!("{p}: E_STATE route: {e}")),
                     }
                 }
             }
@@ -186,35 +243,36 @@ pub fn reconcile(root: &Path) -> Vec<String> {
     log
 }
 
-/// autoheal：stopped=1 跳过；容器缺失→重建；退出→start；unhealthy→restart。
+/// autoheal：先跑 v1.4 迁移编排（§11，幂等；容器收养防误重建双份），再自愈：
+/// stopped=1 跳过；容器缺失→重建；退出→start；unhealthy→restart。
 pub fn autoheal(root: &Path) -> Vec<String> {
-    let mut log = vec![];
-    for (p, s, c) in state::all_confs(root) {
+    let mut log = migrate_legacy(root);
+    for (p, c) in state::all_confs(root) {
         if c.stopped {
             continue;
         }
-        let name = publish::container_name(&p, &s);
+        let name = publish::container_name(&p);
         match dockerops::container_status(&name) {
-            None => match publish::publish(root, &c.owner, &p, &s, &c.tag, PublishOpts {
+            None => match publish::publish(root, &c.owner, &p, &c.tag, PublishOpts {
                 mem: Some(c.mem.clone()),
                 cpu: Some(c.cpu),
                 cport: Some(c.cport),
             }) {
-                Ok(_) => log.push(format!("{p}/{s}: rebuilt (container gone)")),
-                Err(e) => log.push(format!("{p}/{s}: E_STATE rebuild failed: {e}")),
+                Ok(_) => log.push(format!("{p}: rebuilt (container gone)")),
+                Err(e) => log.push(format!("{p}: E_STATE rebuild failed: {e}")),
             },
             Some(st) if st == "exited" || st == "dead" || st == "created" => {
                 if dockerops::run_fail_ok("docker", &["start", &name]) {
-                    log.push(format!("{p}/{s}: started (was {st})"));
+                    log.push(format!("{p}: started (was {st})"));
                 } else {
-                    log.push(format!("{p}/{s}: E_STATE start failed (was {st})"));
+                    log.push(format!("{p}: E_STATE start failed (was {st})"));
                 }
             }
             Some(_) => {
                 if dockerops::health_status(&name).as_deref() == Some("unhealthy")
                     && dockerops::run_fail_ok("docker", &["restart", &name])
                 {
-                    log.push(format!("{p}/{s}: restarted (unhealthy)"));
+                    log.push(format!("{p}: restarted (unhealthy)"));
                 }
             }
         }

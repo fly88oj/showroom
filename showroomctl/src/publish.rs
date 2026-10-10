@@ -1,5 +1,5 @@
-//! publish / import 内核（SPEC §7 全流程）：serve 与 CLI 子命令共用的唯一入口。
-//! publish：校验→归属→配额→registry 存在→端口/redisdb→DB 重建→env→容器（-new 滚动）→路由→conf/last2。
+//! publish / import 内核（SPEC §7 全流程 + §11 v1.4 无槽位模型）：serve 与 CLI 子命令共用的唯一入口。
+//! publish：校验→归属→配额→registry 存在→端口/redisdb→DB 供给→env→容器（-new 滚动）→路由→conf/last2。
 
 use std::fs;
 use std::io::{self, Read, Write};
@@ -26,12 +26,16 @@ pub struct PublishOut {
     pub port: u16,
 }
 
-pub fn container_name(p: &str, s: &str) -> String {
-    format!("sr-{p}-{s}")
+/// 容器名（§11）：`sr-<project>`。
+pub fn container_name(p: &str) -> String {
+    format!("sr-{p}")
 }
 
+/// 镜像引用（§11）：`127.0.0.1:5000/<owner>/<project>:<tag>`。
+/// project 正则已放宽允许大写（§11），但 docker 仓库名强制小写 → repo 路径转小写
+/// （同 owner 下 "Demo" 与 "demo" 共享 registry 命名空间，容器/DB/conf 仍各自独立）。
 pub fn image_ref(owner: &str, p: &str, tag: &str) -> String {
-    format!("127.0.0.1:5000/{owner}/{p}:{tag}")
+    format!("127.0.0.1:5000/{owner}/{}:{tag}", p.to_ascii_lowercase())
 }
 
 /// docker tag 规则（转发 common::names：首字符字母/数字/_，余 [A-Za-z0-9_.-]，≤128）。
@@ -39,9 +43,9 @@ pub fn check_tag(tag: &str) -> R<()> {
     showroom_common::names::check_tag(tag).map_err(|e| ApiError::new("E_NAME", e))
 }
 
-/// project 归属首个创建者：任一现存 slot.conf 的 owner 必须等于本次发布者。
+/// project 归属首个创建者：现存项目 conf 的 owner 必须等于本次发布者。
 pub fn check_ownership(root: &Path, project: &str, owner: &str) -> R<()> {
-    for (pj, _, c) in state::all_confs(root) {
+    for (pj, c) in state::all_confs(root) {
         if pj == project {
             if c.owner != owner {
                 return Err(ApiError::new(
@@ -79,23 +83,21 @@ pub fn publish(
     root: &Path,
     owner: &str,
     project: &str,
-    slot: &str,
     tag: &str,
     opts: PublishOpts,
 ) -> R<PublishOut> {
     state::check_name("project", project)?;
-    state::check_name("slot", slot)?;
     check_tag(tag)?;
     check_ownership(root, project, owner)?;
     let policy = state::Policy::load(root);
-    let old = state::SlotConf::load(root, project, slot).ok();
-    // ponytail: MAX_SLOTS 按全平台 slot conf 总数计（100 端口池之上更紧的整机配额）
+    let old = state::Conf::load(root, project).ok();
+    // ponytail: MAX_SLOTS 按全平台项目 conf 总数计（§11 语义=项目数上限；键名沿用存量 policy.env）
     if old.is_none() && state::all_confs(root).len() as u32 >= policy.max_slots {
         return Err(ApiError::new("E_QUOTA", format!("MAX_SLOTS={} reached", policy.max_slots)));
     }
     let mem = state::effective_mem(&policy, opts.mem.as_deref().or(old.as_ref().map(|c| c.mem.as_str())))?;
     // 内存准入（SPEC §10.2）：MemAvailable − RESERVE_MEM_MB ≥ 本次需求才放行，否则 E_QUOTA。
-    // 只查**本次请求**的 need（当前可用减预留是否满足本次需求），不累加存量槽位——
+    // 只查**本次请求**的 need（当前可用减预留是否满足本次需求），不累加存量项目——
     // 存量由容器 --memory 硬限自保护。放在创建容器（含 DB 供给/env 写盘）之前，失败零副作用。
     let need_mb = state::parse_mem(&mem).unwrap_or(0) >> 20;
     if let Err(m) = state::mem_admission(need_mb, mem_available_kb()?, policy.reserve_mem_mb) {
@@ -112,7 +114,7 @@ pub fn publish(
         None => state::alloc_redisdb(root)?,
     };
 
-    let repo = format!("{owner}/{project}");
+    let repo = format!("{owner}/{}", project.to_ascii_lowercase());
     if !dockerops::image_exists(root, &repo, tag)? {
         return Err(ApiError::new(
             "E_NOTFOUND",
@@ -120,16 +122,13 @@ pub fn publish(
         ));
     }
 
-    // DB 供给（SPEC §9.2 首建不重建，数据保留）：存量库（归一化新名或 legacy 旧名）存在则
+    // DB 供给（SPEC §9.2 首建不重建，数据保留）：存量库（归一化新名或 §11 迁移沿用旧名）存在则
     // 沿用并仅对齐角色密码（下方 env 全量重写 + 容器滚动重启使新凭据生效）；不存在才 CREATE。
     // 归一化切换（旧名 → 新名）由 db-reset 终结，publish 不做迁移。
-    let new_db = state::db_ident(project, slot);
-    let legacy_db = state::legacy_db_ident(project, slot);
-    let new_exists = dockerops::db_exists(&new_db)?;
-    let legacy_exists = legacy_db != new_db && dockerops::db_exists(&legacy_db)?;
-    let db = state::resolve_db_ident(project, slot, new_exists, legacy_exists);
+    let legacyslot = old.as_ref().and_then(|c| c.legacyslot.as_deref());
+    let (db, db_exists) = crate::dbmaint::resolve_db(project, legacyslot)?;
     let db_pass = state::rand_hex(16);
-    let sql = if new_exists || legacy_exists {
+    let sql = if db_exists {
         format!("ALTER ROLE \"{db}\" LOGIN PASSWORD '{db_pass}';\n")
     } else {
         format!(
@@ -139,16 +138,16 @@ pub fn publish(
     };
     dockerops::psql(&sql)?;
 
-    // env 文件（SPEC §6 全字段具体化；DB_NAME/DATABASE_URL 指向已解析的库名）
-    fs::create_dir_all(state::projects_dir(root).join(project))?;
+    // env 文件（SPEC §6 全字段具体化；§11 无 SHOWROOM_SLOT，BASE_PATH 恒 /<project>/）
+    fs::create_dir_all(state::projects_dir(root))?;
     fs::write(
-        state::env_path(root, project, slot),
-        state::env_file_contents(project, slot, &db, &db_pass, redisdb),
+        state::env_path(root, project),
+        state::env_file_contents(project, &db, &db_pass, redisdb),
     )?;
 
-    // 容器：同槽位唯一 host 端口 → 先停旧、以 -new 起新、健康后删旧改名
+    // 容器：同项目唯一 host 端口 → 先停旧、以 -new 起新、健康后删旧改名
     // ponytail: 无双活（两容器抢同一 8100 端口），停旧到起新之间秒级中断，够用
-    let name = container_name(project, slot);
+    let name = container_name(project);
     let newname = format!("{name}-new");
     let _ = dockerops::run_fail_ok("docker", &["rm", "-f", &newname]); // 清理上次失败残留
     let had_old = dockerops::container_status(&name).is_some();
@@ -156,7 +155,7 @@ pub fn publish(
         dockerops::docker(&["stop", &name])?; // 释放 host 端口
     }
     let bind = if policy.allow_lan_port { "0.0.0.0" } else { "127.0.0.1" };
-    let env_file = state::env_path(root, project, slot);
+    let env_file = state::env_path(root, project);
     let env_file = env_file.to_str().ok_or_else(|| ApiError::state("non-utf8 env path"))?;
     let publish_port = format!("{bind}:{port}:{cport}");
     let cpu_s = cpu.to_string();
@@ -175,13 +174,13 @@ pub fn publish(
     health_probe(port);
     let _ = dockerops::run_fail_ok("docker", &["rm", "-f", &name]); // 旧容器（可能本就不存在）
     dockerops::docker(&["rename", &newname, &name])?;
-    state::register_port(root, port, project, slot)?;
+    state::register_port(root, port, project)?;
 
     // last2 = 上一 tag（rollback 据此回跳；幂等重发也刷新）
     if let Some(o) = &old {
-        let _ = fs::write(state::last2_path(root, project, slot), &o.tag);
+        let _ = fs::write(state::last2_path(root, project), &o.tag);
     }
-    let conf = state::SlotConf {
+    let conf = state::Conf {
         owner: owner.to_string(),
         tag: tag.to_string(),
         port,
@@ -191,16 +190,17 @@ pub fn publish(
         redisdb,
         updated: state::unix_now(),
         stopped: false,
+        legacyslot: old.and_then(|c| c.legacyslot), // 迁移来源槽位保留（DB 检测沿用）
     };
-    conf.save(root, project, slot)?;
-    apply_route(root, project, slot, port)?;
-    Ok(PublishOut { url: state::public_url(project, slot), port })
+    conf.save(root, project)?;
+    apply_route(root, project, port)?;
+    Ok(PublishOut { url: state::public_url(project), port })
 }
 
 /// 写路由片段并 reload caddy；失败恢复旧片段重载后报 E_STATE（回滚说明）。
-pub fn apply_route(root: &Path, project: &str, slot: &str, port: u16) -> R<()> {
-    let path = state::route_path(root, project, slot);
-    let want = state::caddy_route(project, slot, port);
+pub fn apply_route(root: &Path, project: &str, port: u16) -> R<()> {
+    let path = state::route_path(root, project);
+    let want = state::caddy_route(project, port);
     let prev = fs::read_to_string(&path).ok();
     fs::create_dir_all(state::routes_dir(root))?;
     fs::write(&path, &want)?;
@@ -260,19 +260,17 @@ pub fn import_from_file(
     root: &Path,
     owner: &str,
     project: &str,
-    slot: &str,
     tag: &str,
     sealed: &Path,
 ) -> R<String> {
     state::check_name("project", project)?;
-    state::check_name("slot", slot)?;
     check_tag(tag)?;
-    let res = import_inner(root, owner, project, slot, tag, sealed);
+    let res = import_inner(root, owner, project, tag, sealed);
     let _ = fs::remove_file(sealed);
     res
 }
 
-fn import_inner(root: &Path, owner: &str, project: &str, _slot: &str, tag: &str, sealed: &Path) -> R<String> {
+fn import_inner(root: &Path, owner: &str, project: &str, tag: &str, sealed: &Path) -> R<String> {
     use showroom_common::rsa::pkcs8::DecodePrivateKey;
 
     let cap = state::Policy::load(root).import_cap_bytes();
@@ -356,7 +354,6 @@ fn import_inner(root: &Path, owner: &str, project: &str, _slot: &str, tag: &str,
 pub struct ImportMeta {
     pub owner: String,
     pub project: String,
-    pub slot: String,
     pub tag: String,
     pub image_id: String,
     pub total: u64,
@@ -403,7 +400,6 @@ pub fn import_begin(
     root: &Path,
     owner: &str,
     project: &str,
-    slot: &str,
     tag: &str,
     image_id: &str,
     total_bytes: u64,
@@ -424,7 +420,6 @@ pub fn import_begin(
     let m = ImportMeta {
         owner: owner.to_string(),
         project: project.to_string(),
-        slot: slot.to_string(),
         tag: tag.to_string(),
         image_id: image_id.to_string(),
         total: total_bytes,
@@ -477,7 +472,7 @@ pub fn import_end(root: &Path, owner: &str, id: &str) -> R<String> {
     if have != m.total {
         return Err(ApiError::new("E_QUOTA", format!("upload incomplete: {have}/{} bytes", m.total)));
     }
-    let d = match import_from_file(root, owner, &m.project, &m.slot, &m.tag, &bin) {
+    let d = match import_from_file(root, owner, &m.project, &m.tag, &bin) {
         Ok(d) => d,
         Err(e) => {
             let _ = fs::remove_file(upload_meta(root, id));
@@ -509,14 +504,14 @@ mod tests {
     #[test]
     fn import_session_flow() {
         let root = troot("session");
-        let id = import_begin(&root, "alice", "demo", "stable", "v1", "sha256:abcd", 10).unwrap();
+        let id = import_begin(&root, "alice", "demo", "v1", "sha256:abcd", 10).unwrap();
         assert_eq!(id.len(), 32);
 
         // meta 读写往返
         let m = load_meta(&root, &id).unwrap();
         assert_eq!(
-            (m.owner.as_str(), m.project.as_str(), m.slot.as_str(), m.tag.as_str(), m.image_id.as_str(), m.total),
-            ("alice", "demo", "stable", "v1", "sha256:abcd", 10)
+            (m.owner.as_str(), m.project.as_str(), m.tag.as_str(), m.image_id.as_str(), m.total),
+            ("alice", "demo", "v1", "sha256:abcd", 10)
         );
         assert_eq!(m.received, Vec::<u64>::new());
         assert!(m.created > 0);
@@ -556,19 +551,19 @@ mod tests {
     #[test]
     fn import_begin_limits() {
         let root = troot("begin");
-        assert_eq!(import_begin(&root, "alice", "demo", "stable", "v1", "sha256:x", 9 << 30).unwrap_err().code, "E_QUOTA");
-        assert_eq!(import_begin(&root, "alice", "demo", "stable", "v1", "", 10).unwrap_err().code, "E_NAME");
-        assert_eq!(import_begin(&root, "alice", "demo", "stable", "a b", "i", 10).unwrap_err().code, "E_NAME");
-        assert_eq!(import_begin(&root, "alice", "demo", "stable", "a/b", "i", 10).unwrap_err().code, "E_NAME");
+        assert_eq!(import_begin(&root, "alice", "demo", "v1", "sha256:x", 9 << 30).unwrap_err().code, "E_QUOTA");
+        assert_eq!(import_begin(&root, "alice", "demo", "v1", "", 10).unwrap_err().code, "E_NAME");
+        assert_eq!(import_begin(&root, "alice", "demo", "a b", "i", 10).unwrap_err().code, "E_NAME");
+        assert_eq!(import_begin(&root, "alice", "demo", "a/b", "i", 10).unwrap_err().code, "E_NAME");
         // 8GB 边界通过
-        assert!(import_begin(&root, "alice", "demo", "stable", "v1", "i", 8 << 30).is_ok());
+        assert!(import_begin(&root, "alice", "demo", "v1", "i", 8 << 30).is_ok());
     }
 
     // A6 回归：end 进入 import 管道后失败（root 无 platform_rsa，解密前即败）→ .bin/.meta 双清
     #[test]
     fn import_end_failure_cleans_bin_and_meta() {
         let root = troot("end-clean");
-        let id = import_begin(&root, "alice", "demo", "stable", "v1", "sha256:x", 4).unwrap();
+        let id = import_begin(&root, "alice", "demo", "v1", "sha256:x", 4).unwrap();
         import_chunk(&root, "alice", &id, 0, &chunk_file(&root, b"abcd")).unwrap();
         let (bin, meta) = (upload_bin(&root, &id), upload_meta(&root, &id));
         assert!(bin.exists() && meta.exists());

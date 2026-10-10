@@ -61,6 +61,10 @@ pub async fn run(root: PathBuf) -> R<()> {
         let p = ops::init_keys(&root)?;
         eprintln!("showroomctl: platform rsa generated at {}", p.display());
     }
+    // v1.4 槽位布局迁移（§11，幂等；state 上提 + caddy reload + 容器收养，stderr/日志如实记录）
+    for l in ops::migrate_legacy(&root) {
+        eprintln!("showroomctl: migrate: {l}");
+    }
     let st: S = Arc::new(AppState { root, nonces: Mutex::new(HashMap::new()) });
     let app = Router::new().fallback(api).with_state(st);
     let listener = tokio::net::TcpListener::bind("127.0.0.1:8090")
@@ -119,14 +123,11 @@ async fn dispatch(
     // 流式下行早返回（SPEC §10.4）：ndjson 流 / octet-stream 切片不走统一 JSON 响应体
     if method == "GET" && path == "/_api/logs-stream" {
         let project = qget(&q, "project")?;
-        let slot = qget(&q, "slot")?;
         state::check_name("project", &project)?;
-        state::check_name("slot", &slot)?;
-        own_check(&s.root, &project, &slot, &owner)?;
+        own_check(&s.root, &project, &owner)?;
         let tail: u32 = q.get("tail").and_then(|t| t.parse().ok()).unwrap_or(100).min(10000);
         let root = s.root.clone();
-        let (p, sl) = (project, slot);
-        return blk(move || streams::logs_stream(&root, &p, &sl, tail)).await;
+        return blk(move || streams::logs_stream(&root, &project, tail)).await;
     }
     if method == "GET" && path == "/_api/events" {
         return streams::events_stream();
@@ -162,7 +163,7 @@ async fn dispatch(
             blk(move || {
                 let v: Vec<_> = ops::ps(&root)
                     .into_iter()
-                    .map(|(p, sl, c, st)| c.to_json(&p, &sl, &st))
+                    .map(|(p, c, st)| c.to_json(&p, &st))
                     .collect();
                 Ok(Json(json!({"projects": v})))
             })
@@ -177,7 +178,6 @@ async fn dispatch(
                     &root,
                     &owner,
                     &req.project,
-                    &req.slot,
                     &req.tag,
                     publish::PublishOpts { mem: req.mem, cpu: req.cpu, cport: req.container_port },
                 )
@@ -191,8 +191,8 @@ async fn dispatch(
             "/_api/stop" | "/_api/start" | "/_api/rm" | "/_api/rollback",
             Collected::Mem(b),
         ) => {
-            let req: SlotReq = jbody(b)?;
-            own_check(&s.root, &req.project, &req.slot, &owner)?;
+            let req: ProjectReq = jbody(b)?;
+            own_check(&s.root, &req.project, &owner)?;
             let act: &'static str = match path {
                 "/_api/stop" => "stop",
                 "/_api/start" => "start",
@@ -200,12 +200,12 @@ async fn dispatch(
                 _ => "rollback",
             };
             let root = s.root.clone();
-            let (p, sl) = (req.project, req.slot);
+            let p = req.project;
             let r = blk(move || match act {
-                "stop" => ops::stop(&root, &p, &sl).map(|_| None),
-                "start" => ops::start(&root, &p, &sl).map(|_| None),
-                "rm" => ops::rm(&root, &p, &sl).map(|_| None),
-                _ => ops::rollback(&root, &p, &sl).map(Some),
+                "stop" => ops::stop(&root, &p).map(|_| None),
+                "start" => ops::start(&root, &p).map(|_| None),
+                "rm" => ops::rm(&root, &p).map(|_| None),
+                _ => ops::rollback(&root, &p).map(Some),
             })
             .await?;
             Ok(match r {
@@ -216,15 +216,13 @@ async fn dispatch(
 
         ("POST", "/_api/import", Collected::File(tmp)) => {
             let project = qget(&q, "project")?;
-            let slot = qget(&q, "slot")?;
             let tag = qget(&q, "tag")?;
             state::check_name("project", &project)?;
-            state::check_name("slot", &slot)?;
             publish::check_ownership(&s.root, &project, &owner)?;
             let root = s.root.clone();
             let o = owner.clone();
             let tmp = tmp.clone();
-            let digest = blk(move || publish::import_from_file(&root, &o, &project, &slot, &tag, &tmp)).await?;
+            let digest = blk(move || publish::import_from_file(&root, &o, &project, &tag, &tmp)).await?;
             Ok(Json(json!({"ok": true, "digest": digest})))
         }
 
@@ -239,13 +237,12 @@ async fn dispatch(
         ("POST", "/_api/import-begin", Collected::Mem(b)) => {
             let req: BeginReq = jbody(b)?;
             state::check_name("project", &req.project)?;
-            state::check_name("slot", &req.slot)?;
             publish::check_tag(&req.tag)?;
             publish::check_ownership(&s.root, &req.project, &owner)?;
             let root = s.root.clone();
             let o = owner.clone();
             let id = blk(move || {
-                publish::import_begin(&root, &o, &req.project, &req.slot, &req.tag, &req.image_id, req.total_bytes)
+                publish::import_begin(&root, &o, &req.project, &req.tag, &req.image_id, req.total_bytes)
             })
             .await?;
             Ok(Json(json!({"upload_id": id})))
@@ -282,30 +279,29 @@ async fn dispatch(
         ("POST", "/_api/db-sql", Collected::Mem(b)) => {
             let req: DbSqlReq = jbody(b)?;
             state::check_name("project", &req.project)?;
-            state::check_name("slot", &req.slot)?;
-            own_check(&s.root, &req.project, &req.slot, &owner)?;
-            let (p, sl, sql, confirm) = (req.project, req.slot, req.sql, req.confirm.unwrap_or(false));
-            let out = blk(move || dbmaint::sql(&p, &sl, &sql, confirm)).await?;
+            own_check(&s.root, &req.project, &owner)?;
+            let (p, sql, confirm) = (req.project, req.sql, req.confirm.unwrap_or(false));
+            let root = s.root.clone();
+            let out = blk(move || dbmaint::sql(&root, &p, &sql, confirm)).await?;
             Ok(Json(json!({"out": out})))
         }
 
         ("GET", "/_api/db-tables", _) => {
             let project = qget(&q, "project")?;
-            let slot = qget(&q, "slot")?;
             state::check_name("project", &project)?;
-            state::check_name("slot", &slot)?;
-            own_check(&s.root, &project, &slot, &owner)?;
-            let tables = blk(move || dbmaint::tables(&project, &slot)).await?;
+            own_check(&s.root, &project, &owner)?;
+            let root = s.root.clone();
+            let tables = blk(move || dbmaint::tables(&root, &project)).await?;
             Ok(Json(json!({"tables": tables})))
         }
 
         ("POST", "/_api/db-preview", Collected::Mem(b)) => {
             let req: DbPreviewReq = jbody(b)?;
             state::check_name("project", &req.project)?;
-            state::check_name("slot", &req.slot)?;
-            own_check(&s.root, &req.project, &req.slot, &owner)?;
-            let (p, sl, table, limit) = (req.project, req.slot, req.table, req.limit.unwrap_or(50));
-            let (columns, rows) = blk(move || dbmaint::preview(&p, &sl, &table, limit)).await?;
+            own_check(&s.root, &req.project, &owner)?;
+            let (p, table, limit) = (req.project, req.table, req.limit.unwrap_or(50));
+            let root = s.root.clone();
+            let (columns, rows) = blk(move || dbmaint::preview(&root, &p, &table, limit)).await?;
             Ok(Json(json!({"columns": columns, "rows": rows})))
         }
 
@@ -313,12 +309,11 @@ async fn dispatch(
         ("POST", "/_api/db-dump-begin", Collected::Mem(b)) => {
             let req: DbDumpBeginReq = jbody(b)?;
             state::check_name("project", &req.project)?;
-            state::check_name("slot", &req.slot)?;
-            own_check(&s.root, &req.project, &req.slot, &owner)?;
+            own_check(&s.root, &req.project, &owner)?;
             let root = s.root.clone();
             let o = owner.clone();
-            let (p, sl, pem) = (req.project, req.slot, req.client_pub_pem);
-            let id = blk(move || dbmaint::dump_begin(&root, &o, &p, &sl, &pem)).await?;
+            let (p, pem) = (req.project, req.client_pub_pem);
+            let id = blk(move || dbmaint::dump_begin(&root, &o, &p, &pem)).await?;
             Ok(Json(json!({"dump_id": id})))
         }
 
@@ -332,26 +327,23 @@ async fn dispatch(
 
         ("POST", "/_api/db-restore", Collected::File(tmp)) => {
             let project = qget(&q, "project")?;
-            let slot = qget(&q, "slot")?;
             let confirm = q.get("confirm").map(|v| v == "true").unwrap_or(false);
             state::check_name("project", &project)?;
-            state::check_name("slot", &slot)?;
-            own_check(&s.root, &project, &slot, &owner)?;
+            own_check(&s.root, &project, &owner)?;
             let root = s.root.clone();
-            let (p, sl) = (project, slot);
+            let p = project;
             let tmp = tmp.clone();
-            blk(move || dbmaint::restore(&root, &p, &sl, confirm, &tmp)).await?;
+            blk(move || dbmaint::restore(&root, &p, confirm, &tmp)).await?;
             Ok(Json(json!({"ok": true})))
         }
 
         ("POST", "/_api/db-reset", Collected::Mem(b)) => {
             let req: DbResetReq = jbody(b)?;
             state::check_name("project", &req.project)?;
-            state::check_name("slot", &req.slot)?;
-            own_check(&s.root, &req.project, &req.slot, &owner)?;
+            own_check(&s.root, &req.project, &owner)?;
             let root = s.root.clone();
-            let (p, sl, confirm) = (req.project, req.slot, req.confirm.unwrap_or(false));
-            blk(move || dbmaint::reset(&root, &p, &sl, confirm)).await?;
+            let (p, confirm) = (req.project, req.confirm.unwrap_or(false));
+            blk(move || dbmaint::reset(&root, &p, confirm)).await?;
             Ok(Json(json!({"ok": true})))
         }
 
@@ -379,20 +371,18 @@ async fn dispatch(
 
         ("GET", "/_api/logs", _) => {
             let project = qget(&q, "project")?;
-            let slot = qget(&q, "slot")?;
-            own_check(&s.root, &project, &slot, &owner)?;
+            own_check(&s.root, &project, &owner)?;
             let tail: u32 = q.get("tail").and_then(|t| t.parse().ok()).unwrap_or(100).min(10000);
             let root = s.root.clone();
-            let logs = blk(move || ops::logs(&root, &project, &slot, tail)).await?;
+            let logs = blk(move || ops::logs(&root, &project, tail)).await?;
             Ok(Json(json!({"logs": logs})))
         }
 
         ("GET", "/_api/env", _) => {
             let project = qget(&q, "project")?;
-            let slot = qget(&q, "slot")?;
-            own_check(&s.root, &project, &slot, &owner)?;
+            own_check(&s.root, &project, &owner)?;
             let root = s.root.clone();
-            let env = blk(move || ops::env_of(&root, &project, &slot)).await?;
+            let env = blk(move || ops::env_of(&root, &project)).await?;
             Ok(Json(json!({"env": env})))
         }
 
@@ -555,9 +545,9 @@ fn jbody<T: serde::de::DeserializeOwned>(b: &[u8]) -> R<T> {
     serde_json::from_slice(b).map_err(|e| ApiError::new("E_NAME", format!("bad json body: {e}")))
 }
 
-fn own_check(root: &Path, project: &str, slot: &str, owner: &str) -> R<()> {
-    let conf = state::SlotConf::load(root, project, slot)
-        .map_err(|_| ApiError::new("E_NOTFOUND", format!("no slot '{project}/{slot}'")))?;
+fn own_check(root: &Path, project: &str, owner: &str) -> R<()> {
+    let conf = state::Conf::load(root, project)
+        .map_err(|_| ApiError::new("E_NOTFOUND", format!("no project '{project}'")))?;
     if conf.owner != owner {
         return Err(ApiError::new("E_AUTH", format!("project '{project}' belongs to {}", conf.owner)));
     }
@@ -567,7 +557,6 @@ fn own_check(root: &Path, project: &str, slot: &str, owner: &str) -> R<()> {
 #[derive(Deserialize)]
 struct PubReq {
     project: String,
-    slot: String,
     tag: String,
     mem: Option<String>,
     cpu: Option<f64>,
@@ -575,9 +564,8 @@ struct PubReq {
 }
 
 #[derive(Deserialize)]
-struct SlotReq {
+struct ProjectReq {
     project: String,
-    slot: String,
 }
 
 #[derive(Deserialize)]
@@ -588,7 +576,6 @@ struct IdReq {
 #[derive(Deserialize)]
 struct BeginReq {
     project: String,
-    slot: String,
     tag: String,
     image_id: String,
     total_bytes: u64,
@@ -597,7 +584,6 @@ struct BeginReq {
 #[derive(Deserialize)]
 struct DbSqlReq {
     project: String,
-    slot: String,
     sql: String,
     confirm: Option<bool>,
 }
@@ -605,7 +591,6 @@ struct DbSqlReq {
 #[derive(Deserialize)]
 struct DbPreviewReq {
     project: String,
-    slot: String,
     table: String,
     limit: Option<u32>,
 }
@@ -613,14 +598,12 @@ struct DbPreviewReq {
 #[derive(Deserialize)]
 struct DbDumpBeginReq {
     project: String,
-    slot: String,
     client_pub_pem: String,
 }
 
 #[derive(Deserialize)]
 struct DbResetReq {
     project: String,
-    slot: String,
     confirm: Option<bool>,
 }
 

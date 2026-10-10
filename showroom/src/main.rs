@@ -1,5 +1,6 @@
 //! showroom：Showroom 发布者 CLI。
 //! push/publish/ps/url/logs/env/rollback/stop/start/rm/doctor，全部走 SR-SIG1 签名 API。
+//! §11 v1.4：无槽位模型——project 即展项唯一键，URL 恒 /<project>/；publish 省略项目名时自动随机。
 
 mod api;
 mod config;
@@ -15,7 +16,7 @@ use serde_json::{json, Value};
 
 use api::{Api, Which};
 use config::Config;
-use showroom_common::names::{check_project, check_slot, check_tag};
+use showroom_common::names::{check_project, check_tag, random_project};
 use showroom_common::OwnerKey;
 
 #[derive(Parser)]
@@ -63,14 +64,11 @@ enum Cmd {
         tag: String,
         #[arg(long, value_enum, default_value = "auto")]
         via: Via,
-        /// import 通道登记到的槽位
-        #[arg(long, default_value = "stable")]
-        slot: String,
     },
-    /// 发布/更新展项槽位
+    /// 发布/更新展项（省略 project 时自动生成随机 8 位项目名）
     Publish {
-        project: String,
-        slot: String,
+        /// 展项项目名（省略时自动生成随机 8 位名并醒目展示）
+        project: Option<String>,
         tag: String,
         #[arg(long)]
         mem: Option<String>,
@@ -88,15 +86,13 @@ enum Cmd {
         #[arg(long)]
         json: bool,
     },
-    /// 打印展项 URL（不开浏览器；省略 slot 时打印该 project 全部槽位）
+    /// 打印展项 URL（不开浏览器）
     Url {
         project: String,
-        slot: Option<String>,
     },
     /// 查看日志
     Logs {
         project: String,
-        slot: Option<String>,
         #[arg(long, default_value_t = 100)]
         tail: u32,
         #[arg(short = 'f', long)]
@@ -105,27 +101,22 @@ enum Cmd {
     /// 查看注入容器的环境变量（DB/Redis 连接信息，SPEC §6）
     Env {
         project: String,
-        slot: Option<String>,
     },
     /// 回滚到上一个 tag
     Rollback {
         project: String,
-        slot: String,
     },
     /// 停止展项
     Stop {
         project: String,
-        slot: String,
     },
     /// 启动展项
     Start {
         project: String,
-        slot: String,
     },
     /// 删除展项（需 --yes）
     Rm {
         project: String,
-        slot: String,
         #[arg(long)]
         yes: bool,
     },
@@ -153,36 +144,42 @@ fn run(cli: &Cli) -> Result<(), String> {
         Cmd::Config { owner, server_lan, server_public, registry_user, registry_password } => {
             config_cmd(&cfg, owner, server_lan, server_public, registry_user, registry_password)
         }
-        Cmd::Push { project, tag, via, slot } => {
-            push(&cfg, cli.server, project, tag, *via, slot)
+        Cmd::Push { project, tag, via } => push(&cfg, cli.server, project, tag, *via),
+        Cmd::Publish { project, tag, mem, cpu, container_port, wait } => {
+            let project = match project {
+                Some(p) => p.clone(),
+                None => {
+                    let p = random_project();
+                    println!("项目名：{p}（已自动生成，可显式指定）");
+                    p
+                }
+            };            publish(
+                &cfg,
+                cli.server,
+                &project,
+                tag,
+                mem.as_deref(),
+                *cpu,
+                *container_port,
+                *wait,
+            )
         }
-        Cmd::Publish { project, slot, tag, mem, cpu, container_port, wait } => publish(
-            &cfg,
-            cli.server,
-            project,
-            slot,
-            tag,
-            mem.as_deref(),
-            *cpu,
-            *container_port,
-            *wait,
-        ),
         Cmd::Ps { json } => ps(&cfg, cli.server, *json),
-        Cmd::Url { project, slot } => url_cmd(&cfg, cli.server, project, slot.as_deref()),
-        Cmd::Logs { project, slot, tail, follow } => {
-            logs_cmd(&cfg, cli.server, project, slot.as_deref(), *tail, *follow)
+        Cmd::Url { project } => url_cmd(&cfg, cli.server, project),
+        Cmd::Logs { project, tail, follow } => {
+            logs_cmd(&cfg, cli.server, project, *tail, *follow)
         }
-        Cmd::Env { project, slot } => env_cmd(&cfg, cli.server, project, slot.as_deref()),
-        Cmd::Rollback { project, slot } => {
-            slot_action(&cfg, cli.server, "/_api/rollback", project, slot)
+        Cmd::Env { project } => env_cmd(&cfg, cli.server, project),
+        Cmd::Rollback { project } => {
+            project_action(&cfg, cli.server, "/_api/rollback", project)
         }
-        Cmd::Stop { project, slot } => slot_action(&cfg, cli.server, "/_api/stop", project, slot),
-        Cmd::Start { project, slot } => slot_action(&cfg, cli.server, "/_api/start", project, slot),
-        Cmd::Rm { project, slot, yes } => {
+        Cmd::Stop { project } => project_action(&cfg, cli.server, "/_api/stop", project),
+        Cmd::Start { project } => project_action(&cfg, cli.server, "/_api/start", project),
+        Cmd::Rm { project, yes } => {
             if !yes {
-                return Err(format!("删除不可逆，需显式确认：showroom rm {project} {slot} --yes"));
+                return Err(format!("删除不可逆，需显式确认：showroom rm {project} --yes"));
             }
-            slot_action(&cfg, cli.server, "/_api/rm", project, slot)
+            project_action(&cfg, cli.server, "/_api/rm", project)
         }
         Cmd::Db { cmd } => db::run(&cfg, cli.server, cmd),
         Cmd::Doctor => doctor(&cfg),
@@ -248,30 +245,31 @@ fn config_cmd(
 
 // ———— push ————
 
+/// import 通道 zstd 压缩级别（压缩率优先，与服务端 dump 管线一致）。
+const IMPORT_ZSTD_LEVEL: i32 = 19;
+
 fn push(
     cfg: &Config,
     force: Option<Which>,
     project: &str,
     tag: &str,
     via: Via,
-    slot: &str,
 ) -> Result<(), String> {
     check_project(project)?;
     check_tag(tag)?;
-    check_slot(slot)?;
     let t0 = Instant::now();
     let (base, which) = select(cfg, force)?;
     match via {
         Via::Registry => push_registry(cfg, project, tag, t0),
-        Via::Import => push_import(cfg, base, project, tag, slot, t0),
+        Via::Import => push_import(cfg, base, project, tag, t0),
         Via::Auto if which == Which::Lan => match push_registry(cfg, project, tag, t0) {
             Ok(()) => Ok(()),
             Err(e) => {
                 eprintln!("showroom: registry 快通道失败（{e}），自动切换加密 import 通道");
-                push_import(cfg, base, project, tag, slot, t0)
+                push_import(cfg, base, project, tag, t0)
             }
         },
-        Via::Auto => push_import(cfg, base, project, tag, slot, t0),
+        Via::Auto => push_import(cfg, base, project, tag, t0),
     }
 }
 
@@ -350,7 +348,8 @@ fn push_registry(cfg: &Config, project: &str, tag: &str, t0: Instant) -> Result<
     let user = if cfg.registry.user.is_empty() { cfg.owner.clone() } else { cfg.registry.user.clone() };
     let host = registry_host(lan);
     let src = format!("{project}:{tag}");
-    let reg_tag = format!("{host}/{}/{}:{tag}", cfg.owner, project);
+    // docker 仓库名强制小写（§11 项目名允许大写 → repo 路径转小写，与服务端 image_ref 对齐）
+    let reg_tag = format!("{host}/{}/{}:{tag}", cfg.owner, project.to_ascii_lowercase());
     docker_run(&["tag", &src, &reg_tag])?;
     docker_login(&host, &user, &cfg.registry.password)?;
     docker_run(&["push", &reg_tag])?;
@@ -365,7 +364,6 @@ fn push_import(
     base: String,
     project: &str,
     tag: &str,
-    slot: &str,
     t0: Instant,
 ) -> Result<(), String> {
     let api = Api::open(base, cfg)?;
@@ -382,7 +380,7 @@ fn push_import(
     } else {
         let platform_pub = api::load_platform_pub()?;
         let tmp = std::env::temp_dir().join(format!("showroom-import-{}.bin", std::process::id()));
-        // docker save | zstd -3 | seal → 临时文件；失败也要删（ponytail: 用闭包收口清理）
+        // docker save | zstd-19 | seal → 临时文件；失败也要删（ponytail: 用闭包收口清理）
         let work = (|| -> Result<(), String> {
             let mut child = Command::new("docker")
                 .args(["save", &src])
@@ -390,15 +388,15 @@ fn push_import(
                 .stderr(Stdio::inherit())
                 .spawn()
                 .map_err(|e| format!("无法启动 docker save：{e}"))?;
-            let z = zstd::stream::read::Encoder::new(child.stdout.take().unwrap(), 3)
+            let z = zstd::stream::read::Encoder::new(child.stdout.take().unwrap(), IMPORT_ZSTD_LEVEL)
                 .map_err(|e| format!("zstd 初始化失败：{e}"))?;
-            let f = fs::File::create(&tmp).map_err(|e| format!("写临时文件失败：{e}"))?;
+            let f = fs::File::create(&tmp).map_err(|e| format!("写临时文件失败: {e}"))?;
             uploaded = showroom_common::seal(&platform_pub, z, f)
                 .map_err(|e| format!("加密信封失败：{e}"))?;
             if !child.wait().map_err(|e| e.to_string())?.success() {
                 return Err("docker save 失败".into());
             }
-            api.signed_post_file(&api::import_query(project, slot, tag), &tmp)?;
+            api.signed_post_file(&api::import_query(project, tag), &tmp)?;
             Ok(())
         })();
         let _ = fs::remove_file(&tmp);
@@ -431,7 +429,6 @@ fn publish(
     cfg: &Config,
     force: Option<Which>,
     project: &str,
-    slot: &str,
     tag: &str,
     mem: Option<&str>,
     cpu: Option<f64>,
@@ -439,10 +436,9 @@ fn publish(
     wait: bool,
 ) -> Result<(), String> {
     check_project(project)?;
-    check_slot(slot)?;
     check_tag(tag)?;
     let api = Api::connect(cfg, force)?;
-    let mut body = json!({ "project": project, "slot": slot, "tag": tag });
+    let mut body = json!({ "project": project, "tag": tag });
     if let Some(x) = mem {
         body["mem"] = json!(x);
     }
@@ -465,9 +461,9 @@ fn publish(
         loop {
             let projects = api
                 .signed_get("/_api/projects")?;
-            match slot_status(&projects, project, slot) {
+            match project_status(&projects, project) {
                 Some(st) if st == "running" => {
-                    println!("{}", api::slot_url(&api.base, project, slot));
+                    println!("{}", api::project_url(&api.base, project));
                     return Ok(());
                 }
                 Some(st) => {
@@ -476,7 +472,7 @@ fn publish(
                         last = st;
                     }
                 }
-                None => eprintln!("等待 {project}/{slot} 出现…"),
+                None => eprintln!("等待 {project} 出现…"),
             }
             if Instant::now() >= deadline {
                 return Err("等待 status=running 超时（90s）".into());
@@ -487,9 +483,9 @@ fn publish(
     Ok(())
 }
 
-fn slot_status(projects: &Value, project: &str, slot: &str) -> Option<String> {
+fn project_status(projects: &Value, project: &str) -> Option<String> {
     projects["projects"].as_array()?.iter()
-        .find(|e| e["project"].as_str() == Some(project) && e["slot"].as_str() == Some(slot))
+        .find(|e| e["project"].as_str() == Some(project))
         .and_then(|e| e["status"].as_str().map(str::to_string))
 }
 
@@ -501,13 +497,12 @@ fn ps(cfg: &Config, force: Option<Which>, json_out: bool) -> Result<(), String> 
         return Ok(());
     }
     let arr = v["projects"].as_array().cloned().unwrap_or_default();
-    println!("{:<26} {:<12} {:<10} {:<26} {}", "PROJECT", "SLOT", "STATUS", "TAG", "OWNER");
+    println!("{:<26} {:<10} {:<26} {}", "PROJECT", "STATUS", "TAG", "OWNER");
     for e in &arr {
         let g = |k: &str| e[k].as_str().unwrap_or("");
         println!(
-            "{:<26} {:<12} {:<10} {:<26} {}",
+            "{:<26} {:<10} {:<26} {}",
             trunc(g("project"), 25),
-            trunc(g("slot"), 11),
             trunc(g("status"), 9),
             trunc(g("tag"), 25),
             g("owner")
@@ -524,33 +519,17 @@ fn trunc(s: &str, n: usize) -> String {
     }
 }
 
-fn url_cmd(cfg: &Config, force: Option<Which>, project: &str, slot: Option<&str>) -> Result<(), String> {
+fn url_cmd(cfg: &Config, force: Option<Which>, project: &str) -> Result<(), String> {
     check_project(project)?;
-    if let Some(s) = slot {
-        check_slot(s)?;
-    }
     let api = Api::connect(cfg, force)?;
     let v = api.signed_get("/_api/projects")?;
-    let entries: Vec<&Value> = match v["projects"].as_array() {
-        Some(a) => a
-            .iter()
-            .filter(|e| {
-                e["project"].as_str() == Some(project)
-                    && slot.map_or(true, |s| e["slot"].as_str() == Some(s))
-            })
-            .collect(),
-        None => vec![],
-    };
-    if entries.is_empty() {
-        return Err(format!(
-            "未找到 {project}{}（先 showroom publish）",
-            slot.map(|s| format!("/{s}")).unwrap_or_default()
-        ));
+    let found = v["projects"].as_array().map_or(false, |a| {
+        a.iter().any(|e| e["project"].as_str() == Some(project))
+    });
+    if !found {
+        return Err(format!("未找到 {project}（先 showroom publish）"));
     }
-    for e in entries {
-        let s = e["slot"].as_str().unwrap_or("stable");
-        println!("{}", api::slot_url(&api.base, project, s));
-    }
+    println!("{}", api::project_url(&api.base, project));
     Ok(())
 }
 
@@ -558,15 +537,12 @@ fn logs_cmd(
     cfg: &Config,
     force: Option<Which>,
     project: &str,
-    slot: Option<&str>,
     tail: u32,
     follow: bool,
 ) -> Result<(), String> {
     check_project(project)?;
-    let slot = slot.unwrap_or("stable");
-    check_slot(slot)?;
     let api = Api::connect(cfg, force)?;
-    let q = api::logs_query(project, slot, tail);
+    let q = api::logs_query(project, tail);
     let mut printed = 0usize;
     loop {
         let v = api.signed_get(&q)?;
@@ -591,13 +567,11 @@ fn logs_cmd(
     }
 }
 
-fn env_cmd(cfg: &Config, force: Option<Which>, project: &str, slot: Option<&str>) -> Result<(), String> {
+fn env_cmd(cfg: &Config, force: Option<Which>, project: &str) -> Result<(), String> {
     check_project(project)?;
-    let slot = slot.unwrap_or("stable");
-    check_slot(slot)?;
     let api = Api::connect(cfg, force)?;
     let v = api
-        .signed_get(&api::env_query(project, slot))?;
+        .signed_get(&api::env_query(project))?;
     let map = v["env"].as_object().ok_or("响应缺少 env 对象")?;
     for (k, val) in map {
         let s = val.as_str().map(str::to_string).unwrap_or_else(|| val.to_string());
@@ -606,18 +580,16 @@ fn env_cmd(cfg: &Config, force: Option<Which>, project: &str, slot: Option<&str>
     Ok(())
 }
 
-fn slot_action(
+fn project_action(
     cfg: &Config,
     force: Option<Which>,
     path: &str,
     project: &str,
-    slot: &str,
 ) -> Result<(), String> {
     check_project(project)?;
-    check_slot(slot)?;
     let api = Api::connect(cfg, force)?;
     let v = api
-        .signed_post_json(path, &json!({ "project": project, "slot": slot }))?;
+        .signed_post_json(path, &json!({ "project": project }))?;
     println!("ok");
     for key in ["msg", "url"] {
         if let Some(s) = v[key].as_str().filter(|s| !s.is_empty()) {
@@ -683,7 +655,7 @@ fn doctor(cfg: &Config) -> Result<(), String> {
             cfg.server_public.as_deref().unwrap().trim_end_matches('/')
         };
         match Api::open(base.to_string(), cfg)
-            .and_then(|api| api.signed_get(&api::logs_query("__selftest", "stable", 100)))
+            .and_then(|api| api.signed_get(&api::logs_query("__selftest", 100)))
         {
             Ok(_) => println!("✓ 签名自测通过（密钥已登记）"),
             Err(msg) if msg.starts_with("E_NOTFOUND") => {

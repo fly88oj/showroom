@@ -161,6 +161,17 @@ pub fn container_status(name: &str) -> Option<String> {
     if s.is_empty() { None } else { Some(s) }
 }
 
+/// 全部容器名（docker ps -a）：v1.4 容器收养/孤儿清理用（调用方再按 sr-<p>- 前缀过滤）。
+/// 失败返回空表（收养跳过，下次重试）。
+pub fn all_container_names() -> Vec<String> {
+    match Command::new("docker").args(["ps", "-a", "--format", "{{.Names}}"]).output() {
+        Ok(o) if o.status.success() => {
+            String::from_utf8_lossy(&o.stdout).lines().map(str::to_string).collect()
+        }
+        _ => vec![],
+    }
+}
+
 /// 健康检查状态（镜像无 HEALTHCHECK 时为 None）。
 pub fn health_status(name: &str) -> Option<String> {
     let out = Command::new("docker")

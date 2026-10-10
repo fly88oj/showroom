@@ -1,7 +1,8 @@
-//! db：`showroom db` 子命令（SPEC §9）。
+//! db：`showroom db` 子命令（SPEC §9 + §11 无槽位）。
 //! sql/tables/preview 走签名 JSON；dump 为三段式（SPEC §10.4）：一次性 RSA-3072 密钥对
 //! 上行公钥 → begin/分片 chunk 下载临时信封 → 本地流式解密写目标（私钥只在进程内存，
 //! 服务端只见公钥 PEM）；restore 用平台公钥 seal 成信封后复用 push import 的流式签名上传。
+//! 备份为 zstd-19 高压缩格式（服务端 pg_dump -Z0 -Fc + 外层 zstd-19；restore 侧透明兼容）。
 
 use std::fs;
 use std::io::{BufWriter, Write};
@@ -10,7 +11,7 @@ use std::path::{Path, PathBuf};
 use clap::Subcommand;
 use serde_json::json;
 
-use showroom_common::names::{check_project, check_slot};
+use showroom_common::names::check_project;
 
 use crate::api::{self, Api, Which};
 use crate::config::Config;
@@ -20,7 +21,6 @@ pub enum DbCmd {
     /// 执行 SQL（stdin 或 --file；含 DROP/TRUNCATE/DELETE 需 --confirm）
     Sql {
         project: String,
-        slot: String,
         /// SQL 文件（缺省读 stdin）
         #[arg(long)]
         file: Option<PathBuf>,
@@ -28,30 +28,28 @@ pub enum DbCmd {
         confirm: bool,
     },
     /// 列出 public schema 的表
-    Tables { project: String, slot: String },
+    Tables { project: String },
     /// 预览表数据（psql -tA 风格，制表符分隔）
     Preview {
         project: String,
-        slot: String,
         table: String,
         #[arg(long, default_value_t = 50)]
         limit: u32,
     },
-    /// 下载加密备份（pg_dump -Fc；一次性密钥对端到端加密，-o 写文件或 --stdout）
+    /// 下载加密备份（zstd-19 高压缩格式；一次性密钥对端到端加密，-o 写文件或 --stdout）
     Dump {
         project: String,
-        slot: String,
         #[arg(short = 'o', long)]
         out: Option<PathBuf>,
         /// 直接写二进制到标准输出（可重定向；与 -o 互斥）
         #[arg(long, conflicts_with = "out")]
         stdout: bool,
     },
-    /// 恢复备份（pg_restore --clean --if-exists，先清目标库；需 --confirm）
+    /// 恢复备份（pg_restore --clean --if-exists，先清目标库；需 --confirm；
+    /// 兼容 zstd-19 包裹与原生 -Fc 两种备份文件，服务端透明解包）
     Restore {
         project: String,
-        slot: String,
-        /// pg_dump -Fc 备份文件
+        /// 备份文件（zstd-19 包裹或原生 pg_dump -Fc）
         file: PathBuf,
         #[arg(long)]
         confirm: bool,
@@ -59,7 +57,6 @@ pub enum DbCmd {
     /// 重置数据库（DROP+重建为空库，凭据不变；需 --confirm）
     Reset {
         project: String,
-        slot: String,
         #[arg(long)]
         confirm: bool,
     },
@@ -67,20 +64,12 @@ pub enum DbCmd {
 
 pub fn run(cfg: &Config, force: Option<Which>, cmd: &DbCmd) -> Result<(), String> {
     match cmd {
-        DbCmd::Sql { project, slot, file, confirm } => {
-            sql(cfg, force, project, slot, file.as_deref(), *confirm)
-        }
-        DbCmd::Tables { project, slot } => tables(cfg, force, project, slot),
-        DbCmd::Preview { project, slot, table, limit } => {
-            preview(cfg, force, project, slot, table, *limit)
-        }
-        DbCmd::Dump { project, slot, out, stdout } => {
-            dump(cfg, force, project, slot, out.as_deref(), *stdout)
-        }
-        DbCmd::Restore { project, slot, file, confirm } => {
-            restore(cfg, force, project, slot, file, *confirm)
-        }
-        DbCmd::Reset { project, slot, confirm } => reset(cfg, force, project, slot, *confirm),
+        DbCmd::Sql { project, file, confirm } => sql(cfg, force, project, file.as_deref(), *confirm),
+        DbCmd::Tables { project } => tables(cfg, force, project),
+        DbCmd::Preview { project, table, limit } => preview(cfg, force, project, table, *limit),
+        DbCmd::Dump { project, out, stdout } => dump(cfg, force, project, out.as_deref(), *stdout),
+        DbCmd::Restore { project, file, confirm } => restore(cfg, force, project, file, *confirm),
+        DbCmd::Reset { project, confirm } => reset(cfg, force, project, *confirm),
     }
 }
 
@@ -88,12 +77,10 @@ fn sql(
     cfg: &Config,
     force: Option<Which>,
     project: &str,
-    slot: &str,
     file: Option<&Path>,
     confirm: bool,
 ) -> Result<(), String> {
     check_project(project)?;
-    check_slot(slot)?;
     let sql = match file {
         Some(f) => fs::read_to_string(f).map_err(|e| format!("读取 {} 失败: {e}", f.display()))?,
         None => {
@@ -109,7 +96,7 @@ fn sql(
     let api = Api::connect(cfg, force)?;
     let v = api.signed_post_json(
         "/_api/db-sql",
-        &json!({ "project": project, "slot": slot, "sql": sql, "confirm": confirm }),
+        &json!({ "project": project, "sql": sql, "confirm": confirm }),
     )?;
     if let Some(out) = v["out"].as_str() {
         print!("{out}");
@@ -118,11 +105,10 @@ fn sql(
     Ok(())
 }
 
-fn tables(cfg: &Config, force: Option<Which>, project: &str, slot: &str) -> Result<(), String> {
+fn tables(cfg: &Config, force: Option<Which>, project: &str) -> Result<(), String> {
     check_project(project)?;
-    check_slot(slot)?;
     let api = Api::connect(cfg, force)?;
-    let v = api.signed_get(&api::db_tables_query(project, slot))?;
+    let v = api.signed_get(&api::db_tables_query(project))?;
     if let Some(arr) = v["tables"].as_array() {
         for t in arr {
             if let Some(name) = t.as_str() {
@@ -137,16 +123,14 @@ fn preview(
     cfg: &Config,
     force: Option<Which>,
     project: &str,
-    slot: &str,
     table: &str,
     limit: u32,
 ) -> Result<(), String> {
     check_project(project)?;
-    check_slot(slot)?;
     let api = Api::connect(cfg, force)?;
     let v = api.signed_post_json(
         "/_api/db-preview",
-        &json!({ "project": project, "slot": slot, "table": table, "limit": limit }),
+        &json!({ "project": project, "table": table, "limit": limit }),
     )?;
     let cell = |c: &serde_json::Value| c.as_str().map(str::to_string).unwrap_or_else(|| c.to_string());
     if let Some(cols) = v["columns"].as_array() {
@@ -171,7 +155,6 @@ fn dump(
     cfg: &Config,
     force: Option<Which>,
     project: &str,
-    slot: &str,
     out: Option<&Path>,
     to_stdout: bool,
 ) -> Result<(), String> {
@@ -179,7 +162,6 @@ fn dump(
     use showroom_common::rsa::RsaPrivateKey;
 
     check_project(project)?;
-    check_slot(slot)?;
     if out.is_none() && !to_stdout {
         return Err("二进制备份默认不打印：-o <文件> 写文件，或 --stdout 显式输出（可重定向）".into());
     }
@@ -197,7 +179,7 @@ fn dump(
     // 本地内存恒定：每片 ≤4MB，信封与明文都不整包进内存。
     let v = api.signed_post_json(
         "/_api/db-dump-begin",
-        &json!({ "project": project, "slot": slot, "client_pub_pem": pub_pem }),
+        &json!({ "project": project, "client_pub_pem": pub_pem }),
     )?;
     let dump_id = v["dump_id"].as_str().ok_or("db-dump-begin 响应缺 dump_id")?.to_string();
     let total = wait_dump_ready(&api, &dump_id)?;
@@ -219,7 +201,7 @@ fn dump(
         }
         w.flush().map_err(|e| format!("写临时文件失败: {e}"))?;
         drop(w);
-        // 信封完整后一次性私钥解密，流式写出（pg_dump -Fc）
+        // 信封完整后一次性私钥解密，流式写出（zstd-19 包裹的 pg_dump -Fc，原样落盘）
         let mut sealed =
             fs::File::open(&tmp).map_err(|e| format!("读临时信封失败: {e}"))?;
         let n = match out {
@@ -254,8 +236,8 @@ fn dump(
         }
     };
     match out {
-        Some(p) => eprintln!("已写入 {}（解密后 {n} 字节，pg_dump -Fc）", p.display()),
-        None => eprintln!("（stdout 输出 {n} 字节，pg_dump -Fc）"),
+        Some(p) => eprintln!("已写入 {}（解密后 {n} 字节，zstd-19 高压缩备份）", p.display()),
+        None => eprintln!("（stdout 输出 {n} 字节，zstd-19 高压缩备份）"),
     }
     Ok(())
 }
@@ -282,7 +264,6 @@ fn restore(
     cfg: &Config,
     force: Option<Which>,
     project: &str,
-    slot: &str,
     file: &Path,
     confirm: bool,
 ) -> Result<(), String> {
@@ -290,7 +271,6 @@ fn restore(
         return Err("恢复会以 --clean --if-exists 先清目标库，需显式确认：--confirm".into());
     }
     check_project(project)?;
-    check_slot(slot)?;
     if !file.is_file() {
         return Err(format!("备份文件不存在: {}", file.display()));
     }
@@ -307,32 +287,22 @@ fn restore(
         w.flush().map_err(|e| format!("写临时文件失败: {e}"))?;
         drop(w);
         drop(f);
-        api.signed_post_file(&api::db_restore_query(project, slot, true), &tmp)?;
+        api.signed_post_file(&api::db_restore_query(project, true), &tmp)?;
         Ok(())
     })();
     let _ = fs::remove_file(&tmp);
     work?;
-    println!("恢复完成: {project}/{slot}");
+    println!("恢复完成: {project}");
     Ok(())
 }
 
-fn reset(
-    cfg: &Config,
-    force: Option<Which>,
-    project: &str,
-    slot: &str,
-    confirm: bool,
-) -> Result<(), String> {
+fn reset(cfg: &Config, force: Option<Which>, project: &str, confirm: bool) -> Result<(), String> {
     if !confirm {
         return Err("重置会清空并重建数据库（凭据不变），需显式确认：--confirm".into());
     }
     check_project(project)?;
-    check_slot(slot)?;
     let api = Api::connect(cfg, force)?;
-    api.signed_post_json(
-        "/_api/db-reset",
-        &json!({ "project": project, "slot": slot, "confirm": true }),
-    )?;
-    println!("已重置 {project}/{slot}（空库，凭据不变）");
+    api.signed_post_json("/_api/db-reset", &json!({ "project": project, "confirm": true }))?;
+    println!("已重置 {project}（空库，凭据不变）");
     Ok(())
 }

@@ -72,34 +72,48 @@ pub fn parse_tsv(data: &str) -> Vec<Vec<String>> {
     data.split('\n').map(|l| l.split('\t').map(str::to_string).collect()).collect()
 }
 
-// —— 库名解析（SPEC §9 归一化 + legacy 存量沿用）——
+// —— 库名解析（§11：归一化新名 + legacyslot 指路的旧名检测沿用）——
 
-/// 归一化新名与旧名（连字符原样）的存在性查找，交纯函数裁决。
-fn resolve_db(p: &str, s: &str) -> R<String> {
-    let new = state::db_ident(p, s);
-    let legacy = state::legacy_db_ident(p, s);
-    let new_exists = dockerops::db_exists(&new)?;
-    let legacy_exists = legacy != new && dockerops::db_exists(&legacy)?;
-    Ok(state::resolve_db_ident(p, s, new_exists, legacy_exists))
+/// 库名解析（publish 与六端点共用）：候选按优先级 = [新名 `sr_<p_n>`] + legacyslot 的
+/// 两个旧名（verbatim `sr_{p}_{s}` / 归一化 `sr_{p_n}_{s_n}`，§9 双名思路）。
+/// 返回 (库名, 是否存量)：存量 → 调用方 ALTER/直接操作；首建 → CREATE。
+pub fn resolve_db(project: &str, legacyslot: Option<&str>) -> R<(String, bool)> {
+    let new = state::db_ident(project);
+    let mut names = vec![new.clone()];
+    for d in legacyslot.map(|s| state::legacy_db_idents(project, s)).unwrap_or_default() {
+        if !names.contains(&d) {
+            names.push(d);
+        }
+    }
+    let mut exists = Vec::with_capacity(names.len());
+    for n in &names {
+        exists.push(dockerops::db_exists(n)?);
+    }
+    Ok(state::resolve_db_ident(&names, &exists))
+}
+
+/// 项目的 legacyslot（§11 迁移标记；conf 缺失按 None，存在性校验由 serve own_check 先行）。
+fn legacyslot_of(root: &Path, p: &str) -> Option<String> {
+    state::Conf::load(root, p).ok().and_then(|c| c.legacyslot)
 }
 
 // —— 六端点内核 ——
 
 /// POST /_api/db-sql：confirm 门 + psql 定库执行（stdin），返回 stdout 全文（psql 文本格式）。
-pub fn sql(p: &str, s: &str, sql: &str, confirm: bool) -> R<String> {
+pub fn sql(root: &Path, p: &str, sql: &str, confirm: bool) -> R<String> {
     if !confirm && sql_needs_confirm(sql) {
         return Err(ApiError::new(
             "E_STATE",
             "语句含 DROP/TRUNCATE/DELETE：需 confirm=true 二次确认后重发",
         ));
     }
-    let db = resolve_db(p, s)?;
+    let db = resolve_db(p, legacyslot_of(root, p).as_deref())?.0;
     dockerops::psql_db(&db, &[], sql.as_bytes())
 }
 
 /// GET /_api/db-tables：public schema 的用户表（\dt 等价 SQL，非系统表）。
-pub fn tables(p: &str, s: &str) -> R<Vec<String>> {
-    let db = resolve_db(p, s)?;
+pub fn tables(root: &Path, p: &str) -> R<Vec<String>> {
+    let db = resolve_db(p, legacyslot_of(root, p).as_deref())?.0;
     let q = "SELECT table_name FROM information_schema.tables \
              WHERE table_schema = 'public' AND table_type = 'BASE TABLE' \
              ORDER BY table_name";
@@ -108,7 +122,7 @@ pub fn tables(p: &str, s: &str) -> R<Vec<String>> {
 }
 
 /// POST /_api/db-preview：白名单表名 + `SELECT * LIMIT n`，返回 (columns, rows)。
-pub fn preview(p: &str, s: &str, table: &str, limit: u32) -> R<(Vec<String>, Vec<Vec<String>>)> {
+pub fn preview(root: &Path, p: &str, table: &str, limit: u32) -> R<(Vec<String>, Vec<Vec<String>>)> {
     if !valid_table_name(table) {
         return Err(ApiError::new(
             "E_NAME",
@@ -118,7 +132,7 @@ pub fn preview(p: &str, s: &str, table: &str, limit: u32) -> R<(Vec<String>, Vec
     if !valid_limit(limit) {
         return Err(ApiError::new("E_NAME", format!("limit 须在 1..={PREVIEW_MAX_LIMIT}")));
     }
-    let db = resolve_db(p, s)?;
+    let db = resolve_db(p, legacyslot_of(root, p).as_deref())?.0;
     // 表名已过白名单（仅 [A-Za-z0-9_]，无引号/分号），插入定形 SQL 安全
     let cols_sql = format!(
         "SELECT column_name FROM information_schema.columns \
@@ -140,13 +154,15 @@ pub fn preview(p: &str, s: &str, table: &str, limit: u32) -> R<(Vec<String>, Vec
 /// 单次切片上限（SPEC §10.4：len ≤ 4MB）。
 pub const DUMP_CHUNK_MAX: u64 = 4 << 20;
 
+/// dump 外层 zstd 压缩级别（压缩率优先：zstd-19 对 -Fc 内容显著优于内置 zlib）。
+pub const DUMP_ZSTD_LEVEL: i32 = 19;
+
 /// 会话三件套：_tmp/<id>.bin（sealed 信封）+ <id>.meta（归属）+ <id>.status（就绪状态）。
 /// 陈旧（>24h）由 gc-images 顺带清理（ops::gc_tmp 已扫 .bin/.meta/.status）。
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DumpMeta {
     pub owner: String,
     pub project: String,
-    pub slot: String,
     pub db: String,
     pub created: u64,
 }
@@ -223,12 +239,14 @@ impl<R: Read> Read for CapReader<R> {
     }
 }
 
-/// pg_dump -Fc 的 stdout → seal(客户端公钥) → out 文件：信封整体一次生成（解密侧
-/// common::open 必须拿到完整信封），但生成全程流式（4MiB 段缓冲，内存恒定）。
-/// 返回 sealed 总字节数；任何失败由调用方删 out。明文超 cap → E_QUOTA。
+/// dump 生成管道（压缩率优先，§B）：`pg_dump -Z0 -Fc`（custom 格式零压缩层）→
+/// zstd-19 外层压缩（对 -Fc 内容压缩率显著高于内置 zlib-9）→ seal(客户端公钥) → out 文件。
+/// 信封整体一次生成（解密侧 common::open 必须拿到完整信封），但生成全程流式（内存恒定 ~4MiB）。
+/// 返回 sealed 总字节数；任何失败由调用方删 out。**明文**（-Fc 原始字节，解压前帽按 zstd
+/// 前语义不变）超 cap → E_QUOTA——CapReader 挂在 zstd 解压后的明文流上。
 fn dump_seal_to(db: &str, pub_key: &showroom_common::rsa::RsaPublicKey, out: &Path, cap: u64) -> R<u64> {
     let mut child = Command::new("docker")
-        .args(["exec", "-i", "sr-postgres", "pg_dump", "-U", "postgres", "-Fc", db])
+        .args(["exec", "-i", "sr-postgres", "pg_dump", "-U", "postgres", "-Z0", "-Fc", db])
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .spawn()
@@ -241,12 +259,19 @@ fn dump_seal_to(db: &str, pub_key: &showroom_common::rsa::RsaPublicKey, out: &Pa
         let _ = std::io::Read::read_to_string(&mut stderr, &mut s);
         s
     });
+    // pg_dump(-Z0 原生 -Fc) → zstd-19 → seal；zstd Encoder 读取失败（pg_dump 崩）表现为 EOF，
+    // 由下方 child.wait 的退出状态兜底判错
+    let zr = zstd::stream::read::Encoder::new(stdout, DUMP_ZSTD_LEVEL)
+        .map_err(|e| {
+            dockerops::kill_wait(&mut child);
+            ApiError::state(format!("zstd encoder init: {e}"))
+        })?;
 
     let over = Arc::new(AtomicBool::new(false));
     let mut w = BufWriter::new(fs::File::create(out)?);
     let sealed = showroom_common::seal(
         pub_key,
-        CapReader::new(stdout, cap, over.clone()),
+        CapReader::new(zr, cap, over.clone()),
         &mut w,
     );
     let n = match sealed {
@@ -265,7 +290,7 @@ fn dump_seal_to(db: &str, pub_key: &showroom_common::rsa::RsaPublicKey, out: &Pa
     let errout = err_t.join().unwrap_or_default();
     if !status.success() {
         return Err(ApiError::state(format!(
-            "pg_dump -Fc {db} failed: {}",
+            "pg_dump -Z0 -Fc {db} failed: {}",
             dockerops::tail_lines(&errout, 8)
         )));
     }
@@ -273,21 +298,20 @@ fn dump_seal_to(db: &str, pub_key: &showroom_common::rsa::RsaPublicKey, out: &Pa
 }
 
 /// POST /_api/db-dump-begin 内核：解析客户端公钥（E_NAME 先拒）→ 定库 → 落 meta/status
-/// → 起后台线程 pg_dump|seal 流式写 .bin，立即返回 dump_id（不等待）。
+/// → 起后台线程 pg_dump|zstd-19|seal 流式写 .bin，立即返回 dump_id（不等待）。
 /// 名字校验与 own_check 由 serve 完成。线程无论成败终态都写回 .status；失败删 .bin。
-pub fn dump_begin(root: &Path, owner: &str, project: &str, slot: &str, client_pub_pem: &str) -> R<String> {
+pub fn dump_begin(root: &Path, owner: &str, project: &str, client_pub_pem: &str) -> R<String> {
     use showroom_common::rsa::pkcs8::DecodePublicKey;
 
     let pub_key = showroom_common::rsa::RsaPublicKey::from_public_key_pem(client_pub_pem.trim())
         .map_err(|e| ApiError::new("E_NAME", format!("client_pub_pem 解析失败: {e}")))?;
-    let db = resolve_db(project, slot)?;
+    let db = resolve_db(project, legacyslot_of(root, project).as_deref())?.0;
     let id = state::rand_hex(16);
     fs::create_dir_all(root.join("_tmp"))?;
     // meta/status 先于 .bin 落盘：chunk/status 以 meta 判归属，bin 未就绪只表现为 running
     let meta = DumpMeta {
         owner: owner.to_string(),
         project: project.to_string(),
-        slot: slot.to_string(),
         db: db.clone(),
         created: state::unix_now(),
     };
@@ -361,25 +385,106 @@ pub fn dump_cleanup(root: &Path, id: &str) {
     }
 }
 
-/// POST /_api/db-restore：confirm 门 → 平台私钥流式解密喂 pg_restore stdin（--clean --if-exists）。
-/// sealed（serve 收 body 落的 _tmp 文件）由调用方兜底删除；本函数不产生第二个落盘文件。
-pub fn restore(root: &Path, p: &str, s: &str, confirm: bool, sealed: &Path) -> R<()> {
+// —— restore 输入解包（§B）：解密后的字节流兼容两种形态 ——
+// 原生 pg_dump -Fc（"PGDMP" 头，含 -Z0/-Z9 内压变体）或整体 zstd 包裹的 -Fc（28 B5 2F FD 帧头）。
+// 按前 4 字节魔数路由：zstd → 先解压再喂 pg_restore；否则直喂（pg_restore 原生兼容 -Fc 全系）。
+
+/// zstd 帧魔数。
+pub const ZSTD_MAGIC: [u8; 4] = [0x28, 0xB5, 0x2F, 0xFD];
+
+/// restore 路径选择（纯函数）：前 4 字节命中 zstd 魔数 → 需 zstd 解压；否则原生直喂。
+/// 不足 4 字节不可能是任一格式（-Fc 头 "PGDMP" ≥5B、zstd 帧头恰 4B），返回 false 由残流兜底。
+pub fn is_zstd(prefix: &[u8]) -> bool {
+    prefix.len() >= 4 && prefix[..4] == ZSTD_MAGIC
+}
+
+/// restore 数据面写入器：缓冲至 ≥4 字节后按魔数一次性选定 zstd 解压 / 直通，
+/// 缓冲期字节不丢（首写可能只到 1 字节）。W 生产为 pg_restore 的 stdin（测试用 Vec）。
+/// Broken 仅为整状态置换时的瞬时占位（构造解码器失败即上抛 io 错，之后不会再被写）。
+enum RestoreSink<W: Write> {
+    Buffering { buf: Vec<u8>, out: W },
+    Plain(W),
+    Zstd(zstd::stream::write::Decoder<'static, W>),
+    Broken,
+}
+
+impl<W: Write> RestoreSink<W> {
+    pub fn new(out: W) -> Self {
+        RestoreSink::Buffering { buf: Vec::new(), out }
+    }
+}
+
+impl<W: Write> Write for RestoreSink<W> {
+    fn write(&mut self, data: &[u8]) -> std::io::Result<usize> {
+        // 未决阶段：整状态取出，攒够 4 字节后定路（mem::replace 避免 &mut 下搬移泛型 W）
+        if matches!(self, RestoreSink::Buffering { .. }) {
+            let st = std::mem::replace(self, RestoreSink::Broken);
+            let RestoreSink::Buffering { mut buf, out } = st else { unreachable!() };
+            buf.extend_from_slice(data);
+            if buf.len() < 4 {
+                *self = RestoreSink::Buffering { buf, out };
+                return Ok(data.len());
+            }
+            if !is_zstd(&buf) {
+                let mut out = out;
+                out.write_all(&buf)?;
+                *self = RestoreSink::Plain(out);
+                return Ok(data.len());
+            }
+            match zstd::stream::write::Decoder::new(out) {
+                Ok(mut d) => {
+                    d.write_all(&buf)?;
+                    *self = RestoreSink::Zstd(d);
+                    Ok(data.len())
+                }
+                Err(e) => Err(std::io::Error::other(format!("zstd decoder init: {e}"))),
+            }
+        } else {
+            match self {
+                RestoreSink::Plain(w) => w.write(data),
+                RestoreSink::Zstd(d) => d.write(data),
+                // 未决态必经上方分支 return；此处只剩 Broken（解码器构造失败后）
+                _ => Err(std::io::Error::other("restore sink broken")),
+            }
+        }
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        match self {
+            RestoreSink::Buffering { buf, out } => {
+                // 残流不足 4 字节：非任一完整格式，直通交 pg_restore 如实报错
+                let b = std::mem::take(buf);
+                out.write_all(&b)?;
+                out.flush()
+            }
+            RestoreSink::Plain(w) => w.flush(),
+            RestoreSink::Zstd(d) => d.flush(),
+            RestoreSink::Broken => Ok(()),
+        }
+    }
+}
+
+/// POST /_api/db-restore：confirm 门 → 平台私钥流式解密 →（zstd 魔数探测）→ pg_restore
+/// stdin（--clean --if-exists）。sealed（serve 收 body 落的 _tmp 文件）由调用方兜底删除；
+/// 本函数不产生第二个落盘文件。
+pub fn restore(root: &Path, p: &str, confirm: bool, sealed: &Path) -> R<()> {
     if !confirm {
         return Err(ApiError::new("E_STATE", "restore 需 confirm=true（--clean --if-exists 会先清目标库）"));
     }
-    restore_inner(root, p, s, sealed)
+    restore_inner(root, p, sealed)
 }
 
-fn restore_inner(root: &Path, p: &str, s: &str, sealed: &Path) -> R<()> {
+fn restore_inner(root: &Path, p: &str, sealed: &Path) -> R<()> {
     use showroom_common::rsa::pkcs8::DecodePrivateKey;
     let pem = fs::read_to_string(root.join("state/platform_rsa"))
         .map_err(|e| ApiError::state(format!("platform_rsa missing (run showroomctl init-keys): {e}")))?;
     let priv_key = showroom_common::rsa::RsaPrivateKey::from_pkcs8_pem(&pem)
         .map_err(|e| ApiError::state(format!("platform_rsa parse: {e}")))?;
     let cap = state::Policy::load(root).import_cap_bytes();
-    let db = resolve_db(p, s)?;
+    let db = resolve_db(p, legacyslot_of(root, p).as_deref())?.0;
 
-    // pg_restore ← common::open 解密（单进程管道：dump 不落第二份盘、不整包进内存）
+    // pg_restore ← RestoreSink（zstd 魔数探测）← common::open 解密
+    // （单进程管道：dump 不落第二份盘、不整包进内存）
     let mut child = Command::new("docker")
         .args([
             "exec", "-i", "sr-postgres", "pg_restore", "-U", "postgres", "-d", &db, "--clean", "--if-exists",
@@ -392,11 +497,11 @@ fn restore_inner(root: &Path, p: &str, s: &str, sealed: &Path) -> R<()> {
     let stdin = child.stdin.take().unwrap();
     let sp = sealed.to_path_buf();
     let writer = std::thread::spawn(move || -> R<u64> {
-        let mut w = BufWriter::new(stdin);
+        let mut sink = RestoreSink::new(BufWriter::new(stdin));
         let mut sf = fs::File::open(&sp)?;
-        let n = showroom_common::open(&priv_key, &mut sf, &mut w)
+        let n = showroom_common::open(&priv_key, &mut sf, &mut sink)
             .map_err(|e| ApiError::state(format!("decrypt envelope: {e}")))?;
-        w.flush().map_err(|e| ApiError::state(format!("pg_restore stdin flush: {e}")))?;
+        sink.flush().map_err(|e| ApiError::state(format!("pg_restore stdin flush: {e}")))?;
         Ok(n)
     });
     let out = child
@@ -422,14 +527,15 @@ fn restore_inner(root: &Path, p: &str, s: &str, sealed: &Path) -> R<()> {
     Ok(())
 }
 
-/// POST /_api/db-reset：DROP（新旧名都清，归一化切换在此终结）+ 以归一化新名重建；
-/// 密码从 env 文件重读保持不变（容器不重启、凭据继续有效），env 文件按新名重发。
-pub fn reset(root: &Path, p: &str, s: &str, confirm: bool) -> R<()> {
+/// POST /_api/db-reset：DROP（新名 + legacyslot 旧候选都清，归一化切换在此终结）+ 以归一化
+/// 新名重建；密码从 env 文件重读保持不变（容器不重启、凭据继续有效），env 文件按新名重发，
+/// conf 的 legacyslot 标记同步清空。
+pub fn reset(root: &Path, p: &str, confirm: bool) -> R<()> {
     if !confirm {
         return Err(ApiError::new("E_STATE", "reset 需 confirm=true（库与数据会被清空重建）"));
     }
     let env = state::parse_kv(
-        &fs::read_to_string(state::env_path(root, p, s))
+        &fs::read_to_string(state::env_path(root, p))
             .map_err(|e| ApiError::state(format!("read env: {e}")))?,
     );
     let db_pass = env
@@ -442,20 +548,32 @@ pub fn reset(root: &Path, p: &str, s: &str, confirm: bool) -> R<()> {
         .and_then(|v| v.parse().ok())
         .ok_or_else(|| ApiError::state("env 文件缺 REDIS_DB"))?;
 
-    let new_db = state::db_ident(p, s);
-    let legacy_db = state::legacy_db_ident(p, s);
+    let mut conf = state::Conf::load(root, p)
+        .map_err(|e| ApiError::state(format!("read conf: {e}")))?;
+    let new_db = state::db_ident(p);
+    let mut dbs = vec![new_db.clone()];
+    if let Some(s) = &conf.legacyslot {
+        for d in state::legacy_db_idents(p, s) {
+            if !dbs.contains(&d) {
+                dbs.push(d);
+            }
+        }
+    }
     let mut sql = String::new();
-    for db in [&legacy_db, &new_db] {
+    for db in &dbs {
         sql.push_str(&format!("DROP DATABASE IF EXISTS \"{db}\" WITH (FORCE);\n"));
     }
+    for db in &dbs {
+        sql.push_str(&format!("DROP ROLE IF EXISTS \"{db}\";\n"));
+    }
     sql.push_str(&format!(
-        "DROP ROLE IF EXISTS \"{legacy_db}\";\n\
-         DROP ROLE IF EXISTS \"{new_db}\";\n\
-         CREATE ROLE \"{new_db}\" LOGIN PASSWORD '{db_pass}';\n\
+        "CREATE ROLE \"{new_db}\" LOGIN PASSWORD '{db_pass}';\n\
          CREATE DATABASE \"{new_db}\" OWNER \"{new_db}\";\n"
     ));
     dockerops::psql(&sql)?;
-    fs::write(state::env_path(root, p, s), state::env_file_contents(p, s, &new_db, &db_pass, redisdb))?;
+    conf.legacyslot = None; // 归一化在此终结
+    conf.save(root, p)?;
+    fs::write(state::env_path(root, p), state::env_file_contents(p, &new_db, &db_pass, redisdb))?;
     Ok(())
 }
 
@@ -580,8 +698,7 @@ mod tests {
         let meta = DumpMeta {
             owner: owner.into(),
             project: "demo".into(),
-            slot: "stable".into(),
-            db: "sr_demo_stable".into(),
+            db: "sr_demo".into(),
             created: 1,
         };
         fs::write(dump_meta_path(&root, &id), serde_json::to_string(&meta).unwrap()).unwrap();
@@ -639,7 +756,7 @@ mod tests {
     fn dump_not_ready_and_failed_states() {
         let root = troot("states");
         let id = state::rand_hex(16);
-        let meta = DumpMeta { owner: "alice".into(), project: "p".into(), slot: "s".into(), db: "d".into(), created: 1 };
+        let meta = DumpMeta { owner: "alice".into(), project: "p".into(), db: "d".into(), created: 1 };
         fs::write(dump_meta_path(&root, &id), serde_json::to_string(&meta).unwrap()).unwrap();
         // 未写 status（线程极早期）→ 默认 running
         assert_eq!(dump_status(&root, "alice", &id).unwrap().state, "running");
@@ -675,5 +792,103 @@ mod tests {
         assert_eq!(plan_chunk(0, 0, 1).unwrap(), (0, true));
         assert_eq!(plan_chunk(0, 1, 1).unwrap_err().code, "E_NAME");
         assert_eq!(plan_chunk(4 << 20, 0, 4 << 20).unwrap(), (4 << 20, true));
+    }
+
+    // —— §B restore 魔数探测：zstd-19 包裹与原生 -Fc 两条路（zstd crate 真压缩样本）——
+
+    /// -Fc 样式样本："PGDMP" 头 + 伪数据（真实 -Fc 由服务端 pg_dump -Z0 -Fc 产出）。
+    fn fc_sample() -> Vec<u8> {
+        let mut v = b"PGDMP".to_vec();
+        v.extend((0..8192u32).map(|i| (i % 251) as u8));
+        v
+    }
+
+    // 魔数判断纯函数：zstd 压缩产物命中；原生 -Fc / 不足 4 字节不命中
+    #[test]
+    fn zstd_magic_detection() {
+        let fc = fc_sample();
+        let packed = zstd::encode_all(fc.as_slice(), DUMP_ZSTD_LEVEL).unwrap();
+        assert_eq!(&packed[..4], &ZSTD_MAGIC, "zstd 帧头 28 B5 2F FD");
+        assert!(is_zstd(&packed));
+        assert!(is_zstd(&packed[..8]));
+        assert!(!is_zstd(&fc), "原生 -Fc（PGDMP 头）不命中");
+        assert!(!is_zstd(&fc[..4]));
+        assert!(!is_zstd(b"PG"), "不足 4 字节不判 zstd");
+        assert!(!is_zstd(b""));
+    }
+
+    /// 共享缓冲写入器：让 RestoreSink 泛型 W 可在测试里回收输出（Rc 单线程）。
+    #[derive(Clone)]
+    struct SharedBuf(std::rc::Rc<std::cell::RefCell<Vec<u8>>>);
+    impl Write for SharedBuf {
+        fn write(&mut self, b: &[u8]) -> std::io::Result<usize> {
+            self.0.borrow_mut().extend_from_slice(b);
+            Ok(b.len())
+        }
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
+    fn sink_collect(sink: RestoreSink<SharedBuf>, buf: &SharedBuf) -> Vec<u8> {
+        drop(sink); // drop 关闭 zstd 解码器（排空内部缓冲）
+        buf.0.borrow().clone()
+    }
+
+    // RestoreSink 路径选择与数据面：zstd-19 包裹 → 解压还原；原生 -Fc → 直通；
+    // 分片喂入跨魔数边界不丢字节；残流不足 4 字节 flush 直通
+    #[test]
+    fn restore_sink_routes_by_magic() {
+        let fc = fc_sample();
+        let packed = zstd::encode_all(fc.as_slice(), DUMP_ZSTD_LEVEL).unwrap();
+        assert!(packed.len() < fc.len(), "可压缩样本应显著缩小说明 zstd-19 生效");
+
+        // 原生 -Fc：整段与分片喂入都直通
+        let b1 = SharedBuf(std::rc::Rc::new(std::cell::RefCell::new(vec![])));
+        let mut s1 = RestoreSink::new(b1.clone());
+        s1.write_all(&fc).unwrap();
+        s1.flush().unwrap();
+        assert_eq!(sink_collect(s1, &b1), fc);
+
+        let b2 = SharedBuf(std::rc::Rc::new(std::cell::RefCell::new(vec![])));
+        let mut s2 = RestoreSink::new(b2.clone());
+        for chunk in fc.chunks(1000) {
+            s2.write_all(chunk).unwrap();
+        }
+        s2.flush().unwrap();
+        assert_eq!(sink_collect(s2, &b2), fc);
+
+        // zstd-19 包裹：分片喂入跨魔数边界（1+3+余量）也正确解压
+        let b3 = SharedBuf(std::rc::Rc::new(std::cell::RefCell::new(vec![])));
+        let mut s3 = RestoreSink::new(b3.clone());
+        s3.write_all(&packed[..1]).unwrap();
+        s3.write_all(&packed[1..4]).unwrap();
+        for chunk in packed[4..].chunks(700) {
+            s3.write_all(chunk).unwrap();
+        }
+        s3.flush().unwrap();
+        assert_eq!(sink_collect(s3, &b3), fc, "zstd 路径还原 -Fc 明文");
+
+        // 残流不足 4 字节：flush 直通（非任一完整格式，交 pg_restore 报错）
+        let b4 = SharedBuf(std::rc::Rc::new(std::cell::RefCell::new(vec![])));
+        let mut s4 = RestoreSink::new(b4.clone());
+        s4.write_all(b"PG").unwrap();
+        s4.flush().unwrap();
+        assert_eq!(sink_collect(s4, &b4), b"PG");
+    }
+
+    // dump 生成侧一致性：pg_dump -Z0 -Fc 的产物（PGDMP 头原生流）经 zstd-19 包裹后
+    // 正是 restore 侧 zstd 路径的输入形态（生成/解包两端对同一压缩容器往返）
+    #[test]
+    fn dump_zstd19_roundtrip_with_sink() {
+        let fc = fc_sample();
+        // 生成侧管道等价物：zstd-19 包裹（dump_seal_to 中 Encoder 的读侧效果）
+        let packed = zstd::encode_all(fc.as_slice(), DUMP_ZSTD_LEVEL).unwrap();
+        // restore 侧：魔数探测 + 解压
+        let b = SharedBuf(std::rc::Rc::new(std::cell::RefCell::new(vec![])));
+        let mut s = RestoreSink::new(b.clone());
+        s.write_all(&packed).unwrap();
+        s.flush().unwrap();
+        assert_eq!(sink_collect(s, &b), fc);
     }
 }

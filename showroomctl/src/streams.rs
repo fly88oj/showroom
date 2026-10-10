@@ -166,14 +166,14 @@ fn bridged_response(cmd: &mut Command, what: &str, wrap: LineWrap) -> R<(Respons
     Ok((ndjson_response(rx)?, tx))
 }
 
-// —— A：GET /_api/logs-stream ?project&slot&tail ——
+// —— A：GET /_api/logs-stream ?project&tail（§11 无 slot）——
 
 /// 统一验签 + own_check 已由 serve 完成；这里做存在性校验后直接桥 docker logs -f。
-pub fn logs_stream(root: &Path, project: &str, slot: &str, tail: u32) -> R<Response> {
-    if state::SlotConf::load(root, project, slot).is_err() {
-        return Err(ApiError::new("E_NOTFOUND", format!("no slot '{project}/{slot}'")));
+pub fn logs_stream(root: &Path, project: &str, tail: u32) -> R<Response> {
+    if state::Conf::load(root, project).is_err() {
+        return Err(ApiError::new("E_NOTFOUND", format!("no project '{project}'")));
     }
-    let name = publish::container_name(project, slot);
+    let name = publish::container_name(project);
     if dockerops::container_status(&name).is_none() {
         return Err(ApiError::new("E_NOTFOUND", format!("no container '{name}'")));
     }

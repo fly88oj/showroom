@@ -63,36 +63,40 @@ pub fn rand_hex(n: usize) -> String {
     hex::encode(b)
 }
 
-// —— 名字（SPEC §4；实现收口在 common::names）——
+// —— 名字（SPEC §4 + §11；实现收口在 common::names）——
 
-/// project：正则 + 保留名；slot/owner 等其余名字仅正则（保留名只约束 project）。
+/// project：§11 放宽正则 + 保留名；owner 等其余名字沿用旧小写正则（registry 路径需小写）。
 pub fn check_name(kind: &str, s: &str) -> R<()> {
     let r = if kind == "project" {
         showroom_common::names::check_project(s)
     } else {
-        showroom_common::names::check_slot(s)
+        showroom_common::names::check_aux(s)
     };
     r.map_err(|e| ApiError::new("E_NAME", format!("{kind}: {e}")))
 }
 
-// —— 路径（SPEC §5）——
+// —— 路径（SPEC §5 + §11 v1.4：项目级三件套 <project>.conf|.env|.last2，去掉槽位目录层）——
 
 pub fn projects_dir(root: &Path) -> PathBuf {
     root.join("state/projects")
 }
-pub fn conf_path(root: &Path, p: &str, s: &str) -> PathBuf {
-    projects_dir(root).join(p).join(format!("{s}.conf"))
+pub fn conf_path(root: &Path, p: &str) -> PathBuf {
+    projects_dir(root).join(format!("{p}.conf"))
 }
-pub fn env_path(root: &Path, p: &str, s: &str) -> PathBuf {
-    projects_dir(root).join(p).join(format!("{s}.env"))
+pub fn env_path(root: &Path, p: &str) -> PathBuf {
+    projects_dir(root).join(format!("{p}.env"))
 }
-pub fn last2_path(root: &Path, p: &str, s: &str) -> PathBuf {
-    projects_dir(root).join(p).join(format!("{s}.last2"))
+pub fn last2_path(root: &Path, p: &str) -> PathBuf {
+    projects_dir(root).join(format!("{p}.last2"))
 }
 pub fn routes_dir(root: &Path) -> PathBuf {
     root.join("state/routes")
 }
-pub fn route_path(root: &Path, p: &str, s: &str) -> PathBuf {
+pub fn route_path(root: &Path, p: &str) -> PathBuf {
+    routes_dir(root).join(format!("{p}.caddy"))
+}
+/// v1.4 前旧路由文件 `<project>-<slot>.caddy`（仅迁移期删除用）。
+fn legacy_route_path(root: &Path, p: &str, s: &str) -> PathBuf {
     routes_dir(root).join(format!("{p}-{s}.caddy"))
 }
 pub fn tokens_dir(root: &Path, owner: &str) -> PathBuf {
@@ -105,10 +109,10 @@ pub fn htpasswd_path(root: &Path) -> PathBuf {
     root.join("state/registry.htpasswd")
 }
 
-// —— slot.conf：key=value（owner tag port cport mem cpu redisdb updated [stopped]）——
+// —— project.conf：key=value（owner tag port cport mem cpu redisdb updated [stopped] [legacyslot]）——
 
 #[derive(Debug, Clone, PartialEq)]
-pub struct SlotConf {
+pub struct Conf {
     pub owner: String,
     pub tag: String,
     pub port: u16,
@@ -118,9 +122,12 @@ pub struct SlotConf {
     pub redisdb: u8,
     pub updated: u64,
     pub stopped: bool,
+    /// v1.4 迁移来源槽位名（§11）：据此检测沿用老库 `sr_<p>_<slot>`（§9 双名思路），
+    /// db-reset 重建为新名后清空。全新项目恒 None。
+    pub legacyslot: Option<String>,
 }
 
-impl SlotConf {
+impl Conf {
     pub fn to_conf(&self) -> String {
         let mut s = format!(
             "owner={}\ntag={}\nport={}\ncport={}\nmem={}\ncpu={}\nredisdb={}\nupdated={}\n",
@@ -128,6 +135,9 @@ impl SlotConf {
         );
         if self.stopped {
             s.push_str("stopped=1\n");
+        }
+        if let Some(ls) = &self.legacyslot {
+            s.push_str(&format!("legacyslot={ls}\n"));
         }
         s
     }
@@ -139,7 +149,7 @@ impl SlotConf {
                 .cloned()
                 .ok_or_else(|| ApiError::state(format!("conf missing field '{k}'")))
         };
-        Ok(SlotConf {
+        Ok(Conf {
             owner: need("owner")?,
             tag: need("tag")?,
             port: need("port")?.parse().map_err(|e| ApiError::state(format!("conf port: {e}")))?,
@@ -149,68 +159,62 @@ impl SlotConf {
             redisdb: need("redisdb")?.parse().map_err(|e| ApiError::state(format!("conf redisdb: {e}")))?,
             updated: need("updated")?.parse().map_err(|e| ApiError::state(format!("conf updated: {e}")))?,
             stopped: map.get("stopped").map(|v| v == "1").unwrap_or(false),
+            legacyslot: map.get("legacyslot").cloned().filter(|v| !v.is_empty()),
         })
     }
 
-    pub fn load(root: &Path, p: &str, s: &str) -> R<Self> {
-        Self::parse(&fs::read_to_string(conf_path(root, p, s))?)
+    pub fn load(root: &Path, p: &str) -> R<Self> {
+        Self::parse(&fs::read_to_string(conf_path(root, p))?)
     }
 
-    pub fn save(&self, root: &Path, p: &str, s: &str) -> R<()> {
-        let path = conf_path(root, p, s);
+    pub fn save(&self, root: &Path, p: &str) -> R<()> {
+        let path = conf_path(root, p);
         fs::create_dir_all(path.parent().unwrap_or(Path::new("/")))?;
         fs::write(&path, self.to_conf())?;
         Ok(())
     }
 
-    /// ps / GET /_api/projects 共用的列表行（SPEC §3 projects 响应字段）。
-    pub fn to_json(&self, p: &str, s: &str, status: &str) -> Value {
+    /// ps / GET /_api/projects 共用的列表行（SPEC §3 projects 响应字段，§11 无 slot）。
+    pub fn to_json(&self, p: &str, status: &str) -> Value {
         json!({
-            "project": p, "slot": s, "owner": self.owner, "tag": self.tag,
-            "url": public_url(p, s), "status": status,
+            "project": p, "owner": self.owner, "tag": self.tag,
+            "url": public_url(p), "status": status,
             "port": self.port, "mem": self.mem, "cpu": self.cpu, "updated": self.updated,
         })
     }
 }
 
-pub fn read_last2(root: &Path, p: &str, s: &str) -> Option<String> {
-    fs::read_to_string(last2_path(root, p, s))
+pub fn read_last2(root: &Path, p: &str) -> Option<String> {
+    fs::read_to_string(last2_path(root, p))
         .ok()
         .map(|t| t.trim().to_string())
         .filter(|t| !t.is_empty())
 }
 
-pub fn all_confs(root: &Path) -> Vec<(String, String, SlotConf)> {
-    let mut out = vec![];
+/// 全部项目 conf（项目名字典序）。v1.4 起为扁平布局 state/projects/<p>.conf；
+/// 老布局 <p>/<s>.conf 由 migrate_legacy_layout 在 serve 启动/reconcile 前上提。
+pub fn all_confs(root: &Path) -> Vec<(String, Conf)> {
     let Ok(rd) = fs::read_dir(projects_dir(root)) else {
-        return out;
+        return vec![];
     };
-    let mut projs: Vec<PathBuf> = rd
-        .filter_map(|e| e.ok())
-        .map(|e| e.path())
-        .filter(|p| p.is_dir())
-        .collect();
-    projs.sort();
-    for pd in projs {
-        let Some(pname) = pd.file_name().and_then(|o| o.to_str()).map(str::to_string) else {
+    let mut out = vec![];
+    for e in rd.filter_map(|e| e.ok()) {
+        let path = e.path();
+        if path.extension().and_then(|o| o.to_str()) != Some("conf") || path.is_dir() {
+            continue;
+        }
+        let Some(pname) = path.file_stem().and_then(|o| o.to_str()).map(str::to_string) else {
             continue;
         };
-        let Ok(rd) = fs::read_dir(&pd) else { continue };
-        for e in rd.filter_map(|e| e.ok()) {
-            let path = e.path();
-            if path.extension().and_then(|o| o.to_str()) == Some("conf") {
-                if let Some(stem) = path.file_stem().and_then(|o| o.to_str()) {
-                    if let Ok(c) = SlotConf::load(root, &pname, stem) {
-                        out.push((pname.clone(), stem.to_string(), c));
-                    }
-                }
-            }
+        if let Ok(c) = Conf::parse(&fs::read_to_string(&path).unwrap_or_default()) {
+            out.push((pname, c));
         }
     }
+    out.sort_by(|a, b| a.0.cmp(&b.0));
     out
 }
 
-// —— KEY=VALUE 解析（policy.env / slot.env 通用，几行）——
+// —— KEY=VALUE 解析（policy.env / project.env 通用，几行）——
 
 pub fn parse_kv(text: &str) -> BTreeMap<String, String> {
     text.lines()
@@ -220,46 +224,50 @@ pub fn parse_kv(text: &str) -> BTreeMap<String, String> {
         .collect()
 }
 
-// —— 环境变量契约（SPEC §6，值全部具体化；SPEC §9 库名归一化）——
+// —— 环境变量契约（SPEC §6 + §11，值全部具体化；库名归一化）——
 
-/// 归一化库名/角色名（SPEC §9）：`sr_` + project/slot 中 `-`→`_`
+/// 归一化库名（§11）：`sr_` + project 的 `-`→`_`
 /// （psql -d、CREATE、env 的 DB_NAME/DB_USER/DATABASE_URL 一律用它）。
-pub fn db_ident(p: &str, s: &str) -> String {
-    format!("sr_{}_{}", p.replace('-', "_"), s.replace('-', "_"))
+pub fn db_ident(p: &str) -> String {
+    format!("sr_{}", p.replace('-', "_"))
 }
 
-/// v1.2 前旧命名（连字符原样保留）。仅用于 legacy 存量库的存在性查找。
-pub fn legacy_db_ident(p: &str, s: &str) -> String {
-    format!("sr_{p}_{s}")
-}
-
-/// 库名解析（纯函数，存在性由调用方喂 dockerops::db_exists 的结果）：
-/// 新名已存在 → 新名；仅旧名存在 → 沿用旧名（存量库直到 db-reset 重建为新名）；皆无 → 新名（首建路径）。
-pub fn resolve_db_ident(p: &str, s: &str, new_exists: bool, legacy_exists: bool) -> String {
-    if new_exists || !legacy_exists {
-        db_ident(p, s)
-    } else {
-        legacy_db_ident(p, s)
+/// v1.4 前老库候选（§9 双名思路）：verbatim `sr_{p}_{s}` 与归一化 `sr_{p_n}_{s_n}`（相同去重）。
+/// 仅用于 legacy 存量库的存在性查找（conf.legacyslot 指路）。
+pub fn legacy_db_idents(p: &str, s: &str) -> Vec<String> {
+    let mut v = vec![format!("sr_{p}_{s}")];
+    let n = format!("sr_{}_{}", p.replace('-', "_"), s.replace('-', "_"));
+    if n != v[0] {
+        v.push(n);
     }
+    v
 }
 
-/// stable 槽位路径不带 slot（SPEC §5 URL 规则）。
-pub fn base_path(p: &str, s: &str) -> String {
-    if s == "stable" {
-        format!("/{p}/")
-    } else {
-        format!("/{p}/{s}/")
+/// 库名裁决（纯函数，存在性由调用方喂 dockerops::db_exists 的结果）：
+/// names 按优先级排列（新名在前）；首个存在者 → (该名, true)；皆无 → (首名, false)（首建路径）。
+pub fn resolve_db_ident(names: &[String], exists: &[bool]) -> (String, bool) {
+    for (n, e) in names.iter().zip(exists) {
+        if *e {
+            return (n.clone(), true);
+        }
     }
+    (names[0].clone(), false)
 }
 
-pub fn public_url(p: &str, s: &str) -> String {
+/// URL 路径恒 /<project>/（§11：无槽位）。
+pub fn base_path(p: &str) -> String {
+    format!("/{p}/")
+}
+
+pub fn public_url(p: &str) -> String {
     let base = std::env::var("SHOWROOM_BASE_URL").unwrap_or_else(|_| "http://127.0.0.1".into());
-    let bp = base_path(p, s);
+    let bp = base_path(p);
     format!("{}/{}", base.trim_end_matches('/'), bp.trim_start_matches('/'))
 }
 
 /// env 文件内容（db 传**已解析**的库名：归一化新名，或沿用的 legacy 旧名）。
-pub fn env_file_contents(p: &str, s: &str, db: &str, db_pass: &str, redis_db: u8) -> String {
+/// §11：无 SHOWROOM_SLOT，SHOWROOM_BASE_PATH 恒 /<project>/。
+pub fn env_file_contents(p: &str, db: &str, db_pass: &str, redis_db: u8) -> String {
     format!(
         "DB_HOST=sr-postgres\n\
          DB_PORT=5432\n\
@@ -272,9 +280,8 @@ pub fn env_file_contents(p: &str, s: &str, db: &str, db_pass: &str, redis_db: u8
          REDIS_DB={redis_db}\n\
          REDIS_URL=redis://sr-redis:6379/{redis_db}\n\
          SHOWROOM_PROJECT={p}\n\
-         SHOWROOM_SLOT={s}\n\
          SHOWROOM_BASE_PATH={bp}\n",
-        bp = base_path(p, s),
+        bp = base_path(p),
     )
 }
 
@@ -282,6 +289,7 @@ pub fn env_file_contents(p: &str, s: &str, db: &str, db_pass: &str, redis_db: u8
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct Policy {
+    /// 项目数上限（§11 起=项目数；键名沿用存量 policy.env 的 MAX_SLOTS，语义=MAX_PROJECTS）。
     pub max_slots: u32,
     pub default_mem: String,
     pub max_mem: String,
@@ -372,60 +380,69 @@ pub fn parse_meminfo_available_kb(text: &str) -> Option<u64> {
     line.split_whitespace().nth(1)?.parse().ok()
 }
 
-// —— ports.reg：每行 <port> <project> <slot>，槽位端口 8100–8199 ——
+// —— ports.reg：每行 <port> <project>（§11 去 slot 列），端口 8100–8199 ——
 
-pub fn read_ports(root: &Path) -> Vec<(u16, String, String)> {
+pub fn read_ports(root: &Path) -> Vec<(u16, String)> {
     fs::read_to_string(ports_reg(root))
         .unwrap_or_default()
         .lines()
         .filter_map(|l| {
             let mut it = l.split_whitespace();
-            match (it.next()?.parse().ok(), it.next(), it.next()) {
-                (Some(p), Some(pj), Some(sl)) => Some((p, pj.to_string(), sl.to_string())),
+            match (it.next()?.parse().ok(), it.next()) {
+                (Some(p), Some(pj)) => Some((p, pj.to_string())),
                 _ => None,
             }
         })
         .collect()
 }
 
+/// 行的第二列（project）；按 token 精确比对（免 "demo" 误吞 "mydemo" 的后缀误伤）。
+fn port_line_project(l: &str) -> Option<String> {
+    l.split_whitespace().nth(1).map(str::to_string)
+}
+
+fn ports_lines(root: &Path) -> Vec<String> {
+    fs::read_to_string(ports_reg(root))
+        .unwrap_or_default()
+        .lines()
+        .filter(|l| !l.trim().is_empty())
+        .map(str::to_string)
+        .collect()
+}
+
 /// 找空闲端口（不落账；publish 在 docker run 成功后 register）。
 /// ponytail: 无并发锁——本机唯一管理通道（systemd serve + 罕见管理员 CLI），不会并发分配。
 pub fn alloc_port(root: &Path) -> R<u16> {
-    let used: BTreeSet<u16> = read_ports(root).into_iter().map(|(p, _, _)| p).collect();
+    let used: BTreeSet<u16> = read_ports(root).into_iter().map(|(p, _)| p).collect();
     (PORT_MIN..=PORT_MAX)
         .find(|p| !used.contains(p))
         .ok_or_else(|| ApiError::new("E_QUOTA", "no free port in 8100-8199"))
 }
 
-pub fn register_port(root: &Path, port: u16, project: &str, slot: &str) -> R<()> {
-    let suffix = format!(" {project} {slot}");
-    let mut lines: Vec<String> = fs::read_to_string(ports_reg(root))
-        .unwrap_or_default()
-        .lines()
-        .filter(|l| !l.trim().is_empty() && !l.ends_with(&suffix))
-        .map(str::to_string)
+pub fn register_port(root: &Path, port: u16, project: &str) -> R<()> {
+    let mut lines: Vec<String> = ports_lines(root)
+        .into_iter()
+        .filter(|l| port_line_project(l).as_deref() != Some(project))
         .collect();
-    lines.push(format!("{port} {project} {slot}"));
+    lines.push(format!("{port} {project}"));
     fs::create_dir_all(root.join("state"))?;
     fs::write(ports_reg(root), lines.join("\n") + "\n")?;
     Ok(())
 }
 
-pub fn release_port(root: &Path, project: &str, slot: &str) -> R<()> {
-    let suffix = format!(" {project} {slot}");
-    let lines: Vec<String> = fs::read_to_string(ports_reg(root))
-        .unwrap_or_default()
-        .lines()
-        .filter(|l| !l.trim().is_empty() && !l.ends_with(&suffix))
-        .map(str::to_string)
+pub fn release_port(root: &Path, project: &str) -> R<()> {
+    let lines: Vec<String> = ports_lines(root)
+        .into_iter()
+        .filter(|l| port_line_project(l).as_deref() != Some(project))
         .collect();
-    fs::write(ports_reg(root), lines.join("\n") + "\n")?;
+    let out = if lines.is_empty() { String::new() } else { lines.join("\n") + "\n" };
+    fs::write(ports_reg(root), out)?;
     Ok(())
 }
 
-/// redis 逻辑 DB 0-15：扫现有 conf 找空闲；占满 → E_QUOTA。
+/// redis 逻辑 DB 0-15：扫现有项目 conf 找空闲（§11 按项目分配）；占满 → E_QUOTA。
 pub fn alloc_redisdb(root: &Path) -> R<u8> {
-    let used: BTreeSet<u8> = all_confs(root).into_iter().map(|(_, _, c)| c.redisdb).collect();
+    let used: BTreeSet<u8> = all_confs(root).into_iter().map(|(_, c)| c.redisdb).collect();
     (0..REDIS_DBS)
         .find(|d| !used.contains(d))
         .ok_or_else(|| ApiError::new("E_QUOTA", "no free redis db in 0-15"))
@@ -528,16 +545,12 @@ pub fn write_private(path: &Path, contents: &str) -> R<()> {
     Ok(())
 }
 
-// —— caddy 路由片段：文件名 <project>-<slot>.caddy；stable 的匹配路径不带 slot（SPEC §5）——
+// —— caddy 路由片段：文件名 <project>.caddy；路径恒 /<project>/（§11 无槽位）——
 
-pub fn caddy_route(project: &str, slot: &str, port: u16) -> String {
-    let base = if slot == "stable" {
-        format!("/{project}")
-    } else {
-        format!("/{project}/{slot}")
-    };
-    // caddy matcher 名只允许字母数字下划线：连字符换下划线
-    let m = format!("sr_{project}_{slot}").replace('-', "_");
+pub fn caddy_route(project: &str, port: u16) -> String {
+    let base = format!("/{project}");
+    // caddy matcher 名只允许字母数字下划线：连字符换下划线（大小写原样保留，§11）
+    let m = format!("sr_{project}").replace('-', "_");
     // handle_path 自动剥掉 {base} 前缀再反代（容器收到的是 / 起始路径）
     format!(
         "@{m}_nos path {base}\n\
@@ -546,6 +559,144 @@ pub fn caddy_route(project: &str, slot: &str, port: u16) -> String {
            reverse_proxy 127.0.0.1:{port}\n\
          }}\n"
     )
+}
+
+// —— v1.4 槽位布局迁移（§11）：state/projects/<p>/<s>.* → <p>.*，纯状态层（不碰 docker）——
+
+/// 多槽位上提计划（纯函数）：updated 最新者胜出上提，其余槽位弃置；
+/// updated 并列时名字字典序大者胜（确定性）。输入须非空。
+pub fn plan_project_lift(slots: &[(String, u64)]) -> (String, Vec<String>) {
+    let mut v = slots.to_vec();
+    v.sort_by(|a, b| a.1.cmp(&b.1).then(a.0.cmp(&b.0)));
+    let (win, _) = v.pop().expect("plan_project_lift: non-empty");
+    let losers = v.into_iter().map(|(s, _)| s).collect();
+    (win, losers)
+}
+
+/// v1.4 布局迁移（§11，幂等；serve 启动与 reconcile/autoheal 前调用）：
+/// - `state/projects/<p>/<slot>.{conf,env,last2}` → `state/projects/<p>.{conf,env,last2}`；
+///   多槽位取 updated 最新者上提（conf 附 `legacyslot=<slot>` 供 DB 检测沿用），其余删除；
+/// - ports.reg 三列 → 两列（被弃槽位的行一并移除，防端口被幽灵占用）；
+/// - `routes/<p>-<s>.caddy` 旧文件删除，按胜出 conf 端口写新 `<p>.caddy`。
+/// 全程 eprintln 如实记录；返回是否有变更（调用方据此 reload caddy）。
+/// 容器 docker rename 收养在 ops::migrate_legacy（state 层不碰 docker）。
+pub fn migrate_legacy_layout(root: &Path) -> bool {
+    let pdir = projects_dir(root);
+    let Ok(rd) = fs::read_dir(&pdir) else { return false };
+    let mut changed = false;
+    let mut winners: Vec<(String, String)> = vec![]; // (project, 胜出 slot)
+    for e in rd.filter_map(|e| e.ok()) {
+        let dir = e.path();
+        if !dir.is_dir() {
+            continue;
+        }
+        let Some(p) = dir.file_name().and_then(|o| o.to_str()).map(str::to_string) else {
+            continue;
+        };
+        let mut slots: Vec<(String, u64)> = vec![];
+        if let Ok(sd) = fs::read_dir(&dir) {
+            for f in sd.filter_map(|f| f.ok()) {
+                let path = f.path();
+                if path.extension().and_then(|o| o.to_str()) != Some("conf") {
+                    continue;
+                }
+                let stem = path.file_stem().and_then(|o| o.to_str()).map(str::to_string);
+                match (stem, fs::read_to_string(&path)) {
+                    (Some(s), Ok(text)) => match Conf::parse(&text) {
+                        Ok(c) => slots.push((s, c.updated)),
+                        Err(e) => eprintln!("showroomctl: migrate: {p}/{s}.conf 解析失败，跳过: {e}"),
+                    },
+                    _ => eprintln!("showroomctl: migrate: {p}: unreadable conf skipped"),
+                }
+            }
+        }
+        if slots.is_empty() {
+            // 无 conf 的残留目录（半迁移/手工残留）：整体删除
+            if fs::remove_dir_all(&dir).is_ok() {
+                eprintln!("showroomctl: migrate: removed conf-less project dir {p}/");
+                changed = true;
+            }
+            continue;
+        }
+        let (win, losers) = plan_project_lift(&slots);
+        eprintln!(
+            "showroomctl: migrate: project {p}: lifted slot '{win}' (updated 最新), dropped [{}]",
+            losers.join(", ")
+        );
+        // 上提三件套；conf 附 legacyslot（DB 检测沿用，§9 双名思路）
+        let wconf = dir.join(format!("{win}.conf"));
+        match fs::read_to_string(&wconf).map_err(ApiError::from).and_then(|t| Conf::parse(&t)) {
+            Ok(mut c) => {
+                c.legacyslot = Some(win.clone());
+                if let Err(e) = c.save(root, &p) {
+                    eprintln!("showroomctl: migrate: {p}: write {} 失败: {e}", conf_path(root, &p).display());
+                    continue;
+                }
+            }
+            Err(e) => {
+                eprintln!("showroomctl: migrate: {p}/{win}.conf 重读失败，跳过该项目: {e}");
+                continue;
+            }
+        }
+        for ext in ["env", "last2"] {
+            let src = dir.join(format!("{win}.{ext}"));
+            let dst = match ext {
+                "env" => env_path(root, &p),
+                _ => last2_path(root, &p),
+            };
+            if src.exists() {
+                if fs::rename(&src, &dst).is_err() {
+                    // 同目录树内 rename 恒同盘；失败（并发占用等）退回拷贝语义
+                    if let Ok(b) = fs::read(&src) {
+                        let _ = fs::write(&dst, b);
+                    }
+                }
+            }
+        }
+        // 旧路由文件删除 + 新路由按胜出 conf 端口写
+        let port = Conf::load(root, &p).ok().map(|c| c.port);
+        for s in std::iter::once(&win).chain(losers.iter()) {
+            let _ = fs::remove_file(legacy_route_path(root, &p, s));
+        }
+        if let Some(port) = port {
+            let _ = fs::create_dir_all(routes_dir(root));
+            let _ = fs::write(route_path(root, &p), caddy_route(&p, port));
+        }
+        // 旧目录整体清除（含被弃槽位与未知残留文件）
+        if fs::remove_dir_all(&dir).is_ok() {
+            changed = true;
+            winners.push((p, win));
+        } else {
+            eprintln!("showroomctl: migrate: {p}: 旧目录删除失败（下次重试）");
+        }
+    }
+    if changed && ports_reg(root).exists() {
+        rewrite_ports_reg(root, &winners);
+    }
+    changed
+}
+
+/// ports.reg 三列（旧）→ 两列（§11）：迁移过的项目只保留胜出槽位的行，
+/// 其余行剥掉第三列。已是两列的行原样保留。
+fn rewrite_ports_reg(root: &Path, winners: &[(String, String)]) {
+    let lines: Vec<String> = fs::read_to_string(ports_reg(root))
+        .unwrap_or_default()
+        .lines()
+        .filter_map(|l| {
+            let mut it = l.split_whitespace();
+            let port = it.next()?;
+            let proj = it.next()?;
+            if let Some(slot) = it.next() {
+                // 三列旧行：本项目已迁移且行非胜出槽位 → 弃（端口随槽位一并退役）
+                if winners.iter().any(|(p, w)| p == proj && slot != w) {
+                    return None;
+                }
+            }
+            Some(format!("{port} {proj}"))
+        })
+        .collect();
+    let out = if lines.is_empty() { String::new() } else { lines.join("\n") + "\n" };
+    let _ = fs::write(ports_reg(root), out);
 }
 
 // —— _tmp 陈旧会话筛选（SPEC §8.1：>24h 由 gc-images 顺带删）——
@@ -587,144 +738,153 @@ mod tests {
         d
     }
 
-    // 1. 名字校验（转发 common::names）：正则 / 保留名只约束 project
+    fn base_conf(updated: u64) -> Conf {
+        Conf {
+            owner: "alice".into(),
+            tag: "v1".into(),
+            port: 8100,
+            cport: 3000,
+            mem: "256m".into(),
+            cpu: 1.5,
+            redisdb: 7,
+            updated,
+            stopped: false,
+            legacyslot: None,
+        }
+    }
+
+    // 1. 名字校验（转发 common::names）：§11 放宽正则 + 保留名；辅助名沿用旧小写正则
     #[test]
     fn names() {
-        for good in ["abc", "a-b2", "0", "a", &"a".repeat(31), "pr-42-x1"] {
+        for good in ["abc", "a-b2", "0", "a", &"a".repeat(31), "pr-42-x1", "Demo42", "A-B"] {
             assert!(check_name("project", good).is_ok(), "{good} should be valid");
         }
-        for bad in ["", "Abc", "aBc", "-a", "a_", "a b", "中文", &"a".repeat(32), "a.b", "a/b"] {
-            assert!(check_name("slot", bad).is_err(), "{bad} should be invalid");
+        for bad in ["", "-a", "a_", "a b", "中文", &"a".repeat(32), "a.b", "a/b"] {
+            assert!(check_name("project", bad).is_err(), "{bad} should be invalid");
         }
-        // 保留名：project 拒、slot 放行（SPEC §4 统一语义；_api 等本就不合正则，分歧点在 v2）
+        // 保留名：project 拒（_api 等本就不合正则，分歧点在 v2）
         for r in ["v2", "_api", "_bootstrap", "_console"] {
             assert!(check_name("project", r).is_err(), "{r} reserved for project");
         }
-        assert!(check_name("slot", "v2").is_ok(), "slot not bound by reserved names");
+        // 辅助名（owner）：旧小写正则，大写拒绝
+        assert!(check_name("owner", "alice").is_ok());
+        assert_eq!(check_name("owner", "Alice").unwrap_err().code, "E_NAME");
         assert_eq!(check_name("project", "v2").unwrap_err().code, "E_NAME");
     }
 
-    // 1b. SlotConf::to_json（ps 与 /_api/projects 共用行）
+    // 1b. Conf::to_json（ps 与 /_api/projects 共用行，§11 无 slot 字段）
     #[test]
     fn conf_to_json() {
-        let c = SlotConf {
-            owner: "alice".into(),
-            tag: "v1.2".into(),
-            port: 8123,
-            cport: 3000,
-            mem: "256m".into(),
-            cpu: 1.5,
-            redisdb: 7,
-            updated: 1700000000,
-            stopped: false,
-        };
-        let v = c.to_json("demo", "pr42", "running");
+        let c = base_conf(1_700_000_000);
+        let v = c.to_json("demo", "running");
         assert_eq!(v["project"], "demo");
-        assert_eq!(v["slot"], "pr42");
+        assert!(v.get("slot").is_none(), "§11 响应不再含 slot");
         assert_eq!(v["owner"], "alice");
-        assert_eq!(v["tag"], "v1.2");
+        assert_eq!(v["tag"], "v1");
         assert_eq!(v["status"], "running");
-        assert_eq!(v["url"], public_url("demo", "pr42"));
-        assert_eq!(v["port"], 8123);
+        assert_eq!(v["url"], public_url("demo"));
+        assert_eq!(v["port"], 8100);
         assert_eq!(v["mem"], "256m");
         assert_eq!(v["cpu"], 1.5);
-        assert_eq!(v["updated"], 1700000000);
+        assert_eq!(v["updated"], 1_700_000_000);
     }
 
-    // 2a. conf 序列化往返（§5 全字段，含/不含 stopped）
+    // 2a. conf 序列化往返（全字段，含/不含 stopped 与 legacyslot）
     #[test]
     fn conf_roundtrip() {
-        let c = SlotConf {
-            owner: "alice".into(),
-            tag: "v1.2".into(),
-            port: 8123,
-            cport: 3000,
-            mem: "256m".into(),
-            cpu: 1.5,
-            redisdb: 7,
-            updated: 1700000000,
-            stopped: true,
-        };
+        let mut c = base_conf(1_700_000_000);
+        c.stopped = true;
         let t = c.to_conf();
         assert!(t.contains("stopped=1\n"));
-        assert_eq!(SlotConf::parse(&t).unwrap(), c);
+        assert!(!t.contains("legacyslot"), "未迁移项目不写 legacyslot");
+        assert_eq!(Conf::parse(&t).unwrap(), c);
         let mut c2 = c.clone();
         c2.stopped = false;
         assert!(!c2.to_conf().contains("stopped"));
-        assert_eq!(SlotConf::parse(&c2.to_conf()).unwrap(), c2);
-        // 整数 cpu 往返
+        assert_eq!(Conf::parse(&c2.to_conf()).unwrap(), c2);
+        // legacyslot（§11 迁移标记）往返
         let mut c3 = c.clone();
-        c3.cpu = 1.0;
-        assert_eq!(SlotConf::parse(&c3.to_conf()).unwrap(), c3);
+        c3.legacyslot = Some("stable".into());
+        let t3 = c3.to_conf();
+        assert!(t3.contains("legacyslot=stable\n"));
+        assert_eq!(Conf::parse(&t3).unwrap(), c3);
+        // 整数 cpu 往返
+        let mut c4 = c.clone();
+        c4.cpu = 1.0;
+        assert_eq!(Conf::parse(&c4.to_conf()).unwrap(), c4);
     }
 
-    // 2b. env 文件往返（§6 全字段具体化；stable 与非 stable 的 BASE_PATH）
+    // 2b. env 文件往返（§6 全字段具体化；§11 无 SHOWROOM_SLOT，BASE_PATH 恒 /<project>/）
     #[test]
     fn env_file_roundtrip() {
-        let txt = env_file_contents("demo", "next", &db_ident("demo", "next"), "s3cret", 3);
+        let txt = env_file_contents("demo", &db_ident("demo"), "s3cret", 3);
         let m = parse_kv(&txt);
         assert_eq!(m["DB_HOST"], "sr-postgres");
         assert_eq!(m["DB_PORT"], "5432");
-        assert_eq!(m["DB_NAME"], "sr_demo_next");
-        assert_eq!(m["DB_USER"], "sr_demo_next");
+        assert_eq!(m["DB_NAME"], "sr_demo");
+        assert_eq!(m["DB_USER"], "sr_demo");
         assert_eq!(m["DB_PASSWORD"], "s3cret");
-        assert_eq!(
-            m["DATABASE_URL"],
-            "postgresql://sr_demo_next:s3cret@sr-postgres:5432/sr_demo_next"
-        );
+        assert_eq!(m["DATABASE_URL"], "postgresql://sr_demo:s3cret@sr-postgres:5432/sr_demo");
         assert_eq!(m["REDIS_HOST"], "sr-redis");
         assert_eq!(m["REDIS_PORT"], "6379");
         assert_eq!(m["REDIS_DB"], "3");
         assert_eq!(m["REDIS_URL"], "redis://sr-redis:6379/3");
         assert_eq!(m["SHOWROOM_PROJECT"], "demo");
-        assert_eq!(m["SHOWROOM_SLOT"], "next");
-        assert_eq!(m["SHOWROOM_BASE_PATH"], "/demo/next/");
-
-        let stable = parse_kv(&env_file_contents("demo", "stable", &db_ident("demo", "stable"), "x", 0));
-        assert_eq!(stable["SHOWROOM_BASE_PATH"], "/demo/");
-        assert_eq!(stable["DB_NAME"], "sr_demo_stable");
-        // legacy 库名沿用时 env 同样指向旧名（§9 归一化过渡期）
-        let lg = parse_kv(&env_file_contents("skill-demo", "stable", &legacy_db_ident("skill-demo", "stable"), "pw", 1));
+        assert_eq!(m["SHOWROOM_BASE_PATH"], "/demo/");
+        assert!(!m.contains_key("SHOWROOM_SLOT"), "§11 移除 SHOWROOM_SLOT");
+        // 大写/连字符项目：库名归一化，BASE_PATH 原样
+        let up = parse_kv(&env_file_contents("Demo-9", &db_ident("Demo-9"), "pw", 0));
+        assert_eq!(up["DB_NAME"], "sr_Demo_9");
+        assert_eq!(up["SHOWROOM_BASE_PATH"], "/Demo-9/");
+        // legacy 库名沿用时 env 同样指向旧名（§9→§11 过渡期）
+        let lg = parse_kv(&env_file_contents("skill-demo", "sr_skill-demo_stable", "pw", 1));
         assert_eq!(lg["DB_NAME"], "sr_skill-demo_stable");
-        assert_eq!(lg["DATABASE_URL"], "postgresql://sr_skill-demo_stable:pw@sr-postgres:5432/sr_skill-demo_stable");
         for k in [
             "DB_HOST", "DB_PORT", "DB_NAME", "DB_USER", "DB_PASSWORD", "DATABASE_URL",
             "REDIS_HOST", "REDIS_PORT", "REDIS_DB", "REDIS_URL", "SHOWROOM_PROJECT",
-            "SHOWROOM_SLOT", "SHOWROOM_BASE_PATH",
+            "SHOWROOM_BASE_PATH",
         ] {
-            assert!(stable.contains_key(k), "missing {k}");
+            assert!(up.contains_key(k) || m.contains_key(k), "missing {k}");
         }
     }
 
-    // 2c. 库名归一化 + legacy 查找（§9：纯函数，存在性由调用方喂）
+    // 2c. 库名归一化 + legacy 检测沿用（§9→§11：候选按优先级，纯函数裁决）
     #[test]
     fn db_ident_normalization_and_legacy() {
-        assert_eq!(db_ident("demo", "stable"), "sr_demo_stable");
-        assert_eq!(db_ident("skill-demo", "pr-42"), "sr_skill_demo_pr_42");
-        assert_eq!(legacy_db_ident("skill-demo", "stable"), "sr_skill-demo_stable");
-        assert_eq!(db_ident("demo", "stable"), legacy_db_ident("demo", "stable"), "无连字符时新旧同形");
+        assert_eq!(db_ident("demo"), "sr_demo");
+        assert_eq!(db_ident("skill-demo"), "sr_skill_demo");
+        assert_eq!(db_ident("Demo-9"), "sr_Demo_9");
+        // 旧候选：verbatim 与归一化双名，无连字符时同形去重
+        assert_eq!(legacy_db_idents("skill-demo", "stable"), vec!["sr_skill-demo_stable", "sr_skill_demo_stable"]);
+        assert_eq!(legacy_db_idents("demo", "pr-42"), vec!["sr_demo_pr-42", "sr_demo_pr_42"]);
+        assert_eq!(legacy_db_idents("demo", "stable"), vec!["sr_demo_stable"], "无连字符时新旧同形");
 
-        // 解析：新名在 → 新名（两者并存时新名优先）；仅旧名在 → 沿用旧名；皆无 → 新名（首建）
-        assert_eq!(resolve_db_ident("skill-demo", "stable", true, false), "sr_skill_demo_stable");
-        assert_eq!(resolve_db_ident("skill-demo", "stable", true, true), "sr_skill_demo_stable");
-        assert_eq!(resolve_db_ident("skill-demo", "stable", false, true), "sr_skill-demo_stable");
-        assert_eq!(resolve_db_ident("skill-demo", "stable", false, false), "sr_skill_demo_stable");
-        assert_eq!(resolve_db_ident("demo", "stable", false, true), "sr_demo_stable", "无连字符新旧同形");
+        // 裁决：新名在 → 新名（并存时新名优先）；仅旧名在 → 沿用；皆无 → 新名（首建）
+        let names = |p: &str, s: &str| {
+            let mut v = vec![db_ident(p)];
+            v.extend(legacy_db_idents(p, s));
+            v
+        };
+        let n = names("skill-demo", "stable");
+        assert_eq!(resolve_db_ident(&n, &[true, false, false]), ("sr_skill_demo".into(), true));
+        assert_eq!(resolve_db_ident(&n, &[true, true, false]), ("sr_skill_demo".into(), true));
+        assert_eq!(resolve_db_ident(&n, &[false, true, false]), ("sr_skill-demo_stable".into(), true));
+        assert_eq!(resolve_db_ident(&n, &[false, false, true]), ("sr_skill_demo_stable".into(), true));
+        assert_eq!(resolve_db_ident(&n, &[false, false, false]), ("sr_skill_demo".into(), false));
     }
 
-    // 3. caddy 片段：stable 与非 stable，路径正确含 308 重定向行
+    // 3. caddy 片段（§11 恒 /<project>/）：路径正确含 308 重定向行
     #[test]
     fn caddy_route_snippets() {
-        let s = caddy_route("demo", "stable", 8100);
-        assert!(s.contains("@sr_demo_stable_nos path /demo\n"));
-        assert!(s.contains("redir @sr_demo_stable_nos /demo/ 308\n"));
+        let s = caddy_route("demo", 8100);
+        assert!(s.contains("@sr_demo_nos path /demo\n"));
+        assert!(s.contains("redir @sr_demo_nos /demo/ 308\n"));
         assert!(s.contains("handle_path /demo/* {\n"));
         assert!(s.contains("reverse_proxy 127.0.0.1:8100\n"));
 
-        let n = caddy_route("demo", "pr42", 8101);
-        assert!(n.contains("@sr_demo_pr42_nos path /demo/pr42\n"));
-        assert!(n.contains("redir @sr_demo_pr42_nos /demo/pr42/ 308\n"));
-        assert!(n.contains("handle_path /demo/pr42/* {\n"));
+        let n = caddy_route("Demo-9", 8101);
+        assert!(n.contains("@sr_Demo_9_nos path /Demo-9\n"));
+        assert!(n.contains("handle_path /Demo-9/* {\n"));
         assert!(n.contains("reverse_proxy 127.0.0.1:8101\n"));
     }
 
@@ -780,42 +940,140 @@ mod tests {
         assert_eq!(effective_mem(&p, Some("big")).unwrap_err().code, "E_NAME");
     }
 
-    // 5. 端口分配：顺序分配、幂等 upsert、占满 8100-8199 → E_QUOTA、释放后可复用
+    // 5. 端口分配（两列 ports.reg）：顺序分配、幂等 upsert、占满 → E_QUOTA、释放后可复用
     #[test]
     fn port_alloc_and_quota() {
         let root = troot("ports");
         fs::create_dir_all(root.join("state")).unwrap();
         assert_eq!(alloc_port(&root).unwrap(), PORT_MIN);
 
-        register_port(&root, 8100, "a", "stable").unwrap();
-        register_port(&root, 8101, "b", "stable").unwrap();
+        register_port(&root, 8100, "a").unwrap();
+        register_port(&root, 8101, "b").unwrap();
         assert_eq!(alloc_port(&root).unwrap(), 8102);
 
-        register_port(&root, 8100, "a", "stable").unwrap(); // 幂等
+        register_port(&root, 8100, "a").unwrap(); // 幂等（同项目 upsert）
+        assert_eq!(read_ports(&root).len(), 2);
+        register_port(&root, 8102, "a").unwrap(); // 同项目换端口 → 旧行替换
         assert_eq!(read_ports(&root).len(), 2);
 
         for p in PORT_MIN..=PORT_MAX {
-            register_port(&root, p, "x", &format!("s{p}")).unwrap();
+            register_port(&root, p, &format!("x{p}")).unwrap();
         }
         assert_eq!(alloc_port(&root).unwrap_err().code, "E_QUOTA");
 
-        release_port(&root, "x", "s8150").unwrap();
+        release_port(&root, "x8150").unwrap();
         assert_eq!(alloc_port(&root).unwrap(), 8150);
+        // 精确 token 比对：释放 "demo" 不影响 "mydemo"
+        register_port(&root, 8150, "mydemo").unwrap();
+        release_port(&root, "demo").unwrap();
+        assert!(read_ports(&root).iter().any(|(p, pj)| *p == 8150 && pj == "mydemo"));
+        // 行内容恒两列
+        let reg = fs::read_to_string(ports_reg(&root)).unwrap();
+        assert!(reg.lines().all(|l| l.split_whitespace().count() == 2), "{reg}");
     }
 
-    // 附带：redisdb 分配（conf 扫描）
+    // 附带：redisdb 分配（conf 扫描，按项目）
     #[test]
     fn redisdb_alloc() {
         let root = troot("redis");
-        let base = SlotConf {
-            owner: "o".into(), tag: "t".into(), port: 8100, cport: 80, mem: "256m".into(),
-            cpu: 1.0, redisdb: 0, updated: 1, stopped: false,
-        };
-        base.save(&root, "demo", "stable").unwrap();
-        let mut n = base.clone();
+        let mut a = base_conf(1);
+        a.redisdb = 0;
+        a.save(&root, "demo").unwrap();
+        let mut n = base_conf(1);
         n.redisdb = 1;
-        n.save(&root, "demo", "next").unwrap();
+        n.save(&root, "other").unwrap();
         assert_eq!(alloc_redisdb(&root).unwrap(), 2);
+    }
+
+    // 5b. 多槽位上提计划（纯函数）：updated 最新胜；并列名字大者胜；单槽位无败者
+    #[test]
+    fn plan_project_lift_selection() {
+        let (w, l) = plan_project_lift(&[("stable".into(), 100), ("next".into(), 300), ("pr42".into(), 200)]);
+        assert_eq!((w.as_str(), l.len()), ("next", 2));
+        assert!(l.contains(&"stable".to_string()) && l.contains(&"pr42".to_string()));
+
+        // 单槽位：直接上提
+        let (w, l) = plan_project_lift(&[("stable".into(), 1)]);
+        assert_eq!((w.as_str(), l.as_slice()), ("stable", [].as_slice()));
+
+        // updated 并列：名字字典序大者胜（确定性）
+        let (w, _) = plan_project_lift(&[("aaa".into(), 5), ("zzz".into(), 5)]);
+        assert_eq!(w, "zzz");
+
+        // 乱序输入不受影响
+        let (w, l) = plan_project_lift(&[("c".into(), 1), ("a".into(), 9), ("b".into(), 5)]);
+        assert_eq!((w.as_str(), l.len()), ("a", 2));
+    }
+
+    // 5c. v1.4 布局迁移（§11）：单槽位上提 + 双列 ports.reg + 新路由文件 + 幂等
+    #[test]
+    fn migrate_legacy_single_slot() {
+        let root = troot("migrate1");
+        fs::create_dir_all(root.join("state/projects/hello")).unwrap();
+        let mut c = base_conf(1_000);
+        c.tag = "v9".into();
+        c.port = 8105;
+        fs::write(root.join("state/projects/hello/stable.conf"), c.to_conf()).unwrap();
+        fs::write(root.join("state/projects/hello/stable.env"), "DB_NAME=sr_hello_stable\n").unwrap();
+        fs::write(root.join("state/projects/hello/stable.last2"), "v8\n").unwrap();
+        fs::write(root.join("state/ports.reg"), "8105 hello stable\n8199 other stable\n").unwrap();
+        fs::create_dir_all(root.join("state/routes")).unwrap();
+        fs::write(root.join("state/routes/hello-stable.caddy"), "old junk\n").unwrap();
+
+        assert!(migrate_legacy_layout(&root));
+        // 三件套上提到项目级；conf 附 legacyslot
+        let lifted = Conf::load(&root, "hello").unwrap();
+        assert_eq!(lifted.tag, "v9");
+        assert_eq!(lifted.legacyslot.as_deref(), Some("stable"));
+        assert!(fs::read_to_string(env_path(&root, "hello")).unwrap().contains("sr_hello_stable"));
+        assert_eq!(read_last2(&root, "hello").as_deref(), Some("v8"));
+        assert!(!root.join("state/projects/hello").exists(), "旧目录清除");
+        // ports.reg 两列；未迁移项目行剥列保留
+        assert_eq!(read_ports(&root), vec![(8105, "hello".into()), (8199, "other".into())]);
+        // 旧路由删、新路由写（按胜出端口）
+        assert!(!root.join("state/routes/hello-stable.caddy").exists());
+        let r = fs::read_to_string(route_path(&root, "hello")).unwrap();
+        assert!(r.contains("reverse_proxy 127.0.0.1:8105"), "{r}");
+        // 幂等：再跑无变更
+        assert!(!migrate_legacy_layout(&root));
+        assert_eq!(Conf::load(&root, "hello").unwrap(), lifted);
+    }
+
+    // 5d. 多槽位迁移：updated 最新上提，其余 conf/env/last2 删除；被弃槽位端口行退役
+    #[test]
+    fn migrate_legacy_multi_slot() {
+        let root = troot("migrate2");
+        for (s, updated, port) in [("stable", 100u64, 8100u16), ("next", 300, 8101), ("pr42", 200, 8102)] {
+            let dir = root.join(format!("state/projects/hello"));
+            fs::create_dir_all(&dir).unwrap();
+            let mut c = base_conf(updated);
+            c.port = port;
+            fs::write(dir.join(format!("{s}.conf")), c.to_conf()).unwrap();
+            fs::write(dir.join(format!("{s}.env")), format!("DB_NAME=sr_hello_{s}\n")).unwrap();
+        }
+        fs::write(root.join("state/projects/hello/stable.last2"), "v0\n").unwrap();
+        fs::write(
+            root.join("state/ports.reg"),
+            "8100 hello stable\n8101 hello next\n8102 hello pr42\n8103 alone stable\n",
+        )
+        .unwrap();
+
+        assert!(migrate_legacy_layout(&root));
+        let lifted = Conf::load(&root, "hello").unwrap();
+        assert_eq!(lifted.updated, 300, "updated 最新者（next）胜出");
+        assert_eq!(lifted.legacyslot.as_deref(), Some("next"));
+        assert_eq!(lifted.port, 8101);
+        // 被弃槽位端口行退役，胜出行与无关项目保留
+        assert_eq!(
+            read_ports(&root),
+            vec![(8101, "hello".into()), (8103, "alone".into())]
+        );
+        // 上提的 env 来自胜出槽位
+        assert!(fs::read_to_string(env_path(&root, "hello")).unwrap().contains("sr_hello_next"));
+        assert!(read_last2(&root, "hello").is_none(), "败者 last2 不上提（胜者无 last2）");
+        assert!(!root.join("state/projects/hello").exists());
+        // 幂等
+        assert!(!migrate_legacy_layout(&root));
     }
 
     // 6. _tmp 陈旧筛选：age>24h 才删；恰 24h / 未来 mtime（时钟偏移）不删

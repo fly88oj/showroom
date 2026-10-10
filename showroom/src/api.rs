@@ -61,31 +61,26 @@ pub fn pick_server(
     Err("未配置任何服务端：showroom config --server-lan URL（或 --server-public）".to_string())
 }
 
-// —— URL / 查询拼接（SPEC §5：stable 槽位路径不带 slot）——
+// —— URL / 查询拼接（§11：URL 恒 /<project>/，请求不再带 slot）——
 
-pub fn slot_url(base: &str, project: &str, slot: &str) -> String {
-    let b = base.trim_end_matches('/');
-    if slot == "stable" {
-        format!("{b}/{project}/")
-    } else {
-        format!("{b}/{project}/{slot}/")
-    }
+pub fn project_url(base: &str, project: &str) -> String {
+    format!("{}/{project}/", base.trim_end_matches('/'))
 }
 
-pub fn logs_query(project: &str, slot: &str, tail: u32) -> String {
-    format!("/_api/logs?project={project}&slot={slot}&tail={tail}")
+pub fn logs_query(project: &str, tail: u32) -> String {
+    format!("/_api/logs?project={project}&tail={tail}")
 }
 
-pub fn env_query(project: &str, slot: &str) -> String {
-    format!("/_api/env?project={project}&slot={slot}")
+pub fn env_query(project: &str) -> String {
+    format!("/_api/env?project={project}")
 }
 
-pub fn import_query(project: &str, slot: &str, tag: &str) -> String {
-    format!("/_api/import?project={project}&slot={slot}&tag={tag}")
+pub fn import_query(project: &str, tag: &str) -> String {
+    format!("/_api/import?project={project}&tag={tag}")
 }
 
-pub fn db_tables_query(project: &str, slot: &str) -> String {
-    format!("/_api/db-tables?project={project}&slot={slot}")
+pub fn db_tables_query(project: &str) -> String {
+    format!("/_api/db-tables?project={project}")
 }
 
 // —— db-dump 三段式（SPEC §10.4）：status 轮询 + chunk 切片 ——
@@ -101,8 +96,8 @@ pub fn dump_chunk_query(dump_id: &str, offset: u64, len: u64) -> String {
     format!("/_api/db-dump-chunk?dump={dump_id}&offset={offset}&len={len}")
 }
 
-pub fn db_restore_query(project: &str, slot: &str, confirm: bool) -> String {
-    format!("/_api/db-restore?project={project}&slot={slot}&confirm={confirm}")
+pub fn db_restore_query(project: &str, confirm: bool) -> String {
+    format!("/_api/db-restore?project={project}&confirm={confirm}")
 }
 
 // —— 错误 ——
@@ -364,33 +359,24 @@ mod tests {
     }
 
     #[test]
-    fn slot_url_rules() {
-        assert_eq!(slot_url("http://h/", "demo", "stable"), "http://h/demo/");
-        assert_eq!(slot_url("http://h", "demo", "pr42"), "http://h/demo/pr42/");
+    fn project_url_rules() {
+        assert_eq!(project_url("http://h/", "demo"), "http://h/demo/");
+        assert_eq!(project_url("http://h", "Demo-9"), "http://h/Demo-9/");
     }
 
     #[test]
     fn query_builders() {
+        assert_eq!(logs_query("demo", 100), "/_api/logs?project=demo&tail=100");
+        assert_eq!(env_query("demo"), "/_api/env?project=demo");
+        assert_eq!(import_query("demo", "v1"), "/_api/import?project=demo&tag=v1");
+        assert_eq!(db_tables_query("demo"), "/_api/db-tables?project=demo");
         assert_eq!(
-            logs_query("demo", "stable", 100),
-            "/_api/logs?project=demo&slot=stable&tail=100"
-        );
-        assert_eq!(env_query("demo", "pr42"), "/_api/env?project=demo&slot=pr42");
-        assert_eq!(
-            import_query("demo", "stable", "v1"),
-            "/_api/import?project=demo&slot=stable&tag=v1"
-        );
-        assert_eq!(
-            db_tables_query("demo", "pr42"),
-            "/_api/db-tables?project=demo&slot=pr42"
+            db_restore_query("demo", true),
+            "/_api/db-restore?project=demo&confirm=true"
         );
         assert_eq!(
-            db_restore_query("demo", "stable", true),
-            "/_api/db-restore?project=demo&slot=stable&confirm=true"
-        );
-        assert_eq!(
-            db_restore_query("demo", "stable", false),
-            "/_api/db-restore?project=demo&slot=stable&confirm=false"
+            db_restore_query("demo", false),
+            "/_api/db-restore?project=demo&confirm=false"
         );
         assert_eq!(
             dump_status_query(&"a".repeat(32)),
