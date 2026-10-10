@@ -92,7 +92,10 @@ mod tests {
     use std::os::unix::fs::PermissionsExt as _;
 
     fn tmpdir() -> PathBuf {
-        let d = std::env::temp_dir().join(format!("showroom-cfg-test-{}", std::process::id()));
+        // 每次调用独立目录（调用序号隔离）：并行测试下固定名会互相 remove_dir_all（存量 flaky）
+        static N: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+        let n = N.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let d = std::env::temp_dir().join(format!("showroom-cfg-test-{}-{n}", std::process::id()));
         let _ = fs::remove_dir_all(&d);
         d
     }
