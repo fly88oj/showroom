@@ -648,6 +648,11 @@ pub fn user_add(
         }
         kid = Some(k);
     }
+    // 纯密码发卡的管理员意图无法落在钥匙上：记账号级待继承标记，首把绑定钥匙继承（SPEC §16）
+    if admin && pubkey.is_none() {
+        fs::create_dir_all(state::users_dir(root, name))?;
+        fs::write(state::users_dir(root, name).join("admin.pending"), b"")?;
+    }
     let mut login_password = None;
     match init_pw {
         InitPw::None => {}
@@ -685,12 +690,16 @@ pub fn key_bind(root: &Path, user: &str, pubkey: &str) -> R<(String, bool)> {
     // 幂等：同钥匙重绑 = 重写 .pub + 补 .bound 标记
     fs::write(dir.join(format!("{kid}.pub")), format!("{}\n", pubkey.trim()))?;
     fs::write(state::bound_marker_path(root, user, &kid), "")?;
-    // admin 继承：既有任一 admin 钥匙（不含本 kid）→ 新钥匙也授 admin
-    let admin = state::user_keys_with_kid(root, user).iter().any(|(k, _)| {
-        *k != kid && state::admin_marker_path(root, user, k).exists()
-    });
+    // admin 继承：既有任一 admin 钥匙（不含本 kid），或账号级 admin.pending（纯密码发卡
+    // 时落的一次性标记）→ 新钥匙授 admin；pending 一次性，首把继承钥匙消费后清除
+    let pending = state::users_dir(root, user).join("admin.pending");
+    let admin = pending.exists()
+        || state::user_keys_with_kid(root, user).iter().any(|(k, _)| {
+            *k != kid && state::admin_marker_path(root, user, k).exists()
+        });
     if admin {
         fs::write(state::admin_marker_path(root, user, &kid), "")?;
+        let _ = fs::remove_file(&pending);
     }
     let policy = state::Policy::load(root);
     for gone in state::bound_keys_gc(root, user, policy.bound_keys_max, Some(&kid)) {
@@ -933,6 +942,38 @@ mod tests {
     // user_add（上收公共函数）：admin 标记、htpasswd/reg.cred、密码只此一次返回。
     // plan-16：InitPw 三态 + pubkey 可选（至少其一）；login_password 只此一次返回。
     #[test]
+    #[test]
+    fn password_only_admin_pending_flow() {
+        let root = troot("admin_pending");
+        fs::create_dir_all(root.join("state")).unwrap();
+        // 纯密码发卡 + admin：落 pending 标记
+        let added = user_add(&root, "bob", None, true, false, InitPw::Set("pw123456".into())).unwrap();
+        assert!(added.login_password.is_some());
+        assert!(root.join("state/users/bob/admin.pending").exists());
+        // 首把绑定钥匙继承 admin，pending 被消费
+        let k1 = showroom_common::UserKey::generate();
+        let (_, a1) = key_bind(&root, "bob", &k1.pub_string()).unwrap();
+        assert!(a1, "首把绑定钥匙应继承 admin");
+        assert!(!root.join("state/users/bob/admin.pending").exists(), "pending 应一次性消费");
+        // 第二把不继承（pending 已清）
+        let k2 = showroom_common::UserKey::generate();
+        let (_, a2) = key_bind(&root, "bob", &k2.pub_string()).unwrap();
+        assert!(!a2, "pending 消费后第二把不应继承");
+        // 但 k1 是 admin 钥，按既有继承规则 k3 应继承
+        let k3 = showroom_common::UserKey::generate();
+        let (_, a3) = key_bind(&root, "bob", &k3.pub_string()).unwrap();
+        assert!(a3, "已有 admin 钥匙时新钥匙仍按既有规则继承");
+    }
+
+    #[test]
+    fn pubkey_admin_no_pending_marker() {
+        let root = troot("admin_nopending");
+        fs::create_dir_all(root.join("state")).unwrap();
+        let k = showroom_common::UserKey::generate();
+        user_add(&root, "carol", Some(&k.pub_string()), true, false, InitPw::None).unwrap();
+        assert!(!root.join("state/users/carol/admin.pending").exists(), "pubkey 路径 admin 落在钥匙上，不应有 pending");
+    }
+
     fn user_add_with_admin_flag() {
         let root = troot("user-add");
         let k = showroom_common::UserKey::generate();
