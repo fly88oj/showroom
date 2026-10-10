@@ -125,6 +125,12 @@ enum Cmd {
         #[command(subcommand)]
         cmd: MiddlewareCmd,
     },
+    /// 就地升级二进制（plan-15 §6：探针→.new→备份→原子 rename→restart 探活→
+    /// 失败回滚；默认取 /tmp/showroomctl；同步 user CLI 与 _bootstrap，不碰 _console）
+    Upgrade {
+        #[arg(long)]
+        bin: Option<std::path::PathBuf>,
+    },
 }
 
 #[derive(Subcommand)]
@@ -569,5 +575,29 @@ fn dispatch(cli: &Cli) -> R<()> {
                 Ok(())
             }
         },
+
+        Cmd::Upgrade { bin } => {
+            let v = setup::upgrade(bin.as_deref())?;
+            if j {
+                println!("{v}");
+            } else {
+                let rolled = v["rolled_back"].as_bool().unwrap_or(false);
+                let backup = v["backup"].as_str().unwrap_or("-");
+                let converged = v["converged"].as_u64().unwrap_or(0);
+                if rolled {
+                    println!("upgrade: restart 后非 active，已回滚旧二进制（backup 已消耗）");
+                } else {
+                    println!("upgraded: backup={backup} converged={converged}");
+                }
+                if let Some(notes) = v["notes"].as_array() {
+                    for n in notes {
+                        if let Some(s) = n.as_str() {
+                            println!("  {s}");
+                        }
+                    }
+                }
+            }
+            Ok(())
+        }
     }
 }

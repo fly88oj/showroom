@@ -1032,6 +1032,132 @@ pub fn report_json(r: &Report) -> Value {
     })
 }
 
+// —— upgrade：二进制自替换安全顺序（plan-15 §6）——
+
+const CTL_BIN: &str = "/usr/local/bin/showroomctl";
+const CTL_NEW: &str = "/usr/local/bin/showroomctl.new";
+/// 备份保留份数（更旧自删）。
+const UPGRADE_KEEP_BAKS: usize = 3;
+
+/// 备份裁剪（纯 fs，可测）：dir 下 `showroomctl.bak-*` 按名字（含时间戳，字典序即时间序）
+/// 降序保留前 keep 份，返回被删除的名字。
+pub fn prune_backups_in(dir: &Path, keep: usize) -> Vec<String> {
+    let mut names: Vec<String> = fs::read_dir(dir)
+        .into_iter()
+        .flatten()
+        .filter_map(|e| e.ok())
+        .filter_map(|e| e.file_name().into_string().ok())
+        .filter(|n| n.starts_with("showroomctl.bak-"))
+        .collect();
+    names.sort();
+    names.reverse();
+    let mut removed = vec![];
+    for n in names.into_iter().skip(keep) {
+        if fs::remove_file(dir.join(&n)).is_ok() {
+            removed.push(n);
+        }
+    }
+    removed
+}
+
+fn is_active_api() -> bool {
+    dockerops::run_tolerant("systemctl", &["is-active", "showroom-api"]) == "active"
+}
+
+/// `showroomctl upgrade [--bin <path>]`（root；默认 /tmp/showroomctl，不存在 E_NOTFOUND）：
+/// 1 探针（--help 退出码 0，失败拒替）→ 2 落 .new（0755）→ 3 备份旧（保最近 3 份）→
+/// 4 同文件系统 rename 原子替换（禁 cp 覆盖式写入，不受运行中进程 ETXTBSY 影响）→
+/// 5 restart showroom-api + 3s 探活 → 6 失败回滚旧备份（仍失败 E_STATE 报手工路径）→
+/// 7 内联收敛（setup 语义重渲染 diff 后 apply）→ 8 /tmp/showroom 同步 + _bootstrap 刷新
+///（**不碰 _console**：wasm 产物随发布流程单独更新）。
+pub fn upgrade(bin: Option<&Path>) -> R<Value> {
+    use std::os::unix::fs::PermissionsExt;
+    let src = bin.unwrap_or(Path::new("/tmp/showroomctl"));
+    if !src.exists() {
+        return Err(ApiError::new(
+            "E_NOTFOUND",
+            format!("upgrade 源二进制不存在：{}（默认 /tmp/showroomctl，可 --bin 指定）", src.display()),
+        ));
+    }
+    let probe = std::process::Command::new(src)
+        .arg("--help")
+        .output()
+        .map(|o| o.status.success())
+        .unwrap_or(false);
+    if !probe {
+        return Err(ApiError::state(format!(
+            "新二进制探针失败（{} --help 非零退出或不可执行），拒替", src.display()
+        )));
+    }
+    fs::copy(src, CTL_NEW)?;
+    fs::set_permissions(CTL_NEW, fs::Permissions::from_mode(0o755))?;
+
+    let ts = dockerops::run("date", &["+%Y%m%d-%H%M"])?.trim().to_string();
+    let bak = PathBuf::from(format!("{CTL_BIN}.bak-{ts}"));
+    let had_old = Path::new(CTL_BIN).exists();
+    if had_old {
+        fs::copy(CTL_BIN, &bak)?; // cp -a 语义（权限随行）
+        let removed = prune_backups_in(Path::new("/usr/local/bin"), UPGRADE_KEEP_BAKS);
+        if !removed.is_empty() {
+            eprintln!("showroomctl: upgrade: 裁剪旧备份: {}", removed.join(", "));
+        }
+    }
+
+    fs::rename(CTL_NEW, CTL_BIN)?; // 原子替换
+
+    let _ = dockerops::run("systemctl", &["restart", "showroom-api"]);
+    std::thread::sleep(std::time::Duration::from_secs(3));
+    if !is_active_api() {
+        if bak.exists() {
+            fs::rename(&bak, CTL_BIN)?;
+            let _ = dockerops::run("systemctl", &["restart", "showroom-api"]);
+            std::thread::sleep(std::time::Duration::from_secs(3));
+            if is_active_api() {
+                return Ok(json!({
+                    "ok": true, "rolled_back": true,
+                    "note": "restart 后非 active，已回滚旧二进制并恢复 active",
+                    "backup": Value::Null,
+                }));
+            }
+            return Err(ApiError::state(format!(
+                "回滚后仍非 active；两份二进制共存磁盘供手工切换：\n  mv {} {CTL_BIN} && systemctl restart showroom-api",
+                bak.display()
+            )));
+        }
+        return Err(ApiError::state(format!(
+            "替换后 showroom-api 非 active 且无备份可回滚（首次安装路径）；手工处置：\n  重新放置可用二进制到 {CTL_BIN} 后 systemctl restart showroom-api"
+        )));
+    }
+
+    // 内联收敛：对新二进制跑 setup 语义的重渲染（单元/Caddyfile 模板若有变，diff 后 apply）
+    let root = state::root();
+    let host = HostEnv::load(&root);
+    let obs = observe(&root, &host);
+    let actions = plan_setup(&host, &obs);
+    let report = apply(&root, &actions, false)?;
+
+    // 附带：user CLI 同步 + _bootstrap 刷新；不碰 _console
+    let mut notes: Vec<String> = vec![];
+    if Path::new("/tmp/showroom").exists() {
+        fs::copy("/tmp/showroom", "/usr/local/bin/showroom")?;
+        notes.push("user CLI 已同步 /usr/local/bin/showroom".into());
+    }
+    fs::create_dir_all(root.join("_bootstrap"))?;
+    fs::copy(CTL_BIN, root.join("_bootstrap/showroomctl"))?;
+    if Path::new("/usr/local/bin/showroom").exists() {
+        fs::copy("/usr/local/bin/showroom", root.join("_bootstrap/showroom"))?;
+    }
+    notes.push("_bootstrap 已刷新（不碰 _console，wasm 随发布流程更新）".into());
+
+    Ok(json!({
+        "ok": true,
+        "backup": if had_old { Value::String(bak.display().to_string()) } else { Value::Null },
+        "had_old_binary": had_old,
+        "converged": report.changed,
+        "notes": notes,
+    }))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1407,6 +1533,60 @@ mod tests {
         assert!(rg.flags.contains(&"/srv/showroom/_middleware/registry:/var/lib/registry".to_string()));
         assert!(rg.flags.contains(&"/srv/showroom/state/registry.htpasswd:/etc/docker/registry/htpasswd:ro".to_string()));
         assert_eq!(rg.cmd_args, Vec::<String>::new());
+    }
+
+    // 备份裁剪：名字时间序保留最近 keep 份，更旧删除；非备份名不碰
+    #[test]
+    fn prune_upgrade_backups() {
+        let root = troot("bak");
+        for n in [
+            "showroomctl.bak-20260101-0000",
+            "showroomctl.bak-20260601-1200",
+            "showroomctl.bak-20261001-2359",
+            "showroomctl.bak-20261010-0800",
+            "showroomctl.bak-20261011-0900",
+            "showroomctl.new",
+            "unrelated",
+        ] {
+            fs::write(root.join(n), "x").unwrap();
+        }
+        let removed = prune_backups_in(&root, 3);
+        assert_eq!(
+            removed,
+            vec![
+                "showroomctl.bak-20260601-1200".to_string(), // 删除序=从旧到新遍历（保留序为新到旧）
+                "showroomctl.bak-20260101-0000".to_string(),
+            ]
+        );
+        assert!(root.join("showroomctl.bak-20261011-0900").exists(), "最近 3 份保留");
+        assert!(root.join("showroomctl.bak-20261010-0800").exists());
+        assert!(root.join("showroomctl.bak-20261001-2359").exists());
+        assert!(root.join("showroomctl.new").exists() && root.join("unrelated").exists(), "非备份名不碰");
+        // 不足 keep 份：全保留
+        assert!(prune_backups_in(&root, 5).is_empty());
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    // upgrade 前置：源不存在 E_NOTFOUND（替换路径需 root/真实 systemd，e2e 域）
+    #[test]
+    fn upgrade_missing_source() {
+        let e = upgrade(Some(Path::new("/nonexistent/showroomctl"))).unwrap_err();
+        assert_eq!(e.code, "E_NOTFOUND", "{}", e.msg);
+        assert!(e.msg.contains("/nonexistent/showroomctl"));
+    }
+
+    // 探针失败拒替：指向一个存在但 --help 非零的"二进制"（shell 脚本模拟）
+    #[test]
+    fn upgrade_rejects_failing_probe() {
+        let root = troot("probe");
+        let fake = root.join("fakectl");
+        fs::write(&fake, "#!/bin/sh\nexit 3\n").unwrap();
+        use std::os::unix::fs::PermissionsExt;
+        fs::set_permissions(&fake, fs::Permissions::from_mode(0o755)).unwrap();
+        let e = upgrade(Some(&fake)).unwrap_err();
+        assert_eq!(e.code, "E_STATE", "{}", e.msg);
+        assert!(e.msg.contains("拒替"), "{}", e.msg);
+        let _ = fs::remove_dir_all(&root);
     }
 
     // apply 冒烟：dry 只列不执行；真执行 dir/file/cmd 落地（subprocess 仅此薄层冒烟；
