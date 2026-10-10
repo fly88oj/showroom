@@ -587,6 +587,14 @@ pub fn plan_setup(host: &HostEnv, obs: &Obs) -> Vec<Action> {
 
     full.push(Action::NetworkCreate { name: dockerops::DOCKER_NET.to_string() });
 
+    // 多则停删（SPEC §15.1）：已禁用中间件的残留容器收敛（bind 数据卷不随 -v 删除；
+    // 禁用门槛/影响面在 middleware disable 与 POST 两段式 impact 中把关）
+    for mw in crate::middleware::MW_NAMES {
+        if !host.middleware.contains(mw) {
+            full.push(Action::ContainerRm { name: format!("sr-{mw}") });
+        }
+    }
+
     if host.middleware.contains("postgres") {
         let (pass, fresh) = pg_password(&root, obs);
         if fresh {
@@ -733,7 +741,7 @@ pub fn plan_warnings(root: &Path, obs: &Obs) -> Vec<String> {
     let mut w = vec![];
     let policy = state::Policy::load(root);
     if let Some(actual) = obs.redis_databases {
-        if (actual as u16) < policy.redis_dbs {
+        if actual < policy.redis_dbs {
             w.push(format!(
                 "redis 实例 databases={actual} < policy REDIS_DBS={} → `showroomctl middleware set redis databases={}`",
                 policy.redis_dbs, policy.redis_dbs
@@ -805,7 +813,7 @@ pub fn observe(root: &Path, host: &HostEnv) -> Obs {
             obs.disk_total_mb = size >> 20;
         }
     }
-    if let Some(n) = dockerops::run_tolerant("nproc", &[]).trim().parse::<u32>().ok() {
+    if let Ok(n) = dockerops::run_tolerant("nproc", &[]).trim().parse::<u32>() {
         obs.cores = n;
     }
     obs

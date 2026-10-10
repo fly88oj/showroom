@@ -3,20 +3,17 @@
 
 mod dbmaint;
 mod dockerops;
-// plan-15 步 1-3 先落纯函数与编排内核，步 4 CLI/serve 接线后移除本 allow
-#[allow(dead_code)]
 mod middleware;
 mod ops;
 mod publish;
 mod serve;
-#[allow(dead_code)]
 mod setup;
 mod state;
 mod streams;
 mod unpack;
 
 use clap::{Parser, Subcommand};
-use serde_json::json;
+use serde_json::{json, Value};
 
 use state::{root, ApiError, R};
 
@@ -111,6 +108,45 @@ enum Cmd {
     ImportCheck { image_id: String },
     /// 生成平台 RSA 对（serve 启动缺失时自动生成；已存在不覆盖）
     InitKeys,
+    /// 主机自举（plan-15/SPEC §15.1）：无 --apply=diff；--apply 幂等收敛期望状态。
+    /// 首跑缺 host.env 时按探测值生成并打印（LAN/PUBLIC_HOST 可覆写；限额缺省随实测硬件推导）
+    Setup {
+        #[arg(long)]
+        apply: bool,
+        /// 覆写 site A 地址（Caddyfile 渲染；BASE_URL 派生）
+        #[arg(long)]
+        lan_host: Option<String>,
+        /// 覆写 site B 地址（空串=纯内网主机，不渲染 site B）
+        #[arg(long)]
+        public_host: Option<String>,
+    },
+    /// 中间件编排（plan-15 §3：status/enable/disable/set）
+    Middleware {
+        #[command(subcommand)]
+        cmd: MiddlewareCmd,
+    },
+}
+
+#[derive(Subcommand)]
+enum MiddlewareCmd {
+    /// 期望(host.env) / 实际(容器) / 漂移对照表
+    Status,
+    /// 集合加成员 → 仅该中间件相关 Action 局部 apply
+    Enable { name: String },
+    /// 禁用（有项目依赖需 --force 并列受影响项目；bind 数据卷保留）
+    Disable {
+        name: String,
+        #[arg(long)]
+        force: bool,
+    },
+    /// set redis databases=N [--confirm]（§5 扩容确认流：无 --confirm 只见提示不动容器）
+    Set {
+        name: String,
+        /// 形如 databases=256
+        kv: String,
+        #[arg(long)]
+        confirm: bool,
+    },
 }
 
 #[derive(Subcommand)]
@@ -363,5 +399,154 @@ fn dispatch(cli: &Cli) -> R<()> {
             );
             Ok(())
         }
+
+        Cmd::Setup { apply, lan_host, public_host } => {
+            let host_path = middleware::host_env_path(&root);
+            let first_run = !host_path.exists();
+            let mut host = middleware::HostEnv::load(&root);
+            if first_run {
+                println!(
+                    "host.env 未找到：首跑按探测值生成（LAN_HOST={}；--lan-host/--public-host 可覆写；\
+                     frp 凭据与限额可随后手工编辑 {}）",
+                    host.lan_host,
+                    host_path.display()
+                );
+            }
+            if let Some(h) = lan_host {
+                host.lan_host = h.clone();
+            }
+            if let Some(h) = public_host {
+                host.public_host = h.clone();
+            }
+            let obs = setup::observe(&root, &host);
+            let actions = setup::plan_setup(&host, &obs);
+            let warnings = setup::plan_warnings(&root, &obs);
+            if *apply {
+                let report = setup::apply(&root, &actions, false)?;
+                if j {
+                    let mut v = setup::report_json(&report);
+                    v["host_env"] = host.to_json();
+                    println!("{v}");
+                } else {
+                    for (a, ok, detail) in &report.items {
+                        println!("  {} {} [{}]", if *ok { "+" } else { "x" }, setup::action_line(a), detail);
+                    }
+                    println!("changed: {}", report.changed);
+                    for w in &report.warnings {
+                        println!("warning: {w}");
+                    }
+                }
+            } else if j {
+                println!("{}", setup::diff_json(&host, &actions, &warnings));
+            } else {
+                if actions
+                    .iter()
+                    .any(|a| matches!(a, setup::Action::WriteFile { path, .. } if *path == host_path))
+                {
+                    println!("host.env: will create {} (9 keys)", host_path.display());
+                }
+                let total = setup::plan_setup(&host, &setup::Obs::default()).len();
+                if actions.is_empty() {
+                    println!("plan: 0 actions needed (clean)");
+                } else {
+                    println!("plan: {total} actions, {} needed, {} clean", actions.len(), total - actions.len());
+                    for a in &actions {
+                        println!("  + {}", setup::action_line(a));
+                    }
+                }
+                if !warnings.is_empty() {
+                    println!("warnings:");
+                    for w in &warnings {
+                        println!("  {w}");
+                    }
+                }
+                if !actions.is_empty() {
+                    println!("run `showroomctl setup --apply` to apply");
+                }
+            }
+            Ok(())
+        }
+
+        Cmd::Middleware { cmd } => match cmd {
+            MiddlewareCmd::Status => {
+                let v = middleware::middleware_status(&root)?;
+                let drift = middleware::redis_drift(&root);
+                if j {
+                    let mut o = v;
+                    o["redis_drift"] = drift.unwrap_or(Value::Null);
+                    println!("{o}");
+                } else {
+                    let rows = v["middleware"].as_array().cloned().unwrap_or_default();
+                    for m in &rows {
+                        println!(
+                            "{:<10} expected={:<9} actual={}",
+                            m["name"].as_str().unwrap_or("?"),
+                            m["expected"].as_str().unwrap_or("?"),
+                            m["actual"].as_str().unwrap_or("?")
+                        );
+                        if m["name"] == "redis" {
+                            println!(
+                                "{:<10} databases: instance={:?} policy={}",
+                                "", m["databases"]["instance"], m["databases"]["policy"]
+                            );
+                        }
+                    }
+                    if let Some(d) = middleware::redis_drift(&root) {
+                        println!(
+                            "drift: {} expected={} actual={} → 建议: {}",
+                            d["item"], d["expected"], d["actual"], d["advice"]
+                        );
+                    }
+                }
+                Ok(())
+            }
+            MiddlewareCmd::Enable { name } => {
+                let r = middleware::middleware_enable(&root, name)?;
+                if j {
+                    println!("{}", setup::report_json(&r));
+                } else {
+                    for (a, ok, detail) in &r.items {
+                        println!("  {} {} [{}]", if *ok { "+" } else { "x" }, setup::action_line(a), detail);
+                    }
+                    println!("changed: {}", r.changed);
+                    for w in &r.warnings {
+                        println!("warning: {w}");
+                    }
+                }
+                Ok(())
+            }
+            MiddlewareCmd::Disable { name, force } => {
+                let v = middleware::middleware_disable(&root, name, *force)?;
+                if j {
+                    println!("{v}");
+                } else {
+                    let affected =
+                        v["affected_projects"].as_array().map(Vec::len).unwrap_or(0);
+                    println!("disabled {name}（受影响项目 {affected} 个）");
+                    if let Some(notes) = v["notes"].as_array() {
+                        for n in notes {
+                            if let Some(s) = n.as_str() {
+                                println!("  {s}");
+                            }
+                        }
+                    }
+                }
+                Ok(())
+            }
+            MiddlewareCmd::Set { name, kv, confirm } => {
+                let (k, val) = kv.split_once('=').ok_or_else(|| {
+                    ApiError::new("E_NAME", format!("kv 须形如 databases=N（got '{kv}'）"))
+                })?;
+                let v = middleware::middleware_set(&root, name, k, val, *confirm)?;
+                if j {
+                    println!("{v}");
+                } else if let Some(p) = v["prompt"].as_str() {
+                    println!("{p}");
+                } else {
+                    println!("{v}");
+                }
+                Ok(())
+            }
+        },
     }
 }

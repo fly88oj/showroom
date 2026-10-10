@@ -299,7 +299,10 @@ pub fn middleware_enable(root: &Path, name: &str) -> R<setup::Report> {
 fn action_touches_mw(a: &setup::Action, mw: &str, root: &Path) -> bool {
     match a {
         setup::Action::NetworkCreate { .. } => true, // 容器前置
-        setup::Action::CreateDir { path, .. } => path.starts_with(&root.join(format!("_middleware/{mw}"))),
+        setup::Action::CreateDir { path, .. } => {
+            let base = root.join(format!("_middleware/{mw}"));
+            path.starts_with(&base)
+        }
         setup::Action::WriteFile { path, .. } => match mw {
             "postgres" => *path == setup::pg_cred_path(root),
             "registry" => *path == state::htpasswd_path(root) || path == Path::new(dockerops::CADDY_FILE),
@@ -571,17 +574,6 @@ pub fn redis_pool_suggestion(pool: &Value) -> Option<String> {
     Some(format!(
         "Redis 逻辑库余量不足（剩 {headroom}/{total}）：建议扩容 `middleware set redis databases={z}`"
     ))
-}
-
-/// 禁用的中间件名单（publish env 注入与 ps/env 标注「未启用」用）。
-pub fn disabled_middleware(root: &Path) -> Vec<String> {
-    let host = HostEnv::load(root);
-    MW_NAMES
-        .iter()
-        .copied()
-        .filter(|m| !host.middleware.contains(*m))
-        .map(str::to_string)
-        .collect()
 }
 
 // —— GET /_api/admin/host 视图（plan-15 §4）——
@@ -980,8 +972,10 @@ mod tests {
         let root = troot("host-view");
         let host = HostEnv::default_for("10.0.0.9");
         let policy = state::Policy { max_slots: 30, redis_dbs: 256, ..state::Policy::default() };
-        let mut obs = setup::Obs::default();
-        obs.redis_databases = Some(16); // 现网遗留实例 → 黄条
+        let mut obs = setup::Obs {
+            redis_databases: Some(16), // 现网遗留实例 → 黄条
+            ..setup::Obs::default()
+        };
         obs.containers.insert("sr-postgres".into());
         obs.containers.insert("sr-redis".into());
         obs.containers.insert("sr-registry".into());
@@ -1005,8 +999,10 @@ mod tests {
         assert!(!drift.iter().any(|d| d["item"] == "chmlfrp.service"));
 
         // 全绿 Obs + 池紧张 → 无 error 级漂移，黄条建议在 suggestions 首条
-        let mut obs_ok = setup::Obs::default();
-        obs_ok.redis_databases = Some(256);
+        let mut obs_ok = setup::Obs {
+            redis_databases: Some(256),
+            ..setup::Obs::default()
+        };
         obs_ok.pkgs.insert("caddy".into());
         obs_ok
             .files
@@ -1036,15 +1032,15 @@ mod tests {
         assert!(mw_dependents(&root, "mysql").is_empty());
     }
 
-    // disabled_middleware：全集启用 → 空；去 redis → ["redis"]
+    // disabled_middleware（步5 publish/env 自适应引入）：此处经 HostEnv 断言同一语义
     #[test]
-    fn disabled_middleware_list() {
+    fn disabled_set_semantics_via_hostenv() {
         let root = troot("disabled");
         HostEnv::default_for("10.0.0.1").save(&root).unwrap();
-        assert!(disabled_middleware(&root).is_empty());
+        assert!(HostEnv::load(&root).middleware.contains("redis"));
         let mut h = HostEnv::load(&root);
         h.middleware.remove("redis");
         h.save(&root).unwrap();
-        assert_eq!(disabled_middleware(&root), vec!["redis".to_string()]);
+        assert!(!HostEnv::load(&root).middleware.contains("redis"));
     }
 }

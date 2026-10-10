@@ -25,7 +25,7 @@ use showroom_common as common;
 
 use crate::dbmaint;
 use crate::state::{self, ApiError, R};
-use crate::{ops, publish, streams};
+use crate::{middleware, ops, publish, setup, streams};
 
 pub const MAX_JSON_BODY: usize = 1024 * 1024;
 
@@ -216,6 +216,23 @@ async fn dispatch(
             let root = s.root.clone();
             let status = blk(move || ops::admin_status(&root)).await?;
             Ok(Json(status))
+        }
+
+        // —— 主机期望状态（plan-15 §4）：GET 视图 / POST 两段式（diff→confirm 落盘+apply）——
+
+        ("GET", "/_api/admin/host", _) => {
+            admin_guard(s, &user, &kid)?;
+            let root = s.root.clone();
+            let v = blk(move || middleware::host_view(&root)).await?;
+            Ok(Json(v))
+        }
+
+        ("POST", "/_api/admin/host", Collected::Mem(b)) => {
+            admin_guard(s, &user, &kid)?; // 先守卫后解析 body：非管理员不因 body 畸形泄露差异
+            let root = s.root.clone();
+            let b = b.clone();
+            let v = blk(move || admin_host_post(&root, &b)).await?;
+            Ok(Json(v))
         }
 
         ("GET", "/_api/projects", _) => {
@@ -709,6 +726,126 @@ fn user_check(root: &Path, project: &str, user: &str) -> R<()> {
     Ok(())
 }
 
+// —— POST /_api/admin/host（plan-15 §4 两段式）——
+
+/// body：`{"host_env":{"MIDDLEWARE":"postgres registry",…}, "confirm":false|true}`
+/// 或第二形态 `{"redis_databases":512,"confirm":…}`（进 §5 扩容状态机）。
+/// 无 confirm：写盘前预演——返回 actions(diff 同构)+impact(removed/affected)+confirm_required；
+/// confirm=true：HostEnv 落盘 → apply → {"ok":true,"report":…}。
+fn admin_host_post(root: &Path, body: &[u8]) -> R<serde_json::Value> {
+    let req: AdminHostPostReq = jbody(body)?;
+    let confirm = req.confirm.unwrap_or(false);
+    if let Some(n) = req.redis_databases {
+        return middleware::redis_expand(root, n, confirm);
+    }
+    let Some(b) = req.host_env else {
+        return Err(ApiError::new("E_NAME", "body 须含 host_env 或 redis_databases"));
+    };
+
+    let prev = middleware::HostEnv::load(root);
+    let mut host = prev.clone();
+    if let Some(m) = &b.middleware {
+        let mut set = std::collections::BTreeSet::new();
+        for name in m.split_whitespace() {
+            middleware::validate_mw(name)
+                .map_err(|e| ApiError::new("E_NAME", format!("MIDDLEWARE: {}", e.msg)))?;
+            set.insert(name.to_string());
+        }
+        host.middleware = set;
+    }
+    if let Some(c) = &b.caddy {
+        host.caddy = matches!(c.as_str(), "yes");
+        if !matches!(c.as_str(), "yes" | "no") {
+            return Err(ApiError::new("E_NAME", format!("CADDY 须为 yes/no（got '{c}'）")));
+        }
+    }
+    if let Some(h) = &b.lan_host {
+        host.lan_host = h.clone();
+    }
+    if let Some(h) = &b.public_host {
+        host.public_host = h.clone();
+    }
+    if let Some(t) = &b.tuning {
+        host.tuning = matches!(t.as_str(), "sysctl");
+        if !matches!(t.as_str(), "sysctl" | "none") {
+            return Err(ApiError::new("E_NAME", format!("TUNING 须为 sysctl/none（got '{t}'）")));
+        }
+    }
+    if let Some(d) = &b.dedup {
+        host.dedup = matches!(d.as_str(), "weekly");
+        if !matches!(d.as_str(), "weekly" | "none") {
+            return Err(ApiError::new("E_NAME", format!("DEDUP 须为 weekly/none（got '{d}'）")));
+        }
+    }
+    if let Some(f) = &b.frp {
+        host.frp = middleware::FrpMode::parse(f)?;
+    }
+    if let Some(t) = &b.frp_token {
+        host.frp_token = t.clone();
+    }
+    if let Some(t) = &b.frp_tunnel {
+        host.frp_tunnel = t.clone();
+    }
+
+    let removed: Vec<String> = prev.middleware.difference(&host.middleware).cloned().collect();
+    let mut affected: Vec<String> = vec![];
+    for mw in &removed {
+        for p in middleware::mw_dependents(root, mw) {
+            if !affected.contains(&p) {
+                affected.push(p);
+            }
+        }
+    }
+
+    if !confirm {
+        // 预演：不落盘（host.env 字节不变），返回 diff + impact
+        let obs = setup::observe(root, &host);
+        let actions = setup::plan_setup(&host, &obs);
+        let warnings = setup::plan_warnings(root, &obs);
+        let mut v = setup::diff_json(&host, &actions, &warnings);
+        v["impact"] = json!({
+            "removed_middleware": removed,
+            "affected_projects": affected,
+        });
+        v["confirm_required"] = json!(true);
+        return Ok(v);
+    }
+    host.save(root)?;
+    let obs = setup::observe(root, &host);
+    let actions = setup::plan_setup(&host, &obs);
+    let report = setup::apply(root, &actions, false)?;
+    Ok(json!({"ok": true, "report": setup::report_json(&report)}))
+}
+
+#[derive(Deserialize)]
+struct AdminHostPostReq {
+    host_env: Option<AdminHostEnvBody>,
+    redis_databases: Option<u16>,
+    confirm: Option<bool>,
+}
+
+#[derive(Deserialize)]
+struct AdminHostEnvBody {
+    #[serde(rename = "MIDDLEWARE", alias = "middleware")]
+    middleware: Option<String>,
+    #[serde(rename = "CADDY", alias = "caddy")]
+    caddy: Option<String>,
+    #[serde(rename = "LAN_HOST", alias = "lan_host")]
+    lan_host: Option<String>,
+    #[serde(rename = "PUBLIC_HOST", alias = "public_host")]
+    public_host: Option<String>,
+    #[serde(rename = "TUNING", alias = "tuning")]
+    tuning: Option<String>,
+    #[serde(rename = "DEDUP", alias = "dedup")]
+    dedup: Option<String>,
+    #[serde(rename = "FRP", alias = "frp")]
+    frp: Option<String>,
+    #[serde(rename = "FRP_TOKEN", alias = "frp_token")]
+    frp_token: Option<String>,
+    #[serde(rename = "FRP_TUNNEL", alias = "frp_tunnel")]
+    frp_tunnel: Option<String>,
+}
+
 #[derive(Deserialize)]
 struct PubReq {
     project: String,
@@ -964,5 +1101,72 @@ mod tests {
         );
         let (_, bytes) = body(ApiError::new("E_AUTH", "x").into_response()).await;
         assert_eq!(bytes, br#"{"error":"E_AUTH"}"#.to_vec(), "body 恰为无 msg 的 E_AUTH");
+    }
+
+    // POST /_api/admin/host 两段式（plan-15 §8 serve 层）：无 confirm 不落盘且返回 impact；
+    // schema 坏值 E_NAME；host/redis 两形态分发
+    #[tokio::test]
+    async fn admin_host_post_two_phase_without_confirm() {
+        let root = std::env::temp_dir().join(format!("srctl-host-post-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(root.join("state/projects")).unwrap();
+        // 现状：全集中间件 + 两个项目（redis 依赖演示）
+        crate::middleware::HostEnv::default_for("10.0.0.1").save(&root).unwrap();
+        for (p, db) in [("demo1", 0u8), ("demo2", 1u8)] {
+            let c = crate::state::Conf {
+                user: "alice".into(), tag: "v1".into(), port: 8100, cport: 8080,
+                mem: "256m".into(), cpu: 1.0, redisdb: db, updated: 1,
+                stopped: false, legacyslot: None,
+            };
+            c.save(&root, p).unwrap();
+        }
+        let before = std::fs::read(crate::middleware::host_env_path(&root)).unwrap();
+
+        let v = admin_host_post(&root, br#"{"host_env":{"MIDDLEWARE":"postgres registry"},"confirm":false}"#)
+            .unwrap();
+        // 不落盘：字节不变
+        assert_eq!(std::fs::read(crate::middleware::host_env_path(&root)).unwrap(), before, "无 confirm 不落盘");
+        assert_eq!(v["confirm_required"], true);
+        assert_eq!(v["impact"]["removed_middleware"], serde_json::json!(["redis"]));
+        let affected = v["impact"]["affected_projects"].as_array().unwrap().clone();
+        assert!(affected.iter().any(|x| x == "demo1") && affected.iter().any(|x| x == "demo2"), "{affected:?}");
+        // 预演返回 diff 同构 actions（含将写的 host.env）
+        assert!(v["actions"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|a| a["target"].as_str().is_some_and(|t| t.ends_with("host.env"))));
+
+        // schema 校验：坏中间件名 / 坏 CADDY → E_NAME；空 body → E_NAME
+        assert_eq!(
+            admin_host_post(&root, br#"{"host_env":{"MIDDLEWARE":"mysql"}}"#).unwrap_err().code,
+            "E_NAME"
+        );
+        assert_eq!(
+            admin_host_post(&root, br#"{"host_env":{"CADDY":"true"}}"#).unwrap_err().code,
+            "E_NAME"
+        );
+        assert_eq!(admin_host_post(&root, br#"{}"#).unwrap_err().code, "E_NAME");
+
+        // 第二形态 redis_databases：越界走扩容校验（E_NAME，u8 约束；不碰 docker）
+        let e = admin_host_post(&root, br#"{"redis_databases":999,"confirm":true}"#).unwrap_err();
+        assert_eq!(e.code, "E_NAME");
+        assert!(e.msg.contains("u8"), "{}", e.msg);
+        // host.env 仍字节不变（任何拒绝路径零副作用）
+        assert_eq!(std::fs::read(crate::middleware::host_env_path(&root)).unwrap(), before);
+
+        // 非管理员访问该端点：与未登记逐字节一致（复用现测法——admin_guard 同一守卫）
+        let guard = admin_guard(
+            &Arc::new(AppState { root: root.clone(), nonces: Mutex::new(HashMap::new()) }),
+            "mallory", "ab12cd34",
+        )
+        .unwrap_err()
+        .into_response();
+        let (parts, b) = guard.into_parts();
+        let bytes = axum::body::to_bytes(b, 1024).await.unwrap().to_vec();
+        assert_eq!(parts.status.as_u16(), 404);
+        assert_eq!(bytes, br#"{"error":"E_AUTH"}"#.to_vec(), "host 端点 guard 404 同体");
+
+        let _ = std::fs::remove_dir_all(&root);
     }
 }
