@@ -148,17 +148,6 @@ pub fn db_exists(db: &str) -> R<bool> {
     Ok(String::from_utf8_lossy(&out).trim() == "1")
 }
 
-/// pg_dump -Fc（自定义压缩格式）：stdout 全量收集（二进制安全），失败附 stderr 尾部。
-pub fn pg_dump_fc(db: &str) -> R<Vec<u8>> {
-    let (ok, out, err) = exec_pg(&["pg_dump", "-U", "postgres", "-Fc", db], b"")?;
-    if ok {
-        Ok(out)
-    } else {
-        let tail = tail_lines(&String::from_utf8_lossy(&err), 8);
-        Err(ApiError::state(format!("pg_dump -Fc {db} failed: {tail}")))
-    }
-}
-
 /// 容器状态（docker inspect .State.Status）；容器不存在 → None。
 pub fn container_status(name: &str) -> Option<String> {
     let out = Command::new("docker")

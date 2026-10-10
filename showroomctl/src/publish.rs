@@ -364,11 +364,7 @@ pub struct ImportMeta {
     pub created: u64,
 }
 
-/// upload_id = rand_hex(16)；只认 32 位 hex，防路径穿越。
-fn valid_upload_id(id: &str) -> bool {
-    id.len() == 32 && id.bytes().all(|b| b.is_ascii_hexdigit())
-}
-
+/// upload_id = rand_hex(16)；合法性收口在 state::valid_session_id（与 dump 会话共用，防路径穿越）。
 pub fn upload_bin(root: &Path, id: &str) -> PathBuf {
     root.join("_tmp").join(format!("{id}.bin"))
 }
@@ -379,7 +375,7 @@ pub fn upload_meta(root: &Path, id: &str) -> PathBuf {
 
 /// 读会话 meta；id 非法或不存在 → E_NOTFOUND（不泄露会话内情）。
 pub fn load_meta(root: &Path, id: &str) -> R<ImportMeta> {
-    if !valid_upload_id(id) {
+    if !state::valid_session_id(id) {
         return Err(ApiError::new("E_NOTFOUND", "no such upload"));
     }
     let text = fs::read_to_string(upload_meta(root, id))

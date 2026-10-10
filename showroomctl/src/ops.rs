@@ -233,7 +233,7 @@ pub fn gc_images(root: &Path) -> R<String> {
     Ok(format!("{a}{b}{c}{}", gc_tmp(root)))
 }
 
-/// 删 _tmp 下 mtime>24h 的 *.bin/*.meta（分片会话残留 + 单发 import 落盘残留 + 孤儿，含验签失败泄留）。
+/// 删 _tmp 下 mtime>24h 的 *.bin/*.meta/*.status（分片/dump 会话残留 + 单发 import 落盘残留 + 孤儿，含验签失败泄留）。
 fn gc_tmp(root: &Path) -> String {
     let dir = root.join("_tmp");
     let Ok(rd) = fs::read_dir(&dir) else { return String::new() };
@@ -241,7 +241,10 @@ fn gc_tmp(root: &Path) -> String {
     let mut pairs = vec![];
     for e in rd.flatten() {
         let p = e.path();
-        if !matches!(p.extension().and_then(|o| o.to_str()), Some("bin") | Some("meta")) {
+        if !matches!(
+            p.extension().and_then(|o| o.to_str()),
+            Some("bin") | Some("meta") | Some("status")
+        ) {
             continue;
         }
         let Some(name) = p.file_name().and_then(|o| o.to_str()).map(str::to_string) else { continue };

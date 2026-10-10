@@ -1,13 +1,12 @@
 //! db：`showroom db` 子命令（SPEC §9）。
-//! sql/tables/preview 走签名 JSON；dump 用一次性 RSA-3072 客户端密钥对端到端加密
-//! （私钥只在进程内存，服务端只见公钥 PEM），restore 用平台公钥 seal 成信封后
-//! 复用 push import 的流式签名上传路径（先落临时信封再 signed_post_file）。
+//! sql/tables/preview 走签名 JSON；dump 为三段式（SPEC §10.4）：一次性 RSA-3072 密钥对
+//! 上行公钥 → begin/分片 chunk 下载临时信封 → 本地流式解密写目标（私钥只在进程内存，
+//! 服务端只见公钥 PEM）；restore 用平台公钥 seal 成信封后复用 push import 的流式签名上传。
 
 use std::fs;
 use std::io::{BufWriter, Write};
 use std::path::{Path, PathBuf};
 
-use base64::engine::general_purpose::STANDARD;
 use clap::Subcommand;
 use serde_json::json;
 
@@ -165,6 +164,9 @@ fn preview(
     Ok(())
 }
 
+/// dump 就绪等待上限（1h：≤256MB 的 pg_dump 分钟级；防孤儿会话卡死客户端）。
+const DUMP_WAIT_SECS: u64 = 3600;
+
 fn dump(
     cfg: &Config,
     force: Option<Which>,
@@ -178,6 +180,9 @@ fn dump(
 
     check_project(project)?;
     check_slot(slot)?;
+    if out.is_none() && !to_stdout {
+        return Err("二进制备份默认不打印：-o <文件> 写文件，或 --stdout 显式输出（可重定向）".into());
+    }
     // 一次性 RSA-3072 客户端密钥对（不落盘；服务端只见公钥，dump 端到端加密）
     let mut rng = rand::rngs::OsRng;
     let priv_key =
@@ -188,51 +193,89 @@ fn dump(
         .map_err(|e| format!("导出公钥 PEM 失败: {e}"))?;
 
     let api = Api::connect(cfg, force)?;
-    let resp = api.signed_post_json_raw(
-        "/_api/db-dump",
+    // 三段式（SPEC §10.4）：begin → 轮询 ready → 4MB chunk 循环落临时信封 → 一次性解密写目标。
+    // 本地内存恒定：每片 ≤4MB，信封与明文都不整包进内存。
+    let v = api.signed_post_json(
+        "/_api/db-dump-begin",
         &json!({ "project": project, "slot": slot, "client_pub_pem": pub_pem }),
     )?;
+    let dump_id = v["dump_id"].as_str().ok_or("db-dump-begin 响应缺 dump_id")?.to_string();
+    let total = wait_dump_ready(&api, &dump_id)?;
 
-    match (out, to_stdout) {
-        (Some(p), _) => {
-            // 失败也要删半成品文件（ponytail: 闭包收口清理）
-            let work = (|| -> Result<u64, String> {
-                let mut f =
-                    fs::File::create(p).map_err(|e| format!("创建 {} 失败: {e}", p.display()))?;
-                let n = decode_open(&priv_key, resp, &mut f)?;
-                f.flush().map_err(|e| format!("写 {} 失败: {e}", p.display()))?;
-                Ok(n)
-            })();
-            let n = match work {
-                Ok(n) => n,
-                Err(e) => {
-                    let _ = fs::remove_file(p);
-                    return Err(e);
-                }
-            };
-            eprintln!("已写入 {}（解密后 {n} 字节，pg_dump -Fc）", p.display());
-            Ok(())
+    let tmp = std::env::temp_dir().join(format!("showroom-dump-{}.bin", std::process::id()));
+    let work = (|| -> Result<u64, String> {
+        let mut f = fs::File::create(&tmp).map_err(|e| format!("写临时文件失败: {e}"))?;
+        let mut w = BufWriter::new(&mut f);
+        let mut offset = 0u64;
+        while offset < total {
+            let want = api::DUMP_CHUNK_LEN.min(total - offset);
+            let resp = api.signed_get_raw(&api::dump_chunk_query(&dump_id, offset, want))?;
+            let bytes = resp.bytes().map_err(|e| format!("下载切片失败: {e}"))?;
+            if bytes.len() as u64 != want {
+                return Err(format!("切片长度不符：请求 {want} 字节，收到 {}", bytes.len()));
+            }
+            w.write_all(&bytes).map_err(|e| format!("写临时文件失败: {e}"))?;
+            offset += want;
         }
-        (None, true) => {
-            let so = std::io::stdout();
-            let mut lock = so.lock();
-            let n = decode_open(&priv_key, resp, &mut lock).map_err(|e| format!("写 stdout 失败: {e}"))?;
-            lock.flush().map_err(|e| format!("flush stdout 失败: {e}"))?;
-            eprintln!("（stdout 输出 {n} 字节，pg_dump -Fc）");
-            Ok(())
+        w.flush().map_err(|e| format!("写临时文件失败: {e}"))?;
+        drop(w);
+        // 信封完整后一次性私钥解密，流式写出（pg_dump -Fc）
+        let mut sealed =
+            fs::File::open(&tmp).map_err(|e| format!("读临时信封失败: {e}"))?;
+        let n = match out {
+            Some(p) => {
+                let mut sink = fs::File::create(p)
+                    .map_err(|e| format!("创建 {} 失败: {e}", p.display()))?;
+                let n = showroom_common::open(&priv_key, &mut sealed, &mut sink)
+                    .map_err(|e| format!("解密失败: {e}"))?;
+                sink.flush().map_err(|e| format!("写 {} 失败: {e}", p.display()))?;
+                n
+            }
+            None => {
+                let so = std::io::stdout();
+                let mut sink = so.lock();
+                let n = showroom_common::open(&priv_key, &mut sealed, &mut sink)
+                    .map_err(|e| format!("写 stdout 失败: {e}"))?;
+                sink.flush().map_err(|e| format!("flush stdout 失败: {e}"))?;
+                n
+            }
+        };
+        Ok(n)
+    })();
+    let _ = fs::remove_file(&tmp);
+    let n = match work {
+        Ok(n) => n,
+        Err(e) => {
+            // 失败也要删半成品目标文件（临时信封已在上面删）
+            if let Some(p) = out {
+                let _ = fs::remove_file(p);
+            }
+            return Err(e);
         }
-        (None, false) => Err("二进制备份默认不打印：-o <文件> 写文件，或 --stdout 显式输出（可重定向）".into()),
+    };
+    match out {
+        Some(p) => eprintln!("已写入 {}（解密后 {n} 字节，pg_dump -Fc）", p.display()),
+        None => eprintln!("（stdout 输出 {n} 字节，pg_dump -Fc）"),
     }
+    Ok(())
 }
 
-/// 响应体 payload_b64 → base64 流式解码 → 一次性私钥解密信封 → 写出（不整包进内存）。
-fn decode_open<W: Write>(
-    sk: &showroom_common::rsa::RsaPrivateKey,
-    resp: reqwest::blocking::Response,
-    w: &mut W,
-) -> Result<u64, String> {
-    let dec = base64::read::DecoderReader::new(resp, &STANDARD);
-    showroom_common::open(sk, dec, w).map_err(|e| format!("解密失败: {e}"))
+/// 轮询 db-dump-status 至 ready（1s 间隔，DUMP_WAIT_SECS 上限）；failed 即时上报。
+fn wait_dump_ready(api: &Api, dump_id: &str) -> Result<u64, String> {
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(DUMP_WAIT_SECS);
+    loop {
+        let st = api.signed_get(&api::dump_status_query(dump_id))?;
+        if st["ready"].as_bool() == Some(true) {
+            return st["total"].as_u64().ok_or_else(|| "db-dump-status 响应缺 total".to_string());
+        }
+        if let Some(e) = st["error"].as_str().filter(|s| !s.is_empty()) {
+            return Err(format!("服务端 dump 失败: {e}"));
+        }
+        if std::time::Instant::now() > deadline {
+            return Err(format!("等待 dump 就绪超时（{}s），会话由服务端 24h 兜底清理", DUMP_WAIT_SECS));
+        }
+        std::thread::sleep(std::time::Duration::from_secs(1));
+    }
 }
 
 fn restore(

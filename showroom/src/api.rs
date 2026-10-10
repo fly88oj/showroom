@@ -88,6 +88,19 @@ pub fn db_tables_query(project: &str, slot: &str) -> String {
     format!("/_api/db-tables?project={project}&slot={slot}")
 }
 
+// —— db-dump 三段式（SPEC §10.4）：status 轮询 + chunk 切片 ——
+
+/// CLI 请求的切片长度（服务端上限 4MB，SPEC §10.4）。
+pub const DUMP_CHUNK_LEN: u64 = 4 << 20;
+
+pub fn dump_status_query(dump_id: &str) -> String {
+    format!("/_api/db-dump-status?dump={dump_id}")
+}
+
+pub fn dump_chunk_query(dump_id: &str, offset: u64, len: u64) -> String {
+    format!("/_api/db-dump-chunk?dump={dump_id}&offset={offset}&len={len}")
+}
+
 pub fn db_restore_query(project: &str, slot: &str, confirm: bool) -> String {
     format!("/_api/db-restore?project={project}&slot={slot}&confirm={confirm}")
 }
@@ -234,31 +247,20 @@ impl Api {
             .and_then(check)
     }
 
-    /// signed POST JSON，2xx 时返回**原始响应**供调用方流式读取（db-dump 大响应用）。
-    /// 上传体仍是小 JSON；下载侧用 24h 宽超时客户端（同 signed_post_file 的大传输语义）。
-    pub fn signed_post_json_raw(
-        &self,
-        path_q: &str,
-        body: &Value,
-    ) -> Result<reqwest::blocking::Response, String> {
-        self.finish(self.post_json_raw_inner(path_q, body))
+    /// signed GET，2xx 时返回**原始响应**供调用方流式读取（db-dump-chunk 切片下载用）。
+    /// 下载走 24h 宽超时客户端（同大传输语义）。
+    pub fn signed_get_raw(&self, path_q: &str) -> Result<reqwest::blocking::Response, String> {
+        self.finish(self.signed_get_raw_inner(path_q))
     }
 
-    fn post_json_raw_inner(
-        &self,
-        path_q: &str,
-        body: &Value,
-    ) -> Result<reqwest::blocking::Response, ApiError> {
-        let bytes = serde_json::to_vec(body).map_err(|e| net_err(e.to_string()))?;
-        let auth = sign(&self.owner, &self.key, "POST", path_q, &bytes, now_unix(), &nonce_hex());
+    fn signed_get_raw_inner(&self, path_q: &str) -> Result<reqwest::blocking::Response, ApiError> {
+        let auth = sign(&self.owner, &self.key, "GET", path_q, b"", now_unix(), &nonce_hex());
         let resp = reqwest::blocking::Client::builder()
             .timeout(Duration::from_secs(24 * 3600))
             .build()
             .map_err(|e| net_err(e.to_string()))?
-            .post(format!("{}{}", self.base, path_q))
+            .get(format!("{}{}", self.base, path_q))
             .header("Authorization", auth)
-            .header("Content-Type", "application/json")
-            .body(bytes)
             .send()
             .map_err(|e| net_err(format!("{}{path_q}: {e}", self.base)))?;
         if resp.status().is_success() {
@@ -389,6 +391,14 @@ mod tests {
         assert_eq!(
             db_restore_query("demo", "stable", false),
             "/_api/db-restore?project=demo&slot=stable&confirm=false"
+        );
+        assert_eq!(
+            dump_status_query(&"a".repeat(32)),
+            format!("/_api/db-dump-status?dump={}", "a".repeat(32))
+        );
+        assert_eq!(
+            dump_chunk_query(&"b".repeat(32), 4096, DUMP_CHUNK_LEN),
+            format!("/_api/db-dump-chunk?dump={}&offset=4096&len={}", "b".repeat(32), DUMP_CHUNK_LEN)
         );
     }
 }

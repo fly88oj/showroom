@@ -25,7 +25,7 @@ use showroom_common as common;
 
 use crate::dbmaint;
 use crate::state::{self, ApiError, R};
-use crate::{ops, publish};
+use crate::{ops, publish, streams};
 
 pub const MAX_JSON_BODY: usize = 1024 * 1024;
 
@@ -116,18 +116,41 @@ async fn dispatch(
         return Err(ApiError::new("E_QUOTA", "body exceeds limit (json 1MB / import IMPORT_MAX_GB)"));
     }
     let q = qmap(uri);
-    // db-dump 早返回：裸 base64 体（流式），其余端点统一 JSON
-    if method == "POST" && path == "/_api/db-dump" {
-        let Collected::Mem(b) = collected else { return Err(ApiError::new("E_STATE", "db-dump: bad body")) };
-        let req: DbDumpReq = jbody(b)?;
-        state::check_name("project", &req.project)?;
-        state::check_name("slot", &req.slot)?;
-        own_check(&s.root, &req.project, &req.slot, &owner)?;
-        let (p, sl, pem) = (req.project, req.slot, req.client_pub_pem);
-        let payload_b64 = blk(move || dbmaint::dump(&p, &sl, &pem)).await?;
+    // 流式下行早返回（SPEC §10.4）：ndjson 流 / octet-stream 切片不走统一 JSON 响应体
+    if method == "GET" && path == "/_api/logs-stream" {
+        let project = qget(&q, "project")?;
+        let slot = qget(&q, "slot")?;
+        state::check_name("project", &project)?;
+        state::check_name("slot", &slot)?;
+        own_check(&s.root, &project, &slot, &owner)?;
+        let tail: u32 = q.get("tail").and_then(|t| t.parse().ok()).unwrap_or(100).min(10000);
+        let root = s.root.clone();
+        let (p, sl) = (project, slot);
+        return blk(move || streams::logs_stream(&root, &p, &sl, tail)).await;
+    }
+    if method == "GET" && path == "/_api/events" {
+        return streams::events_stream();
+    }
+    if method == "GET" && path == "/_api/db-dump-chunk" {
+        let id = qget(&q, "dump")?;
+        let offset: u64 = qget(&q, "offset")?
+            .parse()
+            .map_err(|_| ApiError::new("E_NAME", "bad offset"))?;
+        let len: u64 = qget(&q, "len")?
+            .parse()
+            .map_err(|_| ApiError::new("E_NAME", "bad len"))?;
+        let root = s.root.clone();
+        let o = owner.clone();
+        let id2 = id.clone();
+        let (bytes, total, finished) = blk(move || dbmaint::dump_chunk(&root, &o, &id2, offset, len)).await?;
+        if finished {
+            // 读完最后一片即删会话（SPEC §10.4 C；24h gc 兜底，多客户端并发拉取后到者 E_NOTFOUND 重走 begin）
+            dbmaint::dump_cleanup(&s.root, &id);
+        }
         let resp = axum::response::Response::builder()
-            .header(axum::http::header::CONTENT_TYPE, "text/plain; charset=utf-8")
-            .body(axum::body::Body::from(payload_b64))
+            .header(axum::http::header::CONTENT_TYPE, "application/octet-stream")
+            .header("X-Sr-Total", total.to_string())
+            .body(axum::body::Body::from(bytes))
             .map_err(|e| ApiError::state(e.to_string()))?;
         return Ok(resp);
     }
@@ -286,6 +309,26 @@ async fn dispatch(
             Ok(Json(json!({"columns": columns, "rows": rows})))
         }
 
+
+        ("POST", "/_api/db-dump-begin", Collected::Mem(b)) => {
+            let req: DbDumpBeginReq = jbody(b)?;
+            state::check_name("project", &req.project)?;
+            state::check_name("slot", &req.slot)?;
+            own_check(&s.root, &req.project, &req.slot, &owner)?;
+            let root = s.root.clone();
+            let o = owner.clone();
+            let (p, sl, pem) = (req.project, req.slot, req.client_pub_pem);
+            let id = blk(move || dbmaint::dump_begin(&root, &o, &p, &sl, &pem)).await?;
+            Ok(Json(json!({"dump_id": id})))
+        }
+
+        ("GET", "/_api/db-dump-status", _) => {
+            let id = qget(&q, "dump")?;
+            let root = s.root.clone();
+            let o = owner.clone();
+            let st = blk(move || dbmaint::dump_status(&root, &o, &id)).await?;
+            Ok(Json(json!({"ready": st.state == "ready", "total": st.total, "error": st.error})))
+        }
 
         ("POST", "/_api/db-restore", Collected::File(tmp)) => {
             let project = qget(&q, "project")?;
@@ -568,7 +611,7 @@ struct DbPreviewReq {
 }
 
 #[derive(Deserialize)]
-struct DbDumpReq {
+struct DbDumpBeginReq {
     project: String,
     slot: String,
     client_pub_pem: String,

@@ -108,7 +108,7 @@ POST /_api/import-end?upload=<id>             → 拼接后走单发 import 同�
 | POST /_api/db-sql | `{project,slot,sql,confirm}` | `docker exec -i sr-postgres psql -d sr_<p>_<s> -v ON_ERROR_STOP=1` 执行（stdin 传 sql，禁 argv）；confirm!=true 且语句含 DROP/TRUNCATE/DELETE 时拒（E_STATE 提示确认）；返回 `{out}`（psql 文本输出）|
 | GET /_api/db-tables | `?project=&slot=` | 列表查询（\dt 等价 SQL）→ `{"tables":[...]}`（控制台 ComboBox 数据源）|
 | POST /_api/db-preview | `{project,slot,table,limit≤200}` | `SELECT * LIMIT n` → `{columns,rows}` |
-| POST /_api/db-dump | `{project,slot,client_pub_pem}` | pg_dump -Fc → 用 client_pub 按 §2 信封加密 → `{payload_b64}`（>256MB 拒 E_QUOTA）|
+| POST /_api/db-dump-begin | `{project,slot,client_pub_pem}` | v1.3 起改为三段式（begin/chunk/status，见 §10.4）；本行旧单发 base64 形式已移除 |
 | POST /_api/db-restore | query `?project=&slot=&confirm=` body=信封（客户端用平台公钥 seal 的 -Fc dump） | 验签→解密到 _tmp→`pg_restore --clean --if-exists`→删临时；走 import 同管道与大帽 |
 | POST /_api/db-reset | `{project,slot,confirm}` | DROP DATABASE WITH (FORCE)+重建+重发凭据（env 文件密码不变） |
 CLI 对应：`showroom db sql|tables|preview|dump|restore|reset`。公网全可用（签名+加密），无需内网。
@@ -132,3 +132,15 @@ CLI 对应：`showroom db sql|tables|preview|dump|restore|reset`。公网全可�
 - GET /_api/redis-keys?db=N&q=前缀&limit≤200 → {keys:[...]}（redis-cli --scan --pattern，db=N -n）
 - GET /_api/redis-get?db=N&key=K → {type,ttl,value}（redis-cli TYPE/PTTL/按类型 GET/LRANGE/SMEMBERS/HGETALL/ZRANGE）
 - 控制台：状态监控页新增「Redis 浏览」区（或独立第五标签）：DB 下拉+key 前缀过滤+点击查看值（等宽展示，值截断 4KB）。
+### 10.4 实时下行与低内存大流量传输（ndjson 流 + 分片 dump）
+方向性决策：控制台上行全是短请求，无需双向通道——不引 WebSocket，统一用 fetch 流式消费的 ndjson 流（SSE 风格，逐行 JSON）；大体积下行（db-dump）不再整包进内存，改三段式分片。旧 `POST /_api/db-dump`（base64 单发）**直接移除不保留兼容**（未发布给外部），CLI 同步切换。
+- **GET /_api/logs-stream ?project&slot&tail（默认 100，上限 10000）** `[签名+own_check]`
+  `docker logs -f --tail <n> <容器>`（不加 --timestamps；stdout+stderr 双流合并桥接，逐行封装）→ 响应 `Content-Type: application/x-ndjson`，每行一个 JSON：`{"t":<unix_ms>,"l":"<日志行>"}`（l 经 JSON 转义；t=服务端收到时刻）。客户端断开（连接关闭→响应流 drop→桥接发送失败）即 kill docker logs 子进程并收尸，绝不留孤儿；容器 EOF（被删除）则流正常结束。
+- **GET /_api/events** `[签名；全局事件流无 own_check，控制台按容器名 sr- 前缀自行过滤展示]`
+  `docker events --filter event=start --filter event=stop --filter event=die --filter event=health_status --format {{json .}}`（事件量小不做容器过滤），逐行解析 JSON 提取字段后封装为 `{"t":<unix_ms>,"e":"<Action>","actor":"<容器名>"}`（t=timeNano/1e6 回落 time*1000；actor=Actor.Attributes.name 回落 Actor.ID；解析失败的行静默丢弃）；同为 x-ndjson 流+断开清理。**心跳**：每 30s 推一行 `{"hb":true}` 防代理空闲断连。
+- **db-dump 三段式**（替代 §9 表中 db-dump 行；§9 内存 4× 问题：pg_dump 全量收进 Vec 再 base64 String）：
+  1. `POST /_api/db-dump-begin {project,slot,client_pub_pem}` → `{dump_id}` `[签名+own_check]`：校验 PEM（E_NAME）→ 定库 → 立即返回；后台线程执行 `pg_dump -Fc` 直连 `seal(客户端公钥)` **流式**写 `_tmp/<id>.bin`（信封必须一次成包才能解，故生成整体单次、生成过程流式，内存恒定 ~4MiB；明文 >256MB → E_QUOTA，杀子进程）；会话记录于 `_tmp/<id>.meta`（owner/project/slot/db），进度于 `_tmp/<id>.status`（running|ready|failed，failed 附 error，成功附 total=信封字节数）。
+  2. `GET /_api/db-dump-chunk ?dump=&offset=&len=` `[签名；meta 校验 owner]`：ready 门（否则 E_STATE）→ 按 offset/len 切片返回 `.bin` 原始字节（`application/octet-stream` + `X-Sr-Total` 头）；len ≤4MB（E_NAME 越界同拒），offset 越过 total → E_NAME，尾片自动钳到 total-offset；**offset+len ≥ total（读完最后一片）即删会话三件套**——多客户端并发拉同一 dump 允许（只读切片），后到者可能 E_NOTFOUND 需重走 begin；24h gc 兜底。
+  3. `GET /_api/db-dump-status ?dump=` `[签名；meta 校验 owner]` → `{"ready":bool,"total":n,"error":...}`（轮询用）。
+- CLI `showroom db dump` 同步三段式：begin → 1s 轮询 status 至 ready（1h 上限，failed 即时报错）→ 4MB chunk 循环落本地临时信封（每片≤4MB，内存恒定）→ 一次性私钥解密流式写目标文件/stdout。
+- 陈旧清理：`_tmp` 下 `.status` 并入 gc-images 的 24h 清理（原有 .bin/.meta 不变）。

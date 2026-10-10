@@ -552,6 +552,11 @@ pub fn caddy_route(project: &str, slot: &str, port: u16) -> String {
 
 pub const TMP_STALE_SECS: u64 = 24 * 3600;
 
+/// _tmp 会话 id（upload/dump 共用）：32 位 hex，防路径穿越（会话文件名拼接入点）。
+pub fn valid_session_id(id: &str) -> bool {
+    id.len() == 32 && id.bytes().all(|b| b.is_ascii_hexdigit())
+}
+
 /// 陈旧 _tmp 文件筛选：给定 (名字, mtime) 与 now，返回 age>24h 应删的名字。
 /// 纯函数——mtime 由调用方喂（gc 走文件系统，测试喂 fake）。
 pub fn stale_tmp(names_mtimes: &[(String, u64)], now: u64) -> Vec<String> {

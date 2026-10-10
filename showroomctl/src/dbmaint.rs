@@ -2,14 +2,16 @@
 //! 纪律（ponytail）：psql/pg_dump/pg_restore 全走 `docker exec sr-postgres` 子进程，不引 postgres 客户端库；
 //! 用户 SQL 恒走 stdin（绝不进 argv）；表名走白名单 + 双引号包裹（psql 无参数化）。
 //! serve 在调用前完成统一验签与 own_check；本模块只做名字/上限校验与容器内执行。
+//! db-dump 为三段式（SPEC §10.4）：begin 起 pg_dump|seal 流式后台线程，chunk/status 切片下发。
 
 use std::fs;
-use std::io::{BufWriter, Write};
-use std::path::Path;
+use std::io::{BufWriter, Read, Seek, SeekFrom, Write};
+use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
 
-use base64::engine::general_purpose::STANDARD;
-use base64::engine::Engine as _;
+use serde::{Deserialize, Serialize};
 
 use crate::dockerops;
 use crate::state::{self, ApiError, R};
@@ -133,23 +135,230 @@ pub fn preview(p: &str, s: &str, table: &str, limit: u32) -> R<(Vec<String>, Vec
     Ok((columns, parse_tsv(&data)))
 }
 
-/// POST /_api/db-dump：pg_dump -Fc → 按 §2 信封用 client_pub 加密 → base64（>256MB 拒 E_QUOTA）。
-pub fn dump(p: &str, s: &str, client_pub_pem: &str) -> R<String> {
+// —— db-dump 三段式（SPEC §10.4 C；替代 §9 单发 base64——pg_dump 全量进 Vec 再 base64 的 4× 内存）——
+
+/// 单次切片上限（SPEC §10.4：len ≤ 4MB）。
+pub const DUMP_CHUNK_MAX: u64 = 4 << 20;
+
+/// 会话三件套：_tmp/<id>.bin（sealed 信封）+ <id>.meta（归属）+ <id>.status（就绪状态）。
+/// 陈旧（>24h）由 gc-images 顺带清理（ops::gc_tmp 已扫 .bin/.meta/.status）。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DumpMeta {
+    pub owner: String,
+    pub project: String,
+    pub slot: String,
+    pub db: String,
+    pub created: u64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DumpStatus {
+    /// running | ready | failed
+    pub state: String,
+    pub total: u64,
+    pub error: Option<String>,
+}
+
+pub fn dump_bin(root: &Path, id: &str) -> PathBuf {
+    root.join("_tmp").join(format!("{id}.bin"))
+}
+fn dump_meta_path(root: &Path, id: &str) -> PathBuf {
+    root.join("_tmp").join(format!("{id}.meta"))
+}
+fn dump_status_path(root: &Path, id: &str) -> PathBuf {
+    root.join("_tmp").join(format!("{id}.status"))
+}
+
+/// 会话归属：id 非法/不存在 → E_NOTFOUND；owner 不符 → E_AUTH（不泄露会话内情）。
+fn load_dump_meta_owned(root: &Path, id: &str, owner: &str) -> R<DumpMeta> {
+    if !state::valid_session_id(id) {
+        return Err(ApiError::new("E_NOTFOUND", "no such dump"));
+    }
+    let text = fs::read_to_string(dump_meta_path(root, id))
+        .map_err(|_| ApiError::new("E_NOTFOUND", "no such dump"))?;
+    let m: DumpMeta =
+        serde_json::from_str(&text).map_err(|e| ApiError::state(format!("dump meta parse: {e}")))?;
+    if m.owner != owner {
+        return Err(ApiError::new("E_AUTH", format!("dump '{id}' belongs to {}", m.owner)));
+    }
+    Ok(m)
+}
+
+/// 读状态文件；缺失或畸形按 running 处理（begin 已同步写 running；畸形=线程写一半崩溃）。
+fn load_dump_status(root: &Path, id: &str) -> DumpStatus {
+    let text = fs::read_to_string(dump_status_path(root, id)).unwrap_or_default();
+    serde_json::from_str(&text).unwrap_or(DumpStatus { state: "running".into(), total: 0, error: None })
+}
+
+fn write_dump_status(root: &Path, id: &str, st: &DumpStatus) -> R<()> {
+    let j = serde_json::to_string(st).map_err(|e| ApiError::state(format!("dump status serialize: {e}")))?;
+    fs::write(dump_status_path(root, id), j)?;
+    Ok(())
+}
+
+/// 读侧限额：累计超 cap 后返回 io 错误并置 over（dump 的 E_QUOTA 判定走标记，
+/// 免从 io::Error 字符串反解错误码）。
+struct CapReader<R> {
+    inner: R,
+    cap: u64,
+    total: u64,
+    over: Arc<AtomicBool>,
+}
+
+impl<R: Read> CapReader<R> {
+    fn new(inner: R, cap: u64, over: Arc<AtomicBool>) -> Self {
+        CapReader { inner, cap, total: 0, over }
+    }
+}
+
+impl<R: Read> Read for CapReader<R> {
+    fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+        let n = self.inner.read(buf)?;
+        self.total += n as u64;
+        if self.total > self.cap {
+            self.over.store(true, Ordering::Relaxed);
+            return Err(std::io::Error::other(format!("payload exceeds {} bytes", self.cap)));
+        }
+        Ok(n)
+    }
+}
+
+/// pg_dump -Fc 的 stdout → seal(客户端公钥) → out 文件：信封整体一次生成（解密侧
+/// common::open 必须拿到完整信封），但生成全程流式（4MiB 段缓冲，内存恒定）。
+/// 返回 sealed 总字节数；任何失败由调用方删 out。明文超 cap → E_QUOTA。
+fn dump_seal_to(db: &str, pub_key: &showroom_common::rsa::RsaPublicKey, out: &Path, cap: u64) -> R<u64> {
+    let mut child = Command::new("docker")
+        .args(["exec", "-i", "sr-postgres", "pg_dump", "-U", "postgres", "-Fc", db])
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .map_err(|e| ApiError::state(format!("spawn pg_dump: {e}")))?;
+    let stdout = child.stdout.take().unwrap();
+    // stderr 独立线程排空（防 pg_dump 报错写满管道互锁），失败时取尾部几行
+    let mut stderr = child.stderr.take().unwrap();
+    let err_t = std::thread::spawn(move || {
+        let mut s = String::new();
+        let _ = std::io::Read::read_to_string(&mut stderr, &mut s);
+        s
+    });
+
+    let over = Arc::new(AtomicBool::new(false));
+    let mut w = BufWriter::new(fs::File::create(out)?);
+    let sealed = showroom_common::seal(
+        pub_key,
+        CapReader::new(stdout, cap, over.clone()),
+        &mut w,
+    );
+    let n = match sealed {
+        Ok(n) => n,
+        Err(e) => {
+            dockerops::kill_wait(&mut child);
+            return Err(if over.load(Ordering::Relaxed) {
+                ApiError::new("E_QUOTA", format!("dump 明文超过上限 {cap} 字节"))
+            } else {
+                ApiError::state(format!("seal dump: {e}"))
+            });
+        }
+    };
+    w.flush().map_err(|e| ApiError::state(format!("seal dump flush: {e}")))?;
+    let status = child.wait().map_err(|e| ApiError::state(format!("pg_dump wait: {e}")))?;
+    let errout = err_t.join().unwrap_or_default();
+    if !status.success() {
+        return Err(ApiError::state(format!(
+            "pg_dump -Fc {db} failed: {}",
+            dockerops::tail_lines(&errout, 8)
+        )));
+    }
+    Ok(n)
+}
+
+/// POST /_api/db-dump-begin 内核：解析客户端公钥（E_NAME 先拒）→ 定库 → 落 meta/status
+/// → 起后台线程 pg_dump|seal 流式写 .bin，立即返回 dump_id（不等待）。
+/// 名字校验与 own_check 由 serve 完成。线程无论成败终态都写回 .status；失败删 .bin。
+pub fn dump_begin(root: &Path, owner: &str, project: &str, slot: &str, client_pub_pem: &str) -> R<String> {
     use showroom_common::rsa::pkcs8::DecodePublicKey;
+
     let pub_key = showroom_common::rsa::RsaPublicKey::from_public_key_pem(client_pub_pem.trim())
         .map_err(|e| ApiError::new("E_NAME", format!("client_pub_pem 解析失败: {e}")))?;
-    let db = resolve_db(p, s)?;
-    let dump = dockerops::pg_dump_fc(&db)?;
-    if dump.len() > DUMP_MAX_BYTES {
-        return Err(ApiError::new(
-            "E_QUOTA",
-            format!("dump {} 字节，超过上限 {} 字节", dump.len(), DUMP_MAX_BYTES),
-        ));
+    let db = resolve_db(project, slot)?;
+    let id = state::rand_hex(16);
+    fs::create_dir_all(root.join("_tmp"))?;
+    // meta/status 先于 .bin 落盘：chunk/status 以 meta 判归属，bin 未就绪只表现为 running
+    let meta = DumpMeta {
+        owner: owner.to_string(),
+        project: project.to_string(),
+        slot: slot.to_string(),
+        db: db.clone(),
+        created: state::unix_now(),
+    };
+    let j = serde_json::to_string(&meta).map_err(|e| ApiError::state(format!("dump meta serialize: {e}")))?;
+    fs::write(dump_meta_path(root, &id), j)?;
+    write_dump_status(root, &id, &DumpStatus { state: "running".into(), total: 0, error: None })?;
+
+    let (r2, i2) = (root.to_path_buf(), id.clone());
+    std::thread::spawn(move || {
+        let bin = dump_bin(&r2, &i2);
+        let st = match dump_seal_to(&db, &pub_key, &bin, DUMP_MAX_BYTES as u64) {
+            Ok(total) => DumpStatus { state: "ready".into(), total, error: None },
+            Err(e) => {
+                let _ = fs::remove_file(&bin);
+                DumpStatus { state: "failed".into(), total: 0, error: Some(format!("{e}")) }
+            }
+        };
+        if write_dump_status(&r2, &i2, &st).is_err() {
+            eprintln!("showroomctl: dump {}: status write failed", i2);
+        }
+    });
+    Ok(id)
+}
+
+/// 切片计划（纯函数）：→ (有效长度, 是否读到最后一片)。
+/// len 0 或 >4MB → E_NAME；offset 超 total → E_NAME；offset==total → 0 字节且
+/// finished=true（幂等收尾探测，同样触发会话删除）。
+pub fn plan_chunk(total: u64, offset: u64, len: u64) -> R<(u64, bool)> {
+    if len == 0 || len > DUMP_CHUNK_MAX {
+        return Err(ApiError::new("E_NAME", format!("len 须在 1..={DUMP_CHUNK_MAX} 字节")));
     }
-    let mut sealed = Vec::new();
-    showroom_common::seal(&pub_key, std::io::Cursor::new(&dump), &mut sealed)
-        .map_err(|e| ApiError::state(format!("seal dump: {e}")))?;
-    Ok(STANDARD.encode(sealed))
+    if offset > total {
+        return Err(ApiError::new("E_NAME", format!("offset {offset} 超出总长 {total}")));
+    }
+    let n = len.min(total - offset);
+    Ok((n, offset + n >= total))
+}
+
+/// GET /_api/db-dump-chunk 内核：归属校验 → ready 门 → 读 [offset, offset+n) 字节。
+/// 返回 (字节, total, finished)；finished（读完最后一片）由调用方触发会话删除。
+pub fn dump_chunk(root: &Path, owner: &str, id: &str, offset: u64, len: u64) -> R<(Vec<u8>, u64, bool)> {
+    load_dump_meta_owned(root, id, owner)?;
+    let st = load_dump_status(root, id);
+    match st.state.as_str() {
+        "ready" => {}
+        "failed" => {
+            return Err(ApiError::new("E_STATE", format!("dump failed: {}", st.error.unwrap_or_default())))
+        }
+        _ => return Err(ApiError::new("E_STATE", "dump not ready")),
+    }
+    let (n, finished) = plan_chunk(st.total, offset, len)?;
+    let mut buf = vec![0u8; n as usize];
+    if n > 0 {
+        let mut f = fs::File::open(dump_bin(root, id))?;
+        f.seek(SeekFrom::Start(offset))?;
+        f.read_exact(&mut buf)?;
+    }
+    Ok((buf, st.total, finished))
+}
+
+/// GET /_api/db-dump-status 内核：归属校验后读状态。
+pub fn dump_status(root: &Path, owner: &str, id: &str) -> R<DumpStatus> {
+    load_dump_meta_owned(root, id, owner)?;
+    Ok(load_dump_status(root, id))
+}
+
+/// 会话三件套删除（读完最后一片 / 陈旧 gc 共用；幂等）。
+pub fn dump_cleanup(root: &Path, id: &str) {
+    for p in [dump_bin(root, id), dump_meta_path(root, id), dump_status_path(root, id)] {
+        let _ = fs::remove_file(p);
+    }
 }
 
 /// POST /_api/db-restore：confirm 门 → 平台私钥流式解密喂 pg_restore stdin（--clean --if-exists）。
@@ -326,11 +535,13 @@ mod tests {
         assert_eq!(parse_tsv("x\n\ny\n"), rows(&[&["x"], &[""], &["y"]]));
     }
 
-    // dump 信道往返（不碰 docker）：server 侧 parse client PEM + seal（dump 的密码学路径）
-    // ↔ client 侧 base64 解码 + 一次性私钥 open；坏 PEM 解析失败即 dump 的 E_NAME 分支
+    // dump 信封密码学路径往返（不碰 docker）：server 侧 parse client PEM + seal
+    // ↔ client 侧 base64 解码（兼容旧 CLI 流）+ 一次性私钥 open；坏 PEM → dump_begin 的 E_NAME 分支
     #[test]
     fn dump_envelope_roundtrip() {
+        use base64::engine::general_purpose::STANDARD;
         use base64::read::DecoderReader;
+        use base64::Engine as _;
         use showroom_common::rsa::pkcs8::{DecodePublicKey, EncodePublicKey, LineEnding};
         use showroom_common::rsa::{RsaPrivateKey, RsaPublicKey};
 
@@ -349,6 +560,120 @@ mod tests {
         showroom_common::open(&sk, DecoderReader::new(b64.as_bytes(), &STANDARD), &mut out).unwrap();
         assert_eq!(out, dump_bytes);
 
-        assert!(RsaPublicKey::from_public_key_pem("not a pem").is_err(), "坏 PEM → dump 的 E_NAME 分支");
+        assert!(RsaPublicKey::from_public_key_pem("not a pem").is_err(), "坏 PEM → E_NAME 分支");
+    }
+
+    // —— db-dump 三段式（SPEC §10.4）：会话归属 / chunk 边界 / 状态机（临时目录，不碰 docker）——
+
+    fn troot(name: &str) -> PathBuf {
+        let d = std::env::temp_dir().join(format!("srctl-dump-test-{}-{name}", std::process::id()));
+        let _ = fs::remove_dir_all(&d);
+        fs::create_dir_all(d.join("_tmp")).unwrap();
+        d
+    }
+
+    /// 手工落一份 ready 会话（绕开 dump_begin 的 docker 依赖），返回 (root, id, sealed 字节)。
+    fn ready_session(name: &str, owner: &str, sealed: &[u8]) -> (PathBuf, String) {
+        let root = troot(name);
+        let id = state::rand_hex(16);
+        fs::write(dump_bin(&root, &id), sealed).unwrap();
+        let meta = DumpMeta {
+            owner: owner.into(),
+            project: "demo".into(),
+            slot: "stable".into(),
+            db: "sr_demo_stable".into(),
+            created: 1,
+        };
+        fs::write(dump_meta_path(&root, &id), serde_json::to_string(&meta).unwrap()).unwrap();
+        let st = DumpStatus { state: "ready".into(), total: sealed.len() as u64, error: None };
+        fs::write(dump_status_path(&root, &id), serde_json::to_string(&st).unwrap()).unwrap();
+        (root, id)
+    }
+
+    // 归属校验（chunk/status 共用 load_dump_meta_owned）：他人 → E_AUTH；
+    // 非法 id / 不存在 → E_NOTFOUND（与 publish::load_meta_owned 同语义）
+    #[test]
+    fn dump_session_ownership() {
+        let (root, id) = ready_session("own", "alice", b"0123456789");
+        assert_eq!(dump_status(&root, "alice", &id).unwrap().state, "ready");
+        assert_eq!(dump_status(&root, "bob", &id).unwrap_err().code, "E_AUTH");
+        assert_eq!(dump_chunk(&root, "bob", &id, 0, 4).unwrap_err().code, "E_AUTH");
+        // 归属拒绝不动会话（文件仍在，他人无法借报错探测）
+        assert!(dump_bin(&root, &id).exists());
+        for bad in ["", "..", "../../etc/passwd", &"x".repeat(31), &"z".repeat(32)] {
+            assert_eq!(dump_status(&root, "alice", bad).unwrap_err().code, "E_NOTFOUND", "{bad:?}");
+        }
+        assert_eq!(dump_status(&root, "alice", &state::rand_hex(16)).unwrap_err().code, "E_NOTFOUND");
+    }
+
+    // chunk 切片边界：整段 / 末片 / 恰好 total / 越界 / len 0 与超 4MB / 未就绪与失败态
+    #[test]
+    fn dump_chunk_boundaries() {
+        let sealed: Vec<u8> = (0..250u32).map(|i| i as u8).collect();
+        let (root, id) = ready_session("chunk", "alice", &sealed);
+        let total = sealed.len() as u64;
+
+        // 中段切片
+        let (b, t, fin) = dump_chunk(&root, "alice", &id, 10, 50).unwrap();
+        assert_eq!((b.as_slice(), t, fin), (&sealed[10..60], total, false));
+        // 末片：请求越界长度被钳到 total-offset，且 finished=true
+        let (b, _, fin) = dump_chunk(&root, "alice", &id, 200, 1 << 20).unwrap();
+        assert_eq!((b.as_slice(), fin), (&sealed[200..], true));
+        // 恰好 total：0 字节幂等收尾探测，finished=true
+        let (b, _, fin) = dump_chunk(&root, "alice", &id, total, 64).unwrap();
+        assert_eq!((b.len(), fin), (0, true));
+        // offset 越界 → E_NAME；len 0 / 超 4MB → E_NAME
+        assert_eq!(dump_chunk(&root, "alice", &id, total + 1, 4).unwrap_err().code, "E_NAME");
+        assert_eq!(dump_chunk(&root, "alice", &id, 0, 0).unwrap_err().code, "E_NAME");
+        assert_eq!(dump_chunk(&root, "alice", &id, 0, DUMP_CHUNK_MAX + 1).unwrap_err().code, "E_NAME");
+
+        // 会话删除：三件套幂等清空，此后访问 → E_NOTFOUND
+        dump_cleanup(&root, &id);
+        assert!(!dump_bin(&root, &id).exists() && !dump_meta_path(&root, &id).exists());
+        assert_eq!(dump_chunk(&root, "alice", &id, 0, 4).unwrap_err().code, "E_NOTFOUND");
+        dump_cleanup(&root, &id); // 幂等
+    }
+
+    // 未就绪 / 失败态：chunk 拒 E_STATE；status 如实回传 error
+    #[test]
+    fn dump_not_ready_and_failed_states() {
+        let root = troot("states");
+        let id = state::rand_hex(16);
+        let meta = DumpMeta { owner: "alice".into(), project: "p".into(), slot: "s".into(), db: "d".into(), created: 1 };
+        fs::write(dump_meta_path(&root, &id), serde_json::to_string(&meta).unwrap()).unwrap();
+        // 未写 status（线程极早期）→ 默认 running
+        assert_eq!(dump_status(&root, "alice", &id).unwrap().state, "running");
+        assert_eq!(dump_chunk(&root, "alice", &id, 0, 4).unwrap_err().code, "E_STATE");
+        // failed 态带错误信息
+        let st = DumpStatus { state: "failed".into(), total: 0, error: Some("pg_dump boom".into()) };
+        fs::write(dump_status_path(&root, &id), serde_json::to_string(&st).unwrap()).unwrap();
+        let e = dump_chunk(&root, "alice", &id, 0, 4).unwrap_err();
+        assert_eq!((e.code, e.msg.contains("pg_dump boom")), ("E_STATE", true));
+        assert_eq!(dump_status(&root, "alice", &id).unwrap().error.as_deref(), Some("pg_dump boom"));
+    }
+
+    // CapReader（dump 的 256MB E_QUOTA 判定）：帽内全读；超帽报 io 错且置 over
+    #[test]
+    fn cap_reader_limit() {
+        let over = Arc::new(AtomicBool::new(false));
+        let mut r = CapReader::new(std::io::Cursor::new(vec![7u8; 200]), 150, over.clone());
+        let mut out = Vec::new();
+        assert!(r.read_to_end(&mut out).is_err(), "200 > 150 应报错");
+        assert!(over.load(Ordering::Relaxed), "超帽必须置标记（E_QUOTA 判定）");
+
+        let over2 = Arc::new(AtomicBool::new(false));
+        let mut r2 = CapReader::new(std::io::Cursor::new(vec![7u8; 100]), 100, over2.clone());
+        let mut out2 = Vec::new();
+        r2.read_to_end(&mut out2).unwrap();
+        assert_eq!(out2.len(), 100, "恰好帽内放行");
+        assert!(!over2.load(Ordering::Relaxed));
+    }
+
+    // 切片计划纯函数的补充边界：total=0（空信封不可能出现，但计划层须自洽）
+    #[test]
+    fn plan_chunk_zero_total() {
+        assert_eq!(plan_chunk(0, 0, 1).unwrap(), (0, true));
+        assert_eq!(plan_chunk(0, 1, 1).unwrap_err().code, "E_NAME");
+        assert_eq!(plan_chunk(4 << 20, 0, 4 << 20).unwrap(), (4 << 20, true));
     }
 }

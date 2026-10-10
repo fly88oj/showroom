@@ -7,6 +7,7 @@ mod ops;
 mod publish;
 mod serve;
 mod state;
+mod streams;
 
 use clap::{Parser, Subcommand};
 use serde_json::json;
