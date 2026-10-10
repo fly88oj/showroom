@@ -508,7 +508,11 @@ function signHeaderPtr(method, pathQ, bodyPtr, bodyLen) {
   return auth;
 }
 /** 统一 API 调用：json 传对象 → JSON body；Uint8Array → 原始 body；null → 空 body。 */
-async function api(method, pathQ, body) {
+async function apiRaw(method, pathQ, body) {
+  const r = await apiFetch(method, pathQ, body);
+  return r.text();
+}
+async function apiDo(method, pathQ, body) {
   if (!state.seed || !state.owner) throw { error: 'E_STATE', msg: '未配置密钥或账号' };
   let bodyBytes = new Uint8Array(0), isJson = false;
   if (body && typeof body === 'object' && !(body instanceof Uint8Array)) {
@@ -522,7 +526,13 @@ async function api(method, pathQ, body) {
     headers: { Authorization: auth, ...(isJson ? { 'Content-Type': 'application/json' } : {}) },
     body: method === 'GET' || method === 'HEAD' ? undefined : bodyBytes,
   });
-  return checkResp(resp);
+  return resp;
+}
+async function api(method, pathQ, body) {
+  return checkResp(await apiDo(method, pathQ, body));
+}
+async function apiRaw(method, pathQ, body) {
+  return (await apiDo(method, pathQ, body)).text();
 }
 async function checkResp(resp) {
   const text = await resp.text();
@@ -994,9 +1004,9 @@ async function onDbDump() {
   $('db-fb').textContent = '正在生成一次性密钥并请求备份…（首次可能需数秒）';
   try {
     const pair = await oneTimeRsaPemPair();
-    const j = await api('POST', '/_api/db-dump', { project: t.project, slot: t.slot, client_pub_pem: pair.pub });
-    if (!j.payload_b64) throw { error: 'E_NET', msg: '服务端未返回备份数据' };
-    const envelope = b64ToBytes(j.payload_b64);
+    const b64text = (await apiRaw('POST', '/_api/db-dump', { project: t.project, slot: t.slot, client_pub_pem: pair.pub })).trim();
+    if (!b64text) throw { error: 'E_NET', msg: '服务端未返回备份数据' };
+    const envelope = b64ToBytes(b64text);
     const parts = openEnvelope(pair.priv, envelope);
     const total = parts.reduce((n, p) => n + p.length, 0);
     const blob = new Blob(parts, { type: 'application/octet-stream' });

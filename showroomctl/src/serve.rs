@@ -116,6 +116,21 @@ async fn dispatch(
         return Err(ApiError::new("E_QUOTA", "body exceeds limit (json 1MB / import IMPORT_MAX_GB)"));
     }
     let q = qmap(uri);
+    // db-dump 早返回：裸 base64 体（流式），其余端点统一 JSON
+    if method == "POST" && path == "/_api/db-dump" {
+        let Collected::Mem(b) = collected else { return Err(ApiError::new("E_STATE", "db-dump: bad body")) };
+        let req: DbDumpReq = jbody(b)?;
+        state::check_name("project", &req.project)?;
+        state::check_name("slot", &req.slot)?;
+        own_check(&s.root, &req.project, &req.slot, &owner)?;
+        let (p, sl, pem) = (req.project, req.slot, req.client_pub_pem);
+        let payload_b64 = blk(move || dbmaint::dump(&p, &sl, &pem)).await?;
+        let resp = axum::response::Response::builder()
+            .header(axum::http::header::CONTENT_TYPE, "text/plain; charset=utf-8")
+            .body(axum::body::Body::from(payload_b64))
+            .map_err(|e| ApiError::state(e.to_string()))?;
+        return Ok(resp);
+    }
     let r: Result<Json<serde_json::Value>, ApiError> = match (method.as_str(), path, collected) {
         ("GET", "/_api/health", _) => Ok(Json(json!({"ok": true}))),
 
@@ -271,15 +286,6 @@ async fn dispatch(
             Ok(Json(json!({"columns": columns, "rows": rows})))
         }
 
-        ("POST", "/_api/db-dump", Collected::Mem(b)) => {
-            let req: DbDumpReq = jbody(b)?;
-            state::check_name("project", &req.project)?;
-            state::check_name("slot", &req.slot)?;
-            own_check(&s.root, &req.project, &req.slot, &owner)?;
-            let (p, sl, pem) = (req.project, req.slot, req.client_pub_pem);
-            let payload_b64 = blk(move || dbmaint::dump(&p, &sl, &pem)).await?;
-            Ok(Json(json!({"payload_b64": payload_b64})))
-        }
 
         ("POST", "/_api/db-restore", Collected::File(tmp)) => {
             let project = qget(&q, "project")?;
@@ -326,8 +332,7 @@ async fn dispatch(
         }
 
         _ => Err(ApiError::new("E_NOTFOUND", "no such endpoint")),
-    };
-    Ok(r.map(|j| j.into_response())?)
+    };    Ok(r.map(|j| j.into_response())?)
 }
 
 // —— body 收集：哈希始终可算完，验签失败者只见统一 404 ——

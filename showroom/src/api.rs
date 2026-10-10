@@ -274,11 +274,15 @@ impl Api {
     }
 
     fn signed_post_file_inner(&self, path_q: &str, file: &Path) -> Result<Value, ApiError> {
-        let f = File::open(file).map_err(|e| net_err(e.to_string()))?;
-        let hash = sha256_hex_stream(&f).map_err(|e| net_err(e.to_string()))?;
+        // 哈希与请求体各开各的句柄：同一句柄读完哈希后游标在 EOF，作为 body 只会发出 0 字节
+        let hash = {
+            let f = File::open(file).map_err(|e| net_err(e.to_string()))?;
+            sha256_hex_stream(&f).map_err(|e| net_err(e.to_string()))?
+        };
         let auth = sign_prehashed(
             &self.owner, &self.key, "POST", path_q, &hash, now_unix(), &nonce_hex(),
         );
+        let f = File::open(file).map_err(|e| net_err(e.to_string()))?;
         let resp = reqwest::blocking::Client::new() // 上传走独立无超时语义：单请求放宽到 24h
             .post(format!("{}{}", self.base, path_q))
             .header("Authorization", auth)
@@ -286,7 +290,16 @@ impl Api {
             .timeout(Duration::from_secs(24 * 3600))
             .body(reqwest::blocking::Body::from(f)) // 流式，不进内存
             .send()
-            .map_err(|e| net_err(format!("{}{path_q}: {e}", self.base)))?;
+            .map_err(|e| {
+                use std::error::Error as _;
+                let mut msg = format!("{e}");
+                let mut src = e.source();
+                while let Some(s) = src {
+                    msg.push_str(&format!("; caused by: {s}"));
+                    src = s.source();
+                }
+                net_err(format!("{}{path_q}: {msg}", self.base))
+            })?;
         check(resp)
     }
 }
