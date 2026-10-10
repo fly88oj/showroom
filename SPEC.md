@@ -154,3 +154,20 @@ CLI 对应：`showroom db sql|tables|preview|dump|restore|reset`。公网全可�
 - CLI：publish <project> <tag>；ps/logs/env/db*/rollback/stop/start/rm 全部去 slot 实参（旧调用直接报错提示新用法）。
 - 控制台：发布表单去槽位字段；项目输入预填随机 8 位（带「换一个」按钮）；URL 提示恒 /<project>/。
 - 兼容：`/-api` 无外部存量消费者，不做参数兼容层；主机存量数据（hello/skill-demo）按上述规则现场迁移。
+
+## 12. v1.5：一键部署 + 管理员体系
+### 12.1 上传发布一体
+- CLI：`showroom deploy [项目] <tag> [--mem --cpu --container-port]` = push（压缩上传）+ publish --wait + 打印 URL 的原子命令（任一步失败即停，报错含已完成的步骤）。
+- 控制台：发布表单「一键部署」按钮——选 tar → 前端压缩 → 分片上传 → 自动 publish → 展示 URL；分步状态条（压缩中/上传 x%/发布中/完成）。
+### 12.2 管理员（标记在 Key 上）
+- state：`tokens/<owner>/<kid>.pub` 旁增加 `tokens/<owner>/<kid>.admin`（空文件存在=管理员钥匙）。
+- 引导：主机 CLI `showroomctl owner-add <名> --pubkey <…> --admin` 首个管理员；此后管理员可远程授权。
+- 身份接口：`GET /_api/whoami`（签名）→ `{"owner","kid","admin":bool}`——控制台据此显示/隐藏「管理」标签。
+- 管理接口（全部签名+管理员钥匙校验，非管理员=404 E_AUTH 与未登记不可区分；公网可用）：
+  - `GET /_api/admin/owners` → 账号/钥匙(kid,admin,登记时间)/项目数
+  - `POST /_api/admin/owner-add {owner,pubkey,admin?}` → 返回 registry 密码（远程发卡）
+  - `POST /_api/admin/owner-revoke {owner}`、`POST /_api/admin/key-rm {owner,kid}`
+  - `POST /_api/admin/key-admin {owner,kid,admin}`（授权/收权）
+  - `GET /_api/admin/status` → 服务状态(systemd is-active 四服务)、磁盘(根+@showroom)、内存(MemAvailable)、容器列表(名/状态)、timers 下次触发
+- 控制台「管理」标签（仅 admin 钥匙可见）：账号与钥匙表格（发卡对话框含公钥粘贴+是否管理员勾选）、状态面板（自动刷新 30s）、快捷动作（收权/删钥匙，confirm）。
+- 安全语义：管理员钥匙遗失=平台最高权限泄露，owner-key-rm 单独吊销；whoami 用当前请求的 kid 判定。
