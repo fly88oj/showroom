@@ -1,12 +1,12 @@
 #!/usr/bin/env node
-// showroom-web 向导冒烟（SPEC §10.1/§10.2/§10.3/§10.4/§11；无浏览器依赖，node ≥ 18）：
+// showroom-web 向导冒烟（SPEC §10.1/§10.2/§10.3/§10.4/§11/§12/§13；无浏览器依赖，node ≥ 18）：
 //   把 dist/index.html 的 <script type="module"> 挂到 mock DOM/localStorage/fetch 上执行，
 //   驱动登录向导状态机走完全部分支：
 //   1) 全新浏览器（无种子无账号）→ 三步向导 → E_AUTH 公钥展示与重检循环
 //      → 模拟管理员登记成功 → 进入管理壳（展项列表请求渲染）
 //   2) 同浏览器再访（账号+种子匹配）→ 直达第 3 步并自动进入
 //   3) 种子在、账号换 → 走完整向导（第 2 步默认「使用本机已有密钥」，指纹与公钥一致）
-//   4) 「导入密钥种子」分支：非法 seed 拒绝；合法 seed 进入第 3 步
+//   4) 「导入密钥种子」分支：非法 seed 拒绝（字段内联错误+聚焦）；合法 seed 进入第 3 步
 //   5) §11 去版本字段：发布表单随机 8 位项目名 +「换一个」+ URL 恒 /<project>/
 //   6) §10.4 流式消费：日志实时流（ndjson 行缓冲/1000 行帽/时间戳/开关停流）、
 //      平台事件流（sr- 过滤/心跳忽略/20 条滚动/2s 去抖刷新/断线 5 秒重连）、
@@ -14,7 +14,19 @@
 //   7) 上传压缩统一（zstd）：发布表单选普通镜像 tar → 自动 zstd-19 压缩 → import-begin
 //      的 total_bytes 按压缩后长度申报（与独立 wasm 实例同粒度重压缩逐字节对账）；
 //      恢复上传魔数两态（已是 zstd 原样 / 原生 -Fc 压缩后），信封长度按对应载荷核算
-//   8) 静态断言：「内存上限」「槽位/slot」零残留 / §10.3 与 §10.4 端点已接入 / 旧单发 db-dump 已移除
+//   8) §12.1 一键部署：状态条①压缩（x%）→②上传（已传/压缩后总长）→③发布→④完成（大字 URL）
+//      四段流转；发布失败标红重试（项目留空自动生成回填）；上传失败断点续传重试
+//   9) §12.2 管理员：whoami 两态（admin=false 管理 DOM 不存在 / true 第五标签渲染）、
+//      账号与钥匙表、发卡对话框提交体校验（registry 密码仅显示一次）、行内管理动作
+//      （key-admin/key-rm/owner-revoke + 中文 confirm 文案）、平台状态面板、30s 自动刷新、
+//      admin 接口 404 E_AUTH 顶部条报错、whoami 失败顶部条报错
+//  10) §13 发布三入口并存：一键部署 / 仅上传（无 publish 调用，③④ skip，镜像已入库提示）/
+//      部署表单（/_api/images 惰性加载+刷新+选择自动带出项目标签+发布）；
+//      §13.2 Redis 浏览用户隔离文案 + 管理员视图标注（whoami 两态）
+//  11) 静态断言：「内存上限」「槽位/slot」零残留 / §10.3-§13 端点已接入 /
+//      旧单发 db-dump 已移除 / 新增文案全中文（无英文混排）/
+//      界面规范（无内联事件/无 transition:all/无 outline:none/占位符 … 结尾/
+//      tablist 语义/reduced-motion/overscroll/touch-action/tabular-nums/theme-color）
 import { readFileSync, writeFileSync, mkdtempSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -41,14 +53,16 @@ class Cls {
 const els = new Map();
 function makeEl(id) {
   const el = {
-    id, value: '', textContent: '', innerHTML: '', checked: false, disabled: false,
+    id, value: '', textContent: '', innerHTML: '', checked: false, disabled: false, open: false,
     dataset: {}, style: {}, listeners: {}, classList: new Cls(),
     addEventListener(ev, fn) { (this.listeners[ev] ||= []).push(fn); },
     removeEventListener() {}, append() {}, focus() {}, select() {}, remove() {},
     closest() { return null; },
-    querySelector() { return makeEl(id + ':q'); },
+    querySelector() { return $s(id + ':q'); }, // 注册进 els：tbody 等子节点渲染结果可断言
     querySelectorAll() { return []; },
     content: { cloneNode: () => ({}) },
+    showModal() { this.open = true; },
+    close() { this.open = false; },
   };
   el.click = () => fire(el, 'click', { preventDefault() {} });
   return el;
@@ -59,14 +73,20 @@ const click = (id) => fire($s(id), 'click', { preventDefault() {} });
 const typeIn = (id) => fire($s(id), 'keydown', { key: 'Enter', preventDefault() {} });
 const hidden = (id) => $s(id).classList.contains('hidden');
 const shown = (id) => !hidden(id);
-const tabBtn = (name) => ({ dataset: { tab: name }, closest: () => ({ dataset: { tab: name } }) });
+const tabBtn = (name) => ({ dataset: { tab: name }, classList: new Cls(), closest: () => ({ dataset: { tab: name } }) });
 const clickTab = (name) => fire($s('tabs'), 'click', { target: tabBtn(name) });
+/** tabs 方向键支持：querySelectorAll 桩返回按钮序列（与页面 #tabs 初始顺序一致）。 */
+const armTabs = () => { $s('tabs').querySelectorAll = () => ['proj', 'db', 'status', 'help'].map(tabBtn); };
+/** 模拟浏览器渲染 HTML：给关键按钮桩设置初始文案（busy 恢复断言按真实文字比对）。 */
+const BTN_TEXT = { 'pub-submit': '一键部署', 'btn-upload-only': '仅上传', 'dep-submit': '发布', 'ad-na-submit': '发放' };
+const armBtnText = () => { for (const [id, t] of Object.entries(BTN_TEXT)) $s(id).textContent = t; };
 globalThis.document = {
   getElementById: $s,
   createElement: (tag) => makeEl(`dyn-${tag}-${els.size}`),
   body: { appendChild() {} },
   querySelector: () => null,
   addEventListener() {},
+  execCommand: () => true, // copyText 降级路径（node 无剪贴板）
 };
 globalThis.location = { origin: 'http://showroom.test' };
 
@@ -128,8 +148,10 @@ function sealFor(pubPem, plain) {
   return env;
 }
 
-// —— confirm 垫片：恢复/删除等二次确认一律放行 ——
-globalThis.confirm = () => true;
+// —— confirm 垫片：默认放行；文案全部记录（§12.2 管理动作中文 confirm 断言用） ——
+const confirmMsgs = [];
+let confirmRet = true;
+globalThis.confirm = (m) => { confirmMsgs.push(String(m)); return confirmRet; };
 
 // —— 独立 zstd 压缩（与页面同 wasm 字节的另一实例）：对账页面 compressToBlob 的产物 ——
 function zstdAll(chunks) {
@@ -167,6 +189,32 @@ let dumpEnv = null; // { env: 信封字节 }
 let importBeginBody = null, importEndN = 0, publishN = 0, uploadRec = null;
 const importChunkLens = [];
 const restoreLens = [];
+// 场景 8/9 捕获（§12）：whoami 两态 / 管理接口 / 一键部署状态条快照 / 失败重试
+let whoamiAdmin = false, whoamiFail = false, adminFail404 = false;
+let adminOwnersN = 0, adminStatusN = 0, importStatusN = 0, publishAttempts = 0;
+let ownerAddBody = null, lastPublishBody = null, publishFailOnce = false, chunkFailN = 0;
+const keyAdminBodies = [], keyRmBodies = [], revokeBodies = [];
+const dpSnaps = [], compSnaps = [];
+let dpBeginSnap = null, dpPublishSnap = null;
+const upSessions = {}; // 模拟服务端分片会话：upload_id → { received: [seq…] }
+let curUploadId = null;
+// 场景 §13 捕获：镜像清单（/_api/images）惰性加载/刷新/管理员视图
+let imagesN = 0, imagesAdminView = false; // imagesAdminView：模拟服务端按 admin 钥匙返回全量
+const IMAGES_ALL = ['alice/demo:v1', 'alice/demo2:v2', 'bob/other:v1'];
+const IMAGES_SELF = ['alice/demo:v1', 'alice/demo2:v2'];
+const ADM_OWNERS = { owners: [
+  { owner: 'alice', projects: 2, keys: [
+    { kid: 'kid-a1', admin: true, created: '2026-09-01T10:00:00' },
+    { kid: 'kid-a2', admin: false, created: '2026-09-02T11:00:00' } ] },
+  { owner: 'bob', projects: 0, keys: [ { kid: 'kid-b1', admin: false, created: '2026-10-01T09:00:00' } ] },
+] };
+const ADM_STATUS = {
+  services: { 'showroom-caddy': 'active', 'showroom-registry': 'active', 'showroom-postgres': 'active', 'showroom-redis': 'inactive' },
+  disks: { '/': { total: '100G', avail: '40G' }, '@showroom': { total: '200G', avail: '88G' } },
+  mem_available_mb: 4096,
+  containers: [{ name: 'sr-demo', status: 'running' }, { name: 'sr-hello', status: 'exited' }],
+  timers: [{ timer: 'showroom-snapshot-hourly.timer', next: '2026-10-10 13:00:00' }],
+};
 // ndjson 流响应：逐行 read；close=true 发完即 done（模拟服务端收流），否则长连挂起
 function streamResp(lines, opt = {}) {
   let i = 0, closed = false;
@@ -205,9 +253,13 @@ globalThis.fetch = async (url, init = {}) => {
   if (u.includes('showroom_bg.wasm')) return { ok: true, status: 200, text: async () => '', arrayBuffer: async () => wasmBytes.buffer.slice(wasmBytes.byteOffset, wasmBytes.byteOffset + wasmBytes.byteLength) };
   if (u.includes('/_api/health')) return mode === 'ok' ? resp(200, { ok: true }) : resp(404, { error: 'E_AUTH' });
   if (u.includes('/_api/projects')) { projectsN++; return resp(200, PROJECTS); }
-  if (u.includes('/_api/redis-dbs')) return resp(200, { dbs: [0, 1, 2, 3] });
+  if (u.includes('/_api/images')) { // §13.1：admin 钥匙全量（admin_view），普通仅本人前缀
+    imagesN++;
+    return resp(200, { images: imagesAdminView ? IMAGES_ALL : IMAGES_SELF });
+  }
+  if (u.includes('/_api/redis-dbs')) return resp(200, { dbs: [0, 1, 2, 3], admin_view: whoamiAdmin });
   if (u.includes('/_api/redis-keys')) return resp(200, { keys: ['sr_demo'] });
-  if (u.includes('/_api/redis-get')) return resp(200, { type: 'string', ttl: -1, value: 'x'.repeat(5000) });
+  if (u.includes('/_api/redis-get')) return resp(200, { type: 'string', ttl_ms: -1, value: 'x'.repeat(5000) });
   // —— §10.4 流式端点 ——
   if (u.includes('/_api/logs-stream')) { logsN++; lastLogsUrl = u; lastLogsAuth = auth; return streamResp(LOG_LINES); }
   if (u.includes('/_api/events')) {
@@ -240,18 +292,47 @@ globalThis.fetch = async (url, init = {}) => {
       arrayBuffer: async () => c.buffer,
     };
   }
-  // —— 场景 7：分片导入（压缩后上传）与恢复上传 ——
+  // —— 场景 7/8：分片导入（压缩后上传）、断点续传查询、发布 ——
   if (u.includes('/_api/import-begin')) {
     importBeginBody = JSON.parse(dec2.decode(init.body));
-    return resp(200, { upload_id: 'up-smoke-1' });
+    dpBeginSnap = { txt: $s('dp-text').textContent || '' }; // import-begin 时状态条应处②上传段
+    curUploadId = 'up-smoke-1';
+    upSessions[curUploadId] = { received: [] }; // 新会话（旧会话已被 import-end 消费）
+    return resp(200, { upload_id: curUploadId });
   }
   if (u.includes('/_api/import-chunk')) {
+    if (chunkFailN > 0) { chunkFailN--; return resp(500, { error: 'E_NET', msg: '模拟分片网络失败' }); }
     importChunkLens.push(init.body?.length ?? 0);
+    upSessions[curUploadId]?.received.push(Number(u.match(/seq=(\d+)/)[1]));
+    dpSnaps.push({ txt: $s('dp-text').textContent || '', v: $s('dp-prog').value, m: $s('dp-prog').max, s2: $s('dp-s2').classList.contains('on') });
     if (!uploadRec) uploadRec = JSON.parse(store.get('sr.up.up-smoke-1') || 'null'); // 首片时抓本地会话记录
     return resp(200, { ok: true });
   }
-  if (u.includes('/_api/import-end')) { importEndN++; return resp(200, { ok: true, digest: 'sha256:smoke' }); }
-  if (u.includes('/_api/publish')) { publishN++; return resp(200, { ok: true, url: '/demo2/', port: 8101 }); }
+  if (u.includes('/_api/import-status')) { // 断点续传：返回该会话已收分片序号
+    importStatusN++;
+    const sid = u.match(/upload=([^&]+)/)?.[1];
+    return resp(200, { received: (upSessions[decodeURIComponent(sid || '')] || { received: [] }).received.slice(), total: 0 });
+  }
+  if (u.includes('/_api/import-end')) { importEndN++; delete upSessions[curUploadId]; return resp(200, { ok: true, digest: 'sha256:smoke' }); }
+  if (u.includes('/_api/publish')) {
+    publishAttempts++;
+    lastPublishBody = JSON.parse(dec2.decode(init.body));
+    dpPublishSnap = { txt: $s('dp-text').textContent || '' }; // publish 时状态条应处③发布中
+    if (publishFailOnce) { publishFailOnce = false; return resp(500, { error: 'E_NET', msg: '模拟发布失败' }); }
+    publishN++;
+    return resp(200, { ok: true, url: '/' + lastPublishBody.project + '/', port: 8101 });
+  }
+  // —— §12.2 身份与管理端点（非管理员/故障 → 404 E_AUTH 不可区分） ——
+  if (u.includes('/_api/whoami')) {
+    if (whoamiFail) return resp(404, { error: 'E_AUTH' });
+    return resp(200, { owner: 'alice', kid: 'kid-self', admin: whoamiAdmin });
+  }
+  if (u.includes('/_api/admin/owner-add')) { ownerAddBody = JSON.parse(dec2.decode(init.body)); return resp(200, { ok: true, kid: 'kid-new', registry_password: 'reg-pw-smoke' }); }
+  if (u.includes('/_api/admin/owner-revoke')) { revokeBodies.push(JSON.parse(dec2.decode(init.body))); return resp(200, { ok: true }); }
+  if (u.includes('/_api/admin/key-admin')) { keyAdminBodies.push(JSON.parse(dec2.decode(init.body))); return resp(200, { ok: true }); }
+  if (u.includes('/_api/admin/key-rm')) { keyRmBodies.push(JSON.parse(dec2.decode(init.body))); return resp(200, { ok: true }); }
+  if (u.includes('/_api/admin/owners')) { adminOwnersN++; if (adminFail404) return resp(404, { error: 'E_AUTH' }); return resp(200, ADM_OWNERS); }
+  if (u.includes('/_api/admin/status')) { adminStatusN++; if (adminFail404) return resp(404, { error: 'E_AUTH' }); return resp(200, ADM_STATUS); }
   if (u.includes('/_api/db-restore')) {
     restoreLens.push(init.body?.length ?? 0);
     return resp(200, { ok: true });
@@ -270,6 +351,8 @@ const load = (t) => import(pathToFileURL(file).href + `?t=${t}`);
 mode = 'unregistered';
 els.clear();
 await load(1);
+armTabs(); // tabs 方向键桩
+armBtnText(); // 按钮初始文案（busy 恢复断言用）
 await sleep(40);
 ok(shown('wz-p1') && hidden('wz-p2') && hidden('wz-p3'), '全新访问：仅第 1 步可见');
 ok($s('wz-s1').classList.contains('on') && !$s('wz-s2').classList.contains('on'), '步骤条指示 1/3');
@@ -299,21 +382,41 @@ await sleep(80);
 ok(hidden('login') && shown('app') && els.has('hd-owner'), '登记后重检：自动进入管理壳');
 ok($s('hd-owner').textContent === 'alice', '管理壳回显账号');
 ok(($s('proj-fb').textContent || '').includes('已加载 1 个展项'), '展项列表已请求并渲染');
+await sleep(60); // whoami 异步返回（§12.2）
+ok(!els.has('tab-admin') && !els.has('ad-owners-tbl') && !els.has('dlg-owner-add') && !els.has('ad-st-auto'),
+  'whoami admin=false：管理标签与全部管理 DOM 不存在（第五标签不渲染）');
 
-// —— 登录后 Redis 浏览（§10.3 三端点 + 交互） ——
+// —— 登录后 Redis 浏览（§10.3 三端点 + 交互；§13.2 普通用户视图） ——
 $s('rd-db').value = '3'; $s('rd-q').value = 'sr_';
 click('rd-refresh');
 await sleep(60);
 ok(($s('rd-db').innerHTML || '').includes('<option value="0">'), 'redis-dbs：填充 DB 下拉');
 ok(($s('rd-keys').innerHTML || '').includes('sr_demo'), 'redis-keys：key 列表渲染（前缀过滤请求）');
 ok($s('rd-count').textContent === '共 1 个 key（可能截断）', '「共 N 个 key（可能截断）」提示');
+ok(($s('rd-scope').textContent || '') === '', '§13.2 普通用户：DB 下拉无「管理员视图」标注');
 $s('rd-keys').value = 'sr_demo';
 fire($s('rd-keys'), 'change');
 await sleep(60);
 const rmeta = $s('rd-meta').textContent || '';
-ok(rmeta.includes('类型 string') && rmeta.includes('永久（-1）'), 'redis-get：类型 + 生存时间（-1=永久）');
+ok(rmeta.includes('类型 string') && rmeta.includes('永久（-1）'), 'redis-get：类型 + 生存时间（ttl_ms -1=永久）');
 ok(rmeta.includes('值已截断'), '值 ≥4KB：截断提示');
 ok($s('rd-val').textContent.length === 5000, '值以等宽 pre 原样展示');
+
+// —— §13.1 镜像清单（部署表单数据源）：进入发布区惰性加载 + 前缀过滤 ComboBox 数据 ——
+ok(imagesN === 1, '进入管理壳（发布区）：/_api/images 惰性加载一次');
+ok(($s('dl-images').innerHTML || '').includes('alice/demo:v1') && ($s('dl-images').innerHTML || '').includes('alice/demo2:v2'),
+  '镜像清单填充 ComboBox（datalist）');
+ok(!($s('dl-images').innerHTML || '').includes('bob/other'), '普通用户：清单不含他人镜像（服务端按 owner 过滤）');
+ok(($s('dep-images-fb').textContent || '').includes('您名下的镜像 2 个'), '普通用户：清单计数提示「您名下」');
+click('dep-images-refresh');
+await sleep(60);
+ok(imagesN === 2, '「刷新镜像清单」强制重取');
+
+// —— tablist 方向键切换（role=tablist 键盘约定） ——
+fire($s('tabs'), 'keydown', { key: 'ArrowRight', preventDefault() {}, target: tabBtn('proj') });
+ok(!hidden('tab-db') && hidden('tab-proj'), 'ArrowRight：proj → db 切换');
+fire($s('tabs'), 'keydown', { key: 'ArrowLeft', preventDefault() {}, target: tabBtn('db') });
+ok(!hidden('tab-proj') && hidden('tab-db'), 'ArrowLeft：db → proj 切回（首尾循环）');
 
 // —— §11 发布表单：随机项目名 + 「换一个」 + URL 恒 /<project>/ ——
 const rp1 = $s('pub-project').value;
@@ -404,16 +507,22 @@ ok(($s('db-out').textContent || '').includes('三段式下载完成'), 'dbOut �
   ok(zref.length < raw.length, `压缩率 > 1（${raw.length} → ${zref.length} 字节）`);
   ok(zstdAll([raw.slice(0, CHUNK8), raw.slice(CHUNK8)]).every((b, i) => b === zref[i]), '压缩产物确定性（重算逐字节一致）');
 
-  // 7a. 发布表单提交普通 tar → 自动压缩 → 分片导入 → 发布
+  // 7a. 一键部署（§12.1）：状态条四段流转——压缩 2 片 → 上传 2 chunk（数据片+收尾片）→ 发布 → 完成
   const fakeFile = (bytes, name) => ({
     name, size: bytes.length,
-    slice: (a, b) => { const c = bytes.slice(a, Math.min(b, bytes.length)); return { arrayBuffer: async () => c.buffer }; },
+    slice: (a, b) => { const c = bytes.slice(a, Math.min(b, bytes.length)); return { arrayBuffer: async () => { compSnaps.push($s('dp-text').textContent || ''); return c.buffer; } }; },
   });
   $s('pub-project').value = 'demo2';
   $s('pub-tag').value = 'v2';
   $s('pub-file').files = [fakeFile(raw, 'demo-img.tar')];
+  dpSnaps.length = 0; compSnaps.length = 0; dpBeginSnap = null; dpPublishSnap = null;
   fire($s('pub-form'), 'submit', { preventDefault() {} });
-  ok(await waitFor(() => publishN === 1, 30000), '压缩后分片上传完成并自动发布');
+  ok(await waitFor(() => publishN === 1, 30000), '一键部署：压缩 → 分片上传 → 发布全链路完成');
+  ok($s('dp-s1').classList.contains('done') && $s('dp-s2').classList.contains('done')
+    && $s('dp-s3').classList.contains('done') && $s('dp-s4').classList.contains('done'), '状态条①压缩②上传③发布④完成四段全部置为完成');
+  ok(!$s('dp-bar').classList.contains('err') && hidden('dp-retry'), '成功路径：状态条无标红、无重试按钮');
+  ok(shown('dp-done') && $s('dp-url').textContent === '/demo2/', '④完成段：大字 URL 展示（/demo2/）');
+  ok(compSnaps.some((t) => /① 压缩中.*%/.test(t)), `①压缩中（x%）进度文案出现（快照 ${compSnaps.filter((t) => t.includes('① 压缩中')).length} 条）`);
   ok(importBeginBody && importBeginBody.project === 'demo2' && importBeginBody.tag === 'v2', 'import-begin 携带项目与标签');
   ok(importBeginBody.total_bytes === sealedTotal(zref.length),
     `import-begin total_bytes 按压缩后长度申报（${importBeginBody.total_bytes} = 信封化 ${zref.length}）`);
@@ -421,7 +530,90 @@ ok(($s('db-out').textContent || '').includes('三段式下载完成'), 'dbOut �
     '本地会话记录 zsize=压缩后 / size=原文件（续传重压缩对账用）');
   ok(importChunkLens.reduce((a, b) => a + b, 0) === importBeginBody.total_bytes, '分片字节总和 = 信封总长');
   ok(importEndN === 1 && !store.has('sr.up.up-smoke-1'), 'import-end 完成：服务端会话消费、本地记录清除');
-  ok(($s('pub-fb').textContent || '').includes('发布成功'), '发布成功回显');
+  ok(dpSnaps.length === 2, `上传恰好 2 个 chunk 请求（1 数据片 + 1 收尾片，实际 ${dpSnaps.length}）`);
+  ok(dpSnaps.every((s) => s.m === importBeginBody.total_bytes), '②上传段进度 max = 压缩后信封总长');
+  ok(dpSnaps[0].v === 0 && dpSnaps[0].s2 === true, '首片请求时：②段进行中（on）、进度 0');
+  ok(/已传 \d+ \/ 压缩后总长/.test(dpSnaps[1].txt) && dpSnaps[1].v > 0, '②上传段文案「已传 / 压缩后总长」且进度推进');
+  ok(dpBeginSnap && dpBeginSnap.txt.includes('② 上传中'), 'import-begin 时已切入②上传段');
+  ok(dpPublishSnap && dpPublishSnap.txt.includes('③ 发布中'), 'publish 请求时处于③发布中');
+  ok(($s('dp-text').textContent || '').includes('④ 完成'), '最终文案为④完成');
+  click('dp-copy');
+  ok(($s('msg').textContent || '').includes('已复制'), '④完成段「复制地址」按钮可用（剪贴板降级路径）');
+
+  // 7a-2. 项目留空自动生成回填 + 发布失败标红 → 重试仅重发发布
+  publishFailOnce = true;
+  $s('pub-project').value = '';
+  $s('pub-file').files = [];
+  fire($s('pub-form'), 'submit', { preventDefault() {} });
+  ok(await waitFor(() => shown('dp-retry'), 8000), '发布失败：出现重试按钮');
+  ok($s('dp-bar').classList.contains('err'), '发布失败：状态条标红');
+  ok((($s('dp-text').textContent || '').includes('发布')) && ($s('dp-text').textContent || '').includes('失败'), '失败文案含「发布/失败」与错误说明');
+  ok(/^[a-zA-Z0-9]{8}$/.test(lastPublishBody.project) && $s('pub-project').value === lastPublishBody.project,
+    `项目名留空：自动生成随机 8 位并回填表单（${lastPublishBody.project}）`);
+  ok(($s('pub-url').textContent || '') === `/${lastPublishBody.project}/`, 'URL 提示随自动生成名联动');
+  ok($s('dp-s1').classList.contains('skip') && $s('dp-s2').classList.contains('skip'), '未选文件：①②段标记为跳过');
+  click('dp-retry');
+  ok(await waitFor(() => publishN === 2 && shown('dp-done'), 10000), '重试：仅重发发布并完成');
+  ok($s('dp-url').textContent === `/${lastPublishBody.project}/`, '完成 URL 与自动生成项目名一致');
+
+  // 7a-3. 上传失败 → 状态条标红提示断点续传 → 重试走 import-status 断点补传
+  const small = new Uint8Array(300000);
+  for (let i = 0; i < small.length; i++) small[i] = i % 251;
+  chunkFailN = 3; // 首片三连败（页面内部重试 3 次后放弃）
+  $s('pub-project').value = 'demo3';
+  $s('pub-tag').value = 'v3';
+  $s('pub-file').files = [fakeFile(small, 'small-img.tar')];
+  const importStatusBase = importStatusN;
+  fire($s('pub-form'), 'submit', { preventDefault() {} });
+  ok(await waitFor(() => shown('dp-retry'), 20000), '上传失败：出现重试按钮（片级 3 次重试后放弃）');
+  ok($s('dp-bar').classList.contains('err') && ($s('dp-text').textContent || '').includes('断点续传'), '上传失败：标红并提示从断点续传');
+  ok([...store.keys()].some((k) => k.startsWith('sr.up.')), '上传会话已登记本地（upload_id 可续传）');
+  ok(publishN === 2, '上传失败未触达发布');
+  chunkFailN = 0;
+  click('dp-retry');
+  ok(await waitFor(() => publishN === 3 && shown('dp-done'), 30000), '重试：断点续传补传后自动发布完成');
+  ok(importStatusN > importStatusBase, '重试经 import-status 查询已收分片（断点）');
+  ok(![...store.keys()].some((k) => k.startsWith('sr.up.')), '续传成功后本地会话记录清除');
+  ok($s('dp-url').textContent === '/demo3/', '重试后完成 URL 正确');
+
+  // 7a-4. §13.1 入口二「仅上传」：同一 tar 选择，只压缩上传入库——无 publish 调用、③④ skip
+  $s('pub-project').value = 'demo4';
+  $s('pub-tag').value = 'v4';
+  $s('pub-file').files = [];
+  fire($s('btn-upload-only'), 'click', { preventDefault() {} });
+  ok(($s('pub-file-err').textContent || '').includes('仅上传'), '仅上传未选文件：字段旁内联错误（含下一步指引）');
+  ok(importEndN === 2, '仅上传未选文件：未发起上传请求');
+  const small2 = new Uint8Array(200000);
+  for (let i = 0; i < small2.length; i++) small2[i] = i % 251;
+  $s('pub-file').files = [fakeFile(small2, 'only-up.tar')];
+  const pubBase = publishN, imgBase = imagesN;
+  fire($s('btn-upload-only'), 'click', { preventDefault() {} });
+  ok(await waitFor(() => importEndN === 3, 20000), '仅上传：压缩 → 分片上传 → import-end 完成');
+  await sleep(80);
+  ok(publishN === pubBase, '仅上传：全程无 publish 调用（不部署）');
+  ok($s('dp-s1').classList.contains('done') && $s('dp-s2').classList.contains('done'), '仅上传：①压缩②上传两段完成');
+  ok($s('dp-s3').classList.contains('skip') && $s('dp-s4').classList.contains('skip'), '仅上传：③发布④完成标记为跳过');
+  ok(($s('dp-text').textContent || '').includes('镜像已入库'), '仅上传完成文案：「镜像已入库」');
+  ok(($s('dp-text').textContent || '').includes('部署'), '仅上传完成文案：指引稍后从「部署」入口发布');
+  ok(hidden('dp-done'), '仅上传：不展示部署完成 URL 段');
+  ok(imagesN > imgBase, '仅上传完成后自动刷新镜像清单（新镜像即刻可选）');
+  ok(!$s('btn-upload-only').disabled && $s('btn-upload-only').textContent === '仅上传', '请求结束：按钮恢复原文与可用');
+
+  // 7c. §13.1 入口三「部署」表单：镜像 ComboBox 选择自动带出项目/标签 → 发布（旧版本单独部署路径）
+  $s('dep-image').value = 'alice/demo:v1';
+  fire($s('dep-image'), 'input');
+  ok($s('dep-project').value === 'demo' && $s('dep-tag').value === 'v1', '选中镜像：项目与标签自动带出（owner/project:tag 解析）');
+  $s('dep-mem').value = '512m'; $s('dep-cport').value = '9090';
+  fire($s('dep-form'), 'submit', { preventDefault() {} });
+  ok(await waitFor(() => ($s('dep-fb').textContent || '').includes('部署成功'), 8000), '部署表单：发布完成');
+  ok(lastPublishBody.project === 'demo' && lastPublishBody.tag === 'v1'
+    && lastPublishBody.mem === '512m' && lastPublishBody.container_port === 9090,
+    '部署表单提交体：镜像带出的项目/标签 + 内存需求 + 监听端口');
+  ok(($s('dep-fb').textContent || '').includes('/demo/'), '部署表单：完成提示含访问地址');
+  $s('dep-project').value = ''; $s('dep-tag').value = '';
+  fire($s('dep-form'), 'submit', { preventDefault() {} });
+  ok(($s('dep-project-err').textContent || '').includes('不合法'), '部署表单：项目校验为字段内联错误');
+  $s('dep-project').value = 'demo'; // 还原
 
   // 7b. 恢复上传魔数两态：已是 zstd（备份下载产物）原样；原生 -Fc 压缩后
   const plain = new Uint8Array(5 * 1024 * 1024 + 77); // > 4MiB：恢复信封跨 seal 段
@@ -447,15 +639,112 @@ ok(($s('db-out').textContent || '').includes('三段式下载完成'), 'dbOut �
   ok(($s('db-out').textContent || '').includes('压缩后'), '未压缩态回显「压缩后」');
 }
 
-// ═══ 场景 2：同浏览器再访（账号+种子匹配）→ 直达第 3 步自动进入 ═══
+// ═══ 场景 2：同浏览器再访（账号+种子匹配）→ 直达第 3 步自动进入；§12.2 管理员态 ═══
+whoamiAdmin = true; // 本次登录的钥匙是管理员钥匙
+imagesAdminView = true; // 服务端对 admin 钥匙返回全量镜像（§13.1）
 els.clear();
 await load(2);
+armBtnText(); // 发卡按钮初始文案（busy 恢复断言用）
 await sleep(80);
 ok(hidden('wz-p1') && hidden('wz-p2') && hidden('login') && shown('app'), '再访匹配账号：跳过 1/2 步直达验证并自动进入');
 ok(store.get('sr.seed') === seed1 && store.get('sr.owner') === 'alice', '种子与账号未被改动');
+await sleep(60); // whoami 异步返回
+ok(els.has('ad-owners-tbl') && els.has('ad-st-auto') && els.has('ad-refresh'),
+  'whoami admin=true：管理区 DOM 渲染（第五「管理」标签随 whoami 构建）');
 
-// ═══ 场景 3：种子在、账号缺（换了账号走完整向导；第 2 步默认「使用已有」） ═══
+// —— §13.1/§13.2 管理员视图：镜像清单（whoami 回退标注）+ Redis 浏览（admin_view 标注） ——
+ok(await waitFor(() => ($s('dep-images-fb').textContent || '').includes('管理员视图'), 5000),
+  'admin 钥匙：镜像清单标注「管理员视图」（whoami 落定后按需重取）');
+ok(($s('dl-images').innerHTML || '').includes('bob/other'), 'admin 钥匙：镜像清单含他人镜像（全量）');
+
+// —— 管理页：账号与钥匙表 + 平台状态面板（§12.2） ——
+clickTab('admin');
+await sleep(80);
+ok(els.has('tab-admin'), '第五标签面板（tab-admin）已进入渲染');
+ok(adminOwnersN === 1 && adminStatusN === 1, '进入管理页：owners 与 status 各自动拉取一次');
+const otbl = $s('ad-owners-tbl:q').innerHTML || '';
+ok(otbl.includes('alice') && otbl.includes('kid-a1') && otbl.includes('kid-b1'), '账号与钥匙表：账号 + 钥匙 kid 渲染');
+ok(otbl.includes('管理员') && otbl.includes('普通'), '管理员标记两态渲染');
+ok(otbl.includes('2026-09-01') && otbl.includes('项目数 2'), '登记时间与项目数展示');
+ok(otbl.includes('吊销整个账号') && otbl.includes('删除钥匙') && otbl.includes('设为管理员') && otbl.includes('取消管理员'),
+  '行内/顶部管理动作按钮渲染');
+const stHtml = $s('ad-status').innerHTML || '';
+ok(stHtml.includes('showroom-caddy') && stHtml.includes('showroom-redis'), '平台状态：四服务状态灯渲染');
+ok(stHtml.includes('运行中') && stHtml.includes('未运行'), '服务状态两态（active/inactive 中文）');
+ok(stHtml.includes('40G') && stHtml.includes('4096'), '磁盘与内存数字展示');
+ok(stHtml.includes('sr-demo') && stHtml.includes('sr-hello') && stHtml.includes('已退出'), '容器列表渲染（状态中文化）');
+ok(stHtml.includes('showroom-snapshot-hourly') && stHtml.includes('13:00'), 'timer 下次触发时间展示');
+const adStBase = adminStatusN;
+$s('ad-st-auto').checked = true;
+fire($s('ad-st-auto'), 'change');
+await sleep(60);
+ok(adminStatusN === adStBase + 1, '勾选「每 30 秒自动刷新」：立即刷新一次（间隔 30 秒）');
+$s('ad-st-auto').checked = false;
+fire($s('ad-st-auto'), 'change');
+
+// —— 发卡对话框（远程发卡）：提交体校验（字段内联错误+聚焦首错）+ registry 密码仅显示一次 ——
+click('ad-owner-add');
+ok($s('dlg-owner-add').open === true, '发卡对话框打开');
+click('ad-na-submit'); // 全空 → 账号名校验
+ok(ownerAddBody === null && ($s('ad-na-owner-err').textContent || '').includes('账号名'), '发卡校验：账号名不合法即内联拒绝（未发请求）');
+$s('ad-na-owner').value = 'newbie';
+$s('ad-na-pub').value = 'not-a-pubkey';
+click('ad-na-submit');
+ok(ownerAddBody === null && ($s('ad-na-pub-err').textContent || '').includes('ed25519:'), '发卡校验：公钥串格式内联拒绝（未发请求）');
+$s('ad-na-pub').value = 'ed25519:' + 'A'.repeat(43);
+click('ad-na-submit');
+await sleep(60);
+ok(ownerAddBody && ownerAddBody.owner === 'newbie' && ownerAddBody.pubkey.startsWith('ed25519:') && !('admin' in ownerAddBody),
+  '发卡提交体：账号 + 公钥（未勾选管理员则不带 admin 字段）');
+ok($s('ad-na-pw').textContent === 'reg-pw-smoke', '发卡结果：registry_password 字段展示为一次性密码');
+ok(!$s('ad-na-submit').disabled && $s('ad-na-submit').textContent === '发放', '发卡请求结束：按钮恢复原文与可用');
+$s('ad-na-owner').value = 'newbie2';
+$s('ad-na-admin').checked = true;
+click('ad-na-submit');
+await sleep(60);
+ok(ownerAddBody.admin === true, '勾选「同时授予管理员」→ 提交体 admin:true');
+click('ad-na-close');
+ok($s('dlg-owner-add').open === false, '发卡对话框关闭');
+
+// —— 行内管理动作：中文 confirm 文案 + 提交体（key-admin / key-rm / owner-revoke） ——
+confirmMsgs.length = 0;
+const act = (a, owner, kid) => fire($s('ad-owners-tbl'), 'click', { target: { closest: () => ({ dataset: { act: a, owner, kid } }) } });
+act('keyrm', 'bob', 'kid-b1');
+await sleep(60);
+ok(keyRmBodies.length === 1 && keyRmBodies[0].owner === 'bob' && keyRmBodies[0].kid === 'kid-b1', '删除钥匙：key-rm 提交体 {owner,kid}');
+ok((confirmMsgs.at(-1) || '').includes('删除') && (confirmMsgs.at(-1) || '').includes('失效'), '删除钥匙：confirm 中文文案写明影响');
+act('unadmin', 'alice', 'kid-a1');
+await sleep(60);
+ok(keyAdminBodies.some((b) => b.admin === false && b.kid === 'kid-a1'), '取消管理员：key-admin 提交体 admin:false');
+act('admin', 'bob', 'kid-b1');
+await sleep(60);
+ok(keyAdminBodies.some((b) => b.admin === true && b.kid === 'kid-b1'), '设为管理员：key-admin 提交体 admin:true');
+act('revoke', 'bob');
+await sleep(60);
+ok(revokeBodies.length === 1 && revokeBodies[0].owner === 'bob', '吊销整个账号：owner-revoke 提交体 {owner}');
+confirmRet = false; // confirm 拒绝：动作不得提交
+act('keyrm', 'bob', 'kid-b1');
+await sleep(60);
+ok(keyRmBodies.length === 1, 'confirm 取消：管理动作不提交');
+confirmRet = true;
+
+// —— admin 接口 404 E_AUTH（权限被收回等异常）：顶部条报错 ——
+adminFail404 = true;
+click('ad-refresh');
+await sleep(60);
+ok(($s('msg').textContent || '').includes('E_AUTH'), 'admin 接口 404 E_AUTH：顶部条报错');
+adminFail404 = false;
+
+// —— §13.2 Redis 浏览管理员视图（服务端 admin_view 标注路径） ——
+clickTab('status');
+await sleep(80);
+ok($s('rd-scope').textContent === '管理员视图', 'admin 钥匙：Redis 浏览 DB 下拉标注「管理员视图」（全量逻辑库）');
+clickTab('proj');
+whoamiAdmin = false;
+
+// ═══ 场景 3：种子在、账号缺（换了账号走完整向导；第 2 步默认「使用已有」）；whoami 失败 ═══
 mode = 'ok';
+whoamiFail = true; // §12.2：whoami 404 E_AUTH → 顶部条报错、管理标签不渲染
 store.delete('sr.owner');
 els.clear();
 await load(3);
@@ -473,6 +762,10 @@ click('wz-next2'); // 维持默认「使用已有」
 await sleep(80);
 ok(store.get('sr.seed') === seed1 && store.get('sr.owner') === 'bob', '沿用已有种子，记忆新账号');
 ok(hidden('login') && shown('app'), '验证通过进入管理壳');
+await sleep(60); // whoami 失败异步返回
+ok(($s('msg').textContent || '').includes('身份查询'), 'whoami 失败（404 E_AUTH）：顶部条报错');
+ok(!els.has('tab-admin') && !els.has('ad-owners-tbl'), 'whoami 失败：管理标签不渲染');
+whoamiFail = false;
 
 // ═══ 场景 4：「导入密钥种子」分支 ═══
 mode = 'ok';
@@ -486,14 +779,14 @@ fire($s('wz-r-import'), 'change'); // 选导入 → 出现粘贴框
 ok(shown('wz-import-box') && $s('wz-r-import').checked, '选「导入」：粘贴框出现');
 $s('wz-seed').value = 'not-hex!';
 click('wz-next2');
-ok(shown('wz-p2') && ($s('msg').textContent || '').includes('64 位十六进制'), '非法 seed：拒绝并停在第 2 步');
+ok(shown('wz-p2') && ($s('wz-seed-err').textContent || '').includes('64 位十六进制'), '非法 seed：字段内联拒绝并停在第 2 步');
 $s('wz-seed').value = seed1;
 click('wz-next2');
 await sleep(80);
 ok(store.get('sr.seed') === seed1 && store.get('sr.owner') === 'carl', '合法 seed 导入并记忆');
 ok(hidden('login') && shown('app'), '导入后验证通过进入管理壳');
 
-// ═══ 场景 5：静态断言（§10.2 更名 / §10.3+§10.4 端点 / §11 零残留） ═══
+// ═══ 场景 5：静态断言（§10.2 更名 / §10.3+§10.4 端点 / §11 零残留 / §12+§13 接入 / 界面规范） ═══
 ok(!html.includes('内存上限'), '§10.2：「内存上限」零残留');
 ok((html.match(/内存需求/g) || []).length >= 3, '§10.2：表单/帮助/错误文案均用「内存需求」');
 ok(!/槽位|slot/i.test(html), '§11：全 HTML「槽位/slot」零残留');
@@ -508,6 +801,52 @@ ok(!/lg-keygen|lg-importkey|lg-login|renderLoginState|doLogin\b/.test(html), '�
 ok(html.includes('compressToBlob') && html.includes('uploadPayload'), '上传压缩助手 compressToBlob/uploadPayload 已接入');
 ok(html.includes('sr_zstd_begin') && html.includes('sr_zstd_push') && html.includes('sr_zstd_end'), 'wasm zstd 压缩会话（sr_zstd_*）已接线');
 ok((html.match(/压缩后上传/g) || []).length >= 1, '上传进度文案标注「压缩后上传」');
+// —— §12.1 一键部署 ——
+ok(html.includes('一键部署'), '§12.1：「一键部署」入口存在');
+for (const s of ['① 压缩', '② 上传', '③ 发布', '④ 完成']) ok(html.includes(s), `§12.1：状态条分段「${s}」`);
+ok(html.includes('压缩后总长') && html.includes('断点续传') && html.includes('复制地址'), '§12.1：②段文案「已传/压缩后总长」+ 断点续传 + 完成段复制按钮');
+ok(html.includes('自动生成随机项目名') || html.includes('留空自动生成'), '§12.1：项目留空自动生成随机 8 位');
+ok(html.includes('重试'), '§12.1：失败可重试按钮');
+// —— §12.2 管理员 ——
+ok(html.includes('/_api/whoami'), '§12.2：whoami 已接入');
+for (const ep of ['/_api/admin/owners', '/_api/admin/owner-add', '/_api/admin/status', "'key-rm'", "'owner-revoke'", "'key-admin'"]) {
+  ok(html.includes(ep), `§12.2：${ep} 已接线（owner-revoke/key-rm/key-admin 经 ep 表驱动）`);
+}
+for (const s of ['发放新账号', '同时授予管理员', '仅显示一次', '吊销整个账号', '设为管理员', '取消管理员', '删除钥匙', '每 30 秒自动刷新', '平台状态', '管理']) {
+  ok(html.includes(s), `§12.2 新增文案全中文：${s}`);
+}
+// —— §13.1 三入口并存（一键不取代分步）+ §13.2/13.3 Redis 隔离 ——
+ok(html.includes('id="pub-submit"') && html.includes('id="btn-upload-only"') && html.includes('id="dep-submit"'),
+  '§13.1：三入口并存（一键部署 pub-submit / 仅上传 btn-upload-only / 部署 dep-submit）');
+for (const s of ['一键部署', '仅上传', '刷新镜像清单', '镜像已入库']) ok(html.includes(s), `§13.1：入口文案「${s}」`);
+ok(html.includes('/_api/images'), '§13.1：/_api/images 已接线（镜像 ComboBox 数据源）');
+ok(html.includes('list="dl-images"') && html.includes('id="dl-images"'), '§13.1：镜像 ComboBox（datalist 前缀过滤）');
+ok(html.includes('旧版本单独部署'), '§13.1：部署表单注明旧版本单独部署入口');
+ok(html.includes('仅显示您名下项目的库') && html.includes('管理员视图'), '§13.2/13.3：Redis 浏览隔离文案 + 管理员视图标注');
+ok(html.includes('界面级/协作级隔离') || html.includes('界面级'), '§13.2：诚实边界文案（非安全边界）');
+// —— 界面规范静态断言（B 部分逐条） ——
+ok(!/<div[^>]+onclick|onclick=/.test(html), '规范：无内联事件（含 div onclick）');
+ok(!/transition\s*:\s*all/.test(html), '规范：无 transition: all（过渡列明属性）');
+ok(!/outline\s*:\s*none/.test(html), '规范：无 outline:none 裸奔（:focus-visible 可见焦点）');
+ok(html.includes(':focus-visible'), '规范：:focus-visible 焦点样式存在');
+ok(html.includes('role="tablist"') && html.includes('role="tab"') && html.includes('role="tabpanel"') && html.includes('aria-selected'),
+  '规范：tablist/tab/tabpanel 语义 + aria-selected');
+ok(html.includes('aria-live="polite"'), '规范：异步反馈区 aria-live="polite"');
+ok(html.includes('prefers-reduced-motion'), '规范：prefers-reduced-motion 禁非必要过渡');
+ok(html.includes('overscroll-behavior: contain'), '规范：滚动容器 overscroll-behavior: contain');
+ok(html.includes('touch-action: manipulation'), '规范：touch-action: manipulation');
+ok(html.includes('font-variant-numeric: tabular-nums'), '规范：表格数字列 tabular-nums');
+ok(html.includes('name="theme-color"') && html.includes('color-scheme: dark'), '规范：theme-color + color-scheme: dark');
+ok(html.includes('select option {'), '规范：select option 显式配色');
+{
+  const ph = [...html.matchAll(/placeholder="([^"]*)"/g)].map((x) => x[1]);
+  ok(ph.length > 0 && ph.every((p) => p.endsWith('…')), `规范：占位符全部以 … 结尾（${ph.length} 处）`);
+}
+for (const id of ['wz-owner', 'pub-project', 'dep-image', 'db-project', 'rd-db', 'ad-na-owner']) {
+  ok(html.includes(`for="${id}"`), `规范：表单控件 label for="${id}"`);
+}
+ok(html.includes('showModal'), '规范：dialog 用 showModal（Esc/焦点圈闭/inert）');
+ok(!html.includes('id="pub-slot"') && !/>\s*(Deploy|Retry|Publish Now|Admin Panel)\s*</.test(html), '新增 UI 无英文按钮文案混排');
 
 console.log(failed === 0 ? '\nWIZARD SMOKE PASS' : `\nWIZARD SMOKE FAIL (${failed})`);
 process.exit(failed === 0 ? 0 : 1);
