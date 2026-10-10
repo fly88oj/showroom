@@ -1,30 +1,20 @@
 //! 签名 HTTP 客户端 + 服务端选择 + URL/查询拼接。
 //! 所有 /_api 端点（含 health/projects）均要求 SR-SIG1 签名（SPEC §3）。
+//! 错误统一为已渲染的 String（E_AUTH 附登记/时钟提示与公钥串），调用点直接 `?`。
 
 use std::fs::{self, File};
-use std::io::Read;
 use std::path::Path;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-use base64::engine::general_purpose::URL_SAFE_NO_PAD;
-use base64::engine::Engine as _;
 use clap::ValueEnum;
 use serde_json::Value;
-use sha2::{Digest, Sha256};
 
-use showroom_common::{build_canonical, ed25519_dalek, rsa, sign, OwnerKey};
+use showroom_common::{nonce_hex, sign, sign_prehashed, sha256_hex_stream, OwnerKey};
 
 use crate::config::Config;
 
 pub fn now_unix() -> i64 {
     SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_secs() as i64
-}
-
-pub fn nonce_hex() -> String {
-    use rand::RngCore;
-    let mut b = [0u8; 16]; // 16 随机字节 hex（SPEC §1 nonce 由调用方生成）
-    rand::rngs::OsRng.fill_bytes(&mut b);
-    b.iter().map(|x| format!("{x:02x}")).collect()
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug, ValueEnum)]
@@ -158,22 +148,15 @@ pub fn signed_probe<'a>(owner: &'a str, key: &'a OwnerKey) -> impl Fn(&str) -> b
 
 pub struct Api {
     pub base: String,
-    pub owner: String,
-    pub key: OwnerKey,
-    sk: ed25519_dalek::SigningKey, // 与 OwnerKey 同一 seed；用于大文件（预哈希）签名
+    owner: String,
+    key: OwnerKey,
     http: reqwest::blocking::Client,
 }
 
 impl Api {
-    fn load_key(path: &Path) -> Result<(OwnerKey, ed25519_dalek::SigningKey), String> {
-        let key = OwnerKey::from_seed_file(path)
-            .map_err(|e| format!("读取密钥 {} 失败：{e}（先运行 showroom keygen）", path.display()))?;
-        let seed = fs::read(path).map_err(|e| format!("读取密钥 {} 失败：{e}", path.display()))?;
-        let arr: [u8; 32] = seed
-            .as_slice()
-            .try_into()
-            .map_err(|_| format!("密钥 {} 非 32 字节 seed", path.display()))?;
-        Ok((key, ed25519_dalek::SigningKey::from_bytes(&arr)))
+    fn load_key(path: &Path) -> Result<OwnerKey, String> {
+        OwnerKey::from_seed_file(path)
+            .map_err(|e| format!("读取密钥 {} 失败：{e}（先运行 showroom keygen）", path.display()))
     }
 
     /// 探测（签名 health）+ 选择服务端 + 加载密钥。
@@ -185,7 +168,7 @@ impl Api {
             cfg.server_lan.as_deref(),
             cfg.server_public.as_deref(),
             force,
-            signed_probe(&cfg.owner, &Self::load_key(&cfg.key_file())?.0),
+            signed_probe(&cfg.owner, &Self::load_key(&cfg.key_file())?),
         )?;
         Self::open(base, cfg)
     }
@@ -195,25 +178,36 @@ impl Api {
         if cfg.owner.is_empty() {
             return Err("未配置 owner：showroom config --owner <name>".into());
         }
-        let (key, sk) = Self::load_key(&cfg.key_file())?;
+        let key = Self::load_key(&cfg.key_file())?;
         let http = reqwest::blocking::Client::builder()
             .timeout(Duration::from_secs(180)) // publish 服务端滚动发布可能较慢
             .build()
             .map_err(|e| format!("HTTP 客户端构造失败：{e}"))?;
-        Ok(Api { base, owner: cfg.owner.clone(), key, sk, http })
+        Ok(Api { base, owner: cfg.owner.clone(), key, http })
     }
 
-    pub fn signed_get(&self, path_q: &str) -> Result<Value, ApiError> {
+    /// 错误渲染收口：E_AUTH 附登记/时间偏差提示与公钥串，其余原样。
+    fn finish(&self, r: Result<Value, ApiError>) -> Result<Value, String> {
+        r.map_err(|e| e.render(&self.key.pub_string()))
+    }
+
+    pub fn signed_get(&self, path_q: &str) -> Result<Value, String> {
         let auth = sign(&self.owner, &self.key, "GET", path_q, b"", now_unix(), &nonce_hex());
-        self.http
-            .get(format!("{}{}", self.base, path_q))
-            .header("Authorization", auth)
-            .send()
-            .map_err(|e| net_err(format!("{}/{}`: {e}", self.base, path_q)))
-            .and_then(check)
+        self.finish(
+            self.http
+                .get(format!("{}{}", self.base, path_q))
+                .header("Authorization", auth)
+                .send()
+                .map_err(|e| net_err(format!("{}/{}`: {e}", self.base, path_q)))
+                .and_then(check),
+        )
     }
 
-    pub fn signed_post_json(&self, path_q: &str, body: &Value) -> Result<Value, ApiError> {
+    pub fn signed_post_json(&self, path_q: &str, body: &Value) -> Result<Value, String> {
+        self.finish(self.post_json_inner(path_q, body))
+    }
+
+    fn post_json_inner(&self, path_q: &str, body: &Value) -> Result<Value, ApiError> {
         let bytes = serde_json::to_vec(body).map_err(|e| net_err(e.to_string()))?;
         let auth = sign(&self.owner, &self.key, "POST", path_q, &bytes, now_unix(), &nonce_hex());
         self.http
@@ -226,19 +220,17 @@ impl Api {
             .and_then(check)
     }
 
-    /// 大文件流式上传：先流式 sha256，再对哈希签名（与 common::sign 同格式，避免整文件进内存）。
-    pub fn signed_post_file(&self, path_q: &str, file: &Path) -> Result<Value, ApiError> {
-        let hash = stream_sha256(file)?;
-        let (ts, nonce) = (now_unix(), nonce_hex());
-        let canonical = build_canonical(&self.owner, ts, &nonce, "POST", path_q, &hash);
-        use ed25519_dalek::Signer as _;
-        let sig = self.sk.sign(canonical.as_bytes());
-        let auth = format!(
-            "SR-SIG1 {}:{ts}:{nonce}:{}",
-            self.owner,
-            URL_SAFE_NO_PAD.encode(sig.to_bytes())
-        );
+    /// 大文件流式上传：先流式 sha256，再对哈希签名（与 sign 同格式，避免整文件进内存）。
+    pub fn signed_post_file(&self, path_q: &str, file: &Path) -> Result<Value, String> {
+        self.finish(self.signed_post_file_inner(path_q, file))
+    }
+
+    fn signed_post_file_inner(&self, path_q: &str, file: &Path) -> Result<Value, ApiError> {
         let f = File::open(file).map_err(|e| net_err(e.to_string()))?;
+        let hash = sha256_hex_stream(&f).map_err(|e| net_err(e.to_string()))?;
+        let auth = sign_prehashed(
+            &self.owner, &self.key, "POST", path_q, &hash, now_unix(), &nonce_hex(),
+        );
         let resp = reqwest::blocking::Client::new() // 上传走独立无超时语义：单请求放宽到 24h
             .post(format!("{}{}", self.base, path_q))
             .header("Authorization", auth)
@@ -251,40 +243,18 @@ impl Api {
     }
 }
 
-fn stream_sha256(path: &Path) -> Result<String, ApiError> {
-    let mut f = File::open(path).map_err(|e| net_err(e.to_string()))?;
-    let mut h = Sha256::new();
-    let mut buf = vec![0u8; 64 * 1024];
-    loop {
-        let n = f.read(&mut buf).map_err(|e| net_err(e.to_string()))?;
-        if n == 0 {
-            break;
-        }
-        h.update(&buf[..n]);
-    }
-    use sha2::Digest;
-    Ok(h.finalize().iter().map(|b| format!("{b:02x}")).collect())
-}
-
 /// 平台 RSA 公钥（import 通道信封用；由管理员提供，放 ~/.showroom/platform_rsa.pub）。
-pub fn load_platform_pub() -> Result<rsa::RsaPublicKey, String> {
-    use rsa::pkcs8::DecodePublicKey as _;
+pub fn load_platform_pub() -> Result<showroom_common::rsa::RsaPublicKey, String> {
+    use showroom_common::rsa::pkcs8::DecodePublicKey as _;
     let p = crate::config::expand("~/.showroom/platform_rsa.pub");
     let pem = fs::read_to_string(&p)
         .map_err(|_| format!("缺少平台公钥 {}（向管理员索取后放入该路径）", p.display()))?;
-    rsa::RsaPublicKey::from_public_key_pem(&pem).map_err(|e| format!("平台公钥解析失败：{e}"))
+    showroom_common::rsa::RsaPublicKey::from_public_key_pem(&pem)
+        .map_err(|e| format!("平台公钥解析失败：{e}"))
 }
 
 #[cfg(test)]
 mod tests {
-    #[test]
-    fn stream_sha256_known_vector() {
-        let p = std::env::temp_dir().join("sr-sha-test.bin");
-        std::fs::write(&p, b"hello").unwrap();
-        let h = super::stream_sha256(&p).unwrap_or_default();
-        assert_eq!(h, "2cf24dba5fb0a30e26e83b2ac5b9e29e1b161e5c1fa7425e73043362938b9824");
-    }
-
     use super::*;
 
     #[test]

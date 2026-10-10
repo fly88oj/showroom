@@ -15,19 +15,16 @@ use axum::extract::OriginalUri;
 use axum::http::{HeaderMap, Method, StatusCode};
 use axum::response::{IntoResponse, Response};
 use axum::{Json, Router};
-use base64::engine::general_purpose::URL_SAFE_NO_PAD;
-use base64::engine::Engine as _;
 use futures_util::StreamExt;
 use serde::Deserialize;
-use serde_json::{json, Value};
+use serde_json::json;
 use sha2::{Digest, Sha256};
 use tokio::io::AsyncWriteExt;
 
 use showroom_common as common;
-use showroom_common::ed25519_dalek::{Signature, Verifier, VerifyingKey};
 
 use crate::state::{self, ApiError, R};
-use crate::{dockerops, ops, publish};
+use crate::{ops, publish};
 
 pub const MAX_JSON_BODY: usize = 1024 * 1024;
 
@@ -92,35 +89,48 @@ async fn api_inner(s: &S, method: &Method, uri: &OriginalUri, headers: &HeaderMa
     let path = uri.path().to_string();
     let to_file = method == Method::POST && matches!(path.as_str(), "/_api/import" | "/_api/import-chunk");
     let (sha, collected) = collect_body(&s.root, body, to_file).await?;
+    // _tmp 落盘文件的兜底清理：验签失败/名字校验拒绝等任何提前返回都不留尸体
+    //（import/import_chunk 正常路径自删；remove 幂等，二次删除 NotFound 忽略）
+    let tmp_file = if let Collected::File(p) = &collected { Some(p.clone()) } else { None };
+    let r = dispatch(s, method, uri, &path, &sha, headers, &collected).await;
+    if let Some(p) = tmp_file {
+        let _ = std::fs::remove_file(p);
+    }
+    r
+}
+
+async fn dispatch(
+    s: &S,
+    method: &Method,
+    uri: &OriginalUri,
+    path: &str,
+    sha: &str,
+    headers: &HeaderMap,
+    collected: &Collected,
+) -> Result<Response, ApiError> {
     // 一切端点先验签（含未知路径/方法；SPEC §3 零信息暴露）
-    let owner = auth(s, method.as_str(), &uri_str(uri), &sha, headers).await?;
+    let owner = auth(s, method.as_str(), &uri_str(uri), sha, headers).await?;
     if matches!(collected, Collected::Overflow) {
         return Err(ApiError::new("E_QUOTA", "body exceeds limit (json 1MB / import IMPORT_MAX_GB)"));
     }
     let q = qmap(uri);
-    let r: Result<Json<Value>, ApiError> = match (method.as_str(), path.as_str(), collected) {
+    let r: Result<Json<serde_json::Value>, ApiError> = match (method.as_str(), path, collected) {
         ("GET", "/_api/health", _) => Ok(Json(json!({"ok": true}))),
 
         ("GET", "/_api/projects", _) => {
             let root = s.root.clone();
             blk(move || {
-                let mut v = vec![];
-                for (p, sl, c) in state::all_confs(&root) {
-                    let st = dockerops::container_status(&publish::container_name(&p, &sl))
-                        .unwrap_or_else(|| "missing".into());
-                    v.push(json!({
-                        "project": p, "slot": sl, "owner": c.owner, "tag": c.tag,
-                        "url": state::public_url(&p, &sl), "status": st,
-                        "port": c.port, "mem": c.mem, "cpu": c.cpu, "updated": c.updated,
-                    }));
-                }
+                let v: Vec<_> = ops::ps(&root)
+                    .into_iter()
+                    .map(|(p, sl, c, st)| c.to_json(&p, &sl, &st))
+                    .collect();
                 Ok(Json(json!({"projects": v})))
             })
             .await
         }
 
         ("POST", "/_api/publish", Collected::Mem(b)) => {
-            let req: PubReq = jbody(&b)?;
+            let req: PubReq = jbody(b)?;
             let root = s.root.clone();
             let o = blk(move || {
                 publish::publish(
@@ -141,16 +151,9 @@ async fn api_inner(s: &S, method: &Method, uri: &OriginalUri, headers: &HeaderMa
             "/_api/stop" | "/_api/start" | "/_api/rm" | "/_api/rollback",
             Collected::Mem(b),
         ) => {
-            let req: SlotReq = jbody(&b)?;
-            let conf = state::SlotConf::load(&s.root, &req.project, &req.slot)
-                .map_err(|_| ApiError::new("E_NOTFOUND", format!("no slot '{}/{}'", req.project, req.slot)))?;
-            if conf.owner != owner {
-                return Err(ApiError::new(
-                    "E_AUTH",
-                    format!("project '{}' belongs to {}", req.project, conf.owner),
-                ));
-            }
-            let act: &'static str = match path.as_str() {
+            let req: SlotReq = jbody(b)?;
+            own_check(&s.root, &req.project, &req.slot, &owner)?;
+            let act: &'static str = match path {
                 "/_api/stop" => "stop",
                 "/_api/start" => "start",
                 "/_api/rm" => "rm",
@@ -180,12 +183,13 @@ async fn api_inner(s: &S, method: &Method, uri: &OriginalUri, headers: &HeaderMa
             publish::check_ownership(&s.root, &project, &owner)?;
             let root = s.root.clone();
             let o = owner.clone();
+            let tmp = tmp.clone();
             let digest = blk(move || publish::import_from_file(&root, &o, &project, &slot, &tag, &tmp)).await?;
             Ok(Json(json!({"ok": true, "digest": digest})))
         }
 
         ("POST", "/_api/import-check", Collected::Mem(b)) => {
-            let req: IdReq = jbody(&b)?;
+            let req: IdReq = jbody(b)?;
             let present = blk(move || Ok(ops::import_check(&req.image_id))).await?;
             Ok(Json(json!({"present": present})))
         }
@@ -193,7 +197,7 @@ async fn api_inner(s: &S, method: &Method, uri: &OriginalUri, headers: &HeaderMa
         // —— 分片导入（SPEC §8.1；控制台用，CLI 单发不变）——
 
         ("POST", "/_api/import-begin", Collected::Mem(b)) => {
-            let req: BeginReq = jbody(&b)?;
+            let req: BeginReq = jbody(b)?;
             state::check_name("project", &req.project)?;
             state::check_name("slot", &req.slot)?;
             publish::check_tag(&req.tag)?;
@@ -214,6 +218,7 @@ async fn api_inner(s: &S, method: &Method, uri: &OriginalUri, headers: &HeaderMa
                 .map_err(|_| ApiError::new("E_NAME", "bad seq"))?;
             let root = s.root.clone();
             let o = owner.clone();
+            let tmp = tmp.clone();
             let n = blk(move || publish::import_chunk(&root, &o, &id, seq, &tmp)).await?;
             Ok(Json(json!({"ok": true, "received": n})))
         }
@@ -326,8 +331,11 @@ async fn collect_body(root: &Path, body: Body, to_file: bool) -> R<(String, Coll
         }
         return Err(e);
     }
-    if let Some((_, f)) = tmp.as_mut() {
-        f.flush().await.map_err(|e| ApiError::state(format!("tmp flush: {e}")))?;
+    if let Some((p, f)) = tmp.as_mut() {
+        if let Err(e) = f.flush().await {
+            let _ = std::fs::remove_file(p);
+            return Err(ApiError::state(format!("tmp flush: {e}")));
+        }
     }
     let sha = hex::encode(hasher.finalize());
     let collected = if over {
@@ -340,42 +348,7 @@ async fn collect_body(root: &Path, body: Body, to_file: bool) -> R<(String, Coll
     Ok((sha, collected))
 }
 
-// —— SR-SIG1 验签（预计算哈希版）+ nonce 查重 ——
-
-/// common::verify 需要 body 本体；import 只落盘+哈希，故此处按同一 canonical 语义自验。
-/// 语义与 common::verify 完全一致：格式 → ±300s → 任一登记公钥命中。
-fn verify_with_hash(
-    auth_value: &str,
-    pubkeys: &[VerifyingKey],
-    method: &str,
-    path_q: &str,
-    body_sha_hex: &str,
-    now: i64,
-) -> std::result::Result<common::Verified, common::AuthError> {
-    let rest = auth_value.strip_prefix("SR-SIG1 ").ok_or(common::AuthError::Format)?;
-    let mut it = rest.splitn(4, ':');
-    let (owner, ts, nonce, sig_b64) = match (it.next(), it.next(), it.next(), it.next()) {
-        (Some(a), Some(b), Some(c), Some(d)) => (a, b, c, d),
-        _ => return Err(common::AuthError::Format),
-    };
-    if owner.is_empty() || nonce.is_empty() {
-        return Err(common::AuthError::Format);
-    }
-    let ts: i64 = ts.parse().map_err(|_| common::AuthError::Format)?;
-    let raw = URL_SAFE_NO_PAD.decode(sig_b64).map_err(|_| common::AuthError::Format)?;
-    let arr: [u8; 64] = raw.try_into().map_err(|_| common::AuthError::Format)?;
-    let sig = Signature::from_bytes(&arr);
-    if (now - ts).abs() > common::SIG_WINDOW_SECS {
-        return Err(common::AuthError::Stale);
-    }
-    let canonical = common::build_canonical(owner, ts, nonce, method, path_q, body_sha_hex);
-    for vk in pubkeys {
-        if vk.verify(canonical.as_bytes(), &sig).is_ok() {
-            return Ok(common::Verified { owner: owner.to_owned(), ts, nonce: nonce.to_owned() });
-        }
-    }
-    Err(common::AuthError::BadSignature)
-}
+// —— SR-SIG1 验签（common::verify_with_hash，预计算哈希版）+ nonce 查重 ——
 
 /// nonce 查重 + 惰性清理（过期条目随每次插入移除）。
 fn nonce_fresh(m: &mut HashMap<String, i64>, owner: &str, nonce: &str, now: i64) -> bool {
@@ -396,7 +369,7 @@ async fn auth(s: &S, method: &str, uri: &str, body_sha: &str, headers: &HeaderMa
         .ok_or_else(|| ApiError::new("E_AUTH", "missing Authorization"))?;
     let owner = authv.strip_prefix("SR-SIG1 ").and_then(|r| r.split(':').next()).unwrap_or("");
     let pubkeys = if owner.is_empty() { vec![] } else { state::owner_pubkeys(&s.root, owner) };
-    let v = verify_with_hash(authv, &pubkeys, method, uri, body_sha, now).map_err(|e| {
+    let v = common::verify_with_hash(authv, &pubkeys, method, uri, body_sha, now).map_err(|e| {
         eprintln!("showroomctl: auth fail: {e:?} {method} {uri}");
         ApiError::new("E_AUTH", e.to_string())
     })?;
@@ -487,26 +460,26 @@ mod tests {
     use super::*;
     use showroom_common::sha256_hex;
 
-    // 预计算哈希验签：往返 / body 哈希不匹配 / 过期
+    // 预计算哈希验签（common）：往返 / body 哈希不匹配 / 过期
     #[test]
     fn verify_hash_roundtrip() {
         let k = showroom_common::OwnerKey::generate();
         let body = br#"{"project":"demo"}"#;
         let authv = showroom_common::sign("alice", &k, "POST", "/_api/publish", body, 1000, "aabb0011ccdd2233");
         let vk = [showroom_common::OwnerKey::from_pub_string(&k.pub_string()).unwrap()];
-        let v = verify_with_hash(&authv, &vk, "POST", "/_api/publish", &sha256_hex(body), 1000).unwrap();
+        let v = common::verify_with_hash(&authv, &vk, "POST", "/_api/publish", &sha256_hex(body), 1000).unwrap();
         assert_eq!((v.owner.as_str(), v.nonce.as_str()), ("alice", "aabb0011ccdd2233"));
 
         assert_eq!(
-            verify_with_hash(&authv, &vk, "POST", "/_api/publish", &sha256_hex(b"x"), 1000),
+            common::verify_with_hash(&authv, &vk, "POST", "/_api/publish", &sha256_hex(b"x"), 1000),
             Err(common::AuthError::BadSignature)
         );
         assert_eq!(
-            verify_with_hash(&authv, &vk, "POST", "/_api/publish", &sha256_hex(body), 1000 + 301),
+            common::verify_with_hash(&authv, &vk, "POST", "/_api/publish", &sha256_hex(body), 1000 + 301),
             Err(common::AuthError::Stale)
         );
         assert_eq!(
-            verify_with_hash("garbage", &vk, "POST", "/_api/publish", &sha256_hex(body), 1000),
+            common::verify_with_hash("garbage", &vk, "POST", "/_api/publish", &sha256_hex(body), 1000),
             Err(common::AuthError::Format)
         );
     }

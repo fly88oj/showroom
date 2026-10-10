@@ -180,16 +180,7 @@ fn dispatch(cli: &Cli) -> R<()> {
         Cmd::Ps => {
             let rows = ops::ps(&root);
             if j {
-                let v: Vec<_> = rows
-                    .iter()
-                    .map(|(p, s, c, st)| {
-                        json!({
-                            "project": p, "slot": s, "owner": c.owner, "tag": c.tag,
-                            "url": state::public_url(p, s), "status": st,
-                            "port": c.port, "mem": c.mem, "cpu": c.cpu, "updated": c.updated,
-                        })
-                    })
-                    .collect();
+                let v: Vec<_> = rows.iter().map(|(p, s, c, st)| c.to_json(p, s, st)).collect();
                 println!("{}", json!({"projects": v}));
             } else {
                 println!(

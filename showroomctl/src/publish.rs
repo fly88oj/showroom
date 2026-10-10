@@ -34,13 +34,9 @@ pub fn image_ref(owner: &str, p: &str, tag: &str) -> String {
     format!("127.0.0.1:5000/{owner}/{p}:{tag}")
 }
 
-/// tag 非空且不含空白与 '/'（镜像 tag 语法）。
+/// docker tag 规则（转发 common::names：首字符字母/数字/_，余 [A-Za-z0-9_.-]，≤128）。
 pub fn check_tag(tag: &str) -> R<()> {
-    if tag.is_empty() || tag.chars().any(|c| c.is_whitespace() || c == '/') {
-        Err(ApiError::new("E_NAME", format!("bad tag '{tag}'")))
-    } else {
-        Ok(())
-    }
+    showroom_common::names::check_tag(tag).map_err(|e| ApiError::new("E_NAME", e))
 }
 
 /// project 归属首个创建者：任一现存 slot.conf 的 owner 必须等于本次发布者。
@@ -141,7 +137,7 @@ pub fn publish(
     let env_file = env_file.to_str().ok_or_else(|| ApiError::state("non-utf8 env path"))?;
     let publish_port = format!("{bind}:{port}:{cport}");
     let cpu_s = cpu.to_string();
-    let net = dockerops::docker_network();
+    let net = dockerops::DOCKER_NET;
     let image = image_ref(owner, project, tag);
     let run_res = dockerops::docker(&[
         "run", "-d", "--name", &newname, "--network", &net, "--restart", "unless-stopped",
@@ -253,6 +249,12 @@ pub fn import_from_file(
     res
 }
 
+/// 提前返回前杀掉并回收 docker load 子进程（防僵尸；对已退出进程 kill/wait 只是 Err，忽略）。
+fn kill_wait(child: &mut std::process::Child) {
+    let _ = child.kill();
+    let _ = child.wait();
+}
+
 fn import_inner(root: &Path, owner: &str, project: &str, _slot: &str, tag: &str, sealed: &Path) -> R<String> {
     use showroom_common::rsa::pkcs8::DecodePrivateKey;
 
@@ -271,17 +273,40 @@ fn import_inner(root: &Path, owner: &str, project: &str, _slot: &str, tag: &str,
         .spawn()
         .map_err(|e| ApiError::state(format!("spawn docker load: {e}")))?;
     let stdin = child.stdin.take().unwrap();
-    let mut zw = zstd::stream::write::Decoder::new(stdin)
-        .map_err(|e| ApiError::state(format!("zstd decoder init: {e}")))?;
-    let plain_bytes = showroom_common::open(&priv_key, fs::File::open(sealed)?, &mut zw)
-        .map_err(|e| ApiError::state(format!("decrypt envelope: {e}")))?;
+    let mut zw = match zstd::stream::write::Decoder::new(stdin) {
+        Ok(z) => z,
+        Err(e) => {
+            kill_wait(&mut child);
+            return Err(ApiError::state(format!("zstd decoder init: {e}")));
+        }
+    };
+    let plain_bytes = {
+        let sealed_file = match fs::File::open(sealed) {
+            Ok(f) => f,
+            Err(e) => {
+                kill_wait(&mut child);
+                return Err(ApiError::state(format!("open sealed envelope: {e}")));
+            }
+        };
+        match showroom_common::open(&priv_key, sealed_file, &mut zw) {
+            Ok(n) => n,
+            Err(e) => {
+                kill_wait(&mut child);
+                return Err(ApiError::state(format!("decrypt envelope: {e}")));
+            }
+        }
+    };
     if plain_bytes > cap {
+        kill_wait(&mut child);
         return Err(ApiError::new(
             "E_QUOTA",
             format!("decrypted payload exceeds IMPORT_MAX_GB={}GB", cap >> 30),
         ));
     }
-    zw.flush().map_err(|e| ApiError::state(format!("zstd flush: {e}")))?;
+    if let Err(e) = zw.flush() {
+        kill_wait(&mut child);
+        return Err(ApiError::state(format!("zstd flush: {e}")));
+    }
     drop(zw); // write::Decoder 无 finish()：flush 排空缓冲，drop 关闭 docker load 的 stdin（EOF）
     let out = child
         .wait_with_output()
@@ -429,6 +454,8 @@ fn import_chunk_inner(root: &Path, owner: &str, id: &str, seq: u64, chunk: &Path
 }
 
 /// end：归属复核 + bin 字节数必须等于 total → 复用单发 import 管道 → 删会话。
+/// .bin 一旦进入 import_from_file 即被消费（成败都删），.meta 随之无论成败一并清；
+/// 字节不足（E_QUOTA）保留会话供续传（SPEC §8.1），归属不符（E_AUTH）不动他人会话。
 pub fn import_end(root: &Path, owner: &str, id: &str) -> R<String> {
     let m = load_meta_owned(root, id, owner)?;
     check_ownership(root, &m.project, owner)?;
@@ -437,8 +464,13 @@ pub fn import_end(root: &Path, owner: &str, id: &str) -> R<String> {
     if have != m.total {
         return Err(ApiError::new("E_QUOTA", format!("upload incomplete: {have}/{} bytes", m.total)));
     }
-    // import_from_file 自删 .bin（成败都删）；meta 随后删（bin 已亡，会话一次性）
-    let d = import_from_file(root, owner, &m.project, &m.slot, &m.tag, &bin)?;
+    let d = match import_from_file(root, owner, &m.project, &m.slot, &m.tag, &bin) {
+        Ok(d) => d,
+        Err(e) => {
+            let _ = fs::remove_file(upload_meta(root, id));
+            return Err(e);
+        }
+    };
     let _ = fs::remove_file(upload_meta(root, id));
     Ok(d)
 }
@@ -517,5 +549,19 @@ mod tests {
         assert_eq!(import_begin(&root, "alice", "demo", "stable", "a/b", "i", 10).unwrap_err().code, "E_NAME");
         // 8GB 边界通过
         assert!(import_begin(&root, "alice", "demo", "stable", "v1", "i", 8 << 30).is_ok());
+    }
+
+    // A6 回归：end 进入 import 管道后失败（root 无 platform_rsa，解密前即败）→ .bin/.meta 双清
+    #[test]
+    fn import_end_failure_cleans_bin_and_meta() {
+        let root = troot("end-clean");
+        let id = import_begin(&root, "alice", "demo", "stable", "v1", "sha256:x", 4).unwrap();
+        import_chunk(&root, "alice", &id, 0, &chunk_file(&root, b"abcd")).unwrap();
+        let (bin, meta) = (upload_bin(&root, &id), upload_meta(&root, &id));
+        assert!(bin.exists() && meta.exists());
+        assert!(import_end(&root, "alice", &id).is_err());
+        assert!(!bin.exists(), ".bin cleaned");
+        assert!(!meta.exists(), ".meta cleaned");
+        assert_eq!(import_end(&root, "alice", &id).unwrap_err().code, "E_NOTFOUND");
     }
 }

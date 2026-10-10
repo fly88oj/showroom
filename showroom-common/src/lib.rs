@@ -57,6 +57,96 @@ pub fn sha256_hex(data: &[u8]) -> String {
     hex::encode(Sha256::digest(data))
 }
 
+/// 流式 sha256（64KiB 缓冲）：大文件先哈希再签名（sign_prehashed），避免整文件进内存。
+pub fn sha256_hex_stream(mut r: impl Read) -> io::Result<String> {
+    let mut h = Sha256::new();
+    let mut buf = vec![0u8; 64 * 1024];
+    loop {
+        let n = r.read(&mut buf)?;
+        if n == 0 {
+            return Ok(hex::encode(h.finalize()));
+        }
+        h.update(&buf[..n]);
+    }
+}
+
+/// SR-SIG1 nonce：16 随机字节 hex（SPEC §1 nonce 由调用方生成）。
+pub fn nonce_hex() -> String {
+    let mut b = [0u8; 16];
+    OsRng.fill_bytes(&mut b);
+    hex::encode(b)
+}
+
+/// 0600 落盘（覆盖旧文件偏宽权限），父目录惰性创建。凭据/密钥类文件统一走这里。
+#[cfg(not(target_arch = "wasm32"))]
+pub fn write_private(path: &Path, bytes: &[u8]) -> io::Result<()> {
+    if let Some(dir) = path.parent() {
+        if !dir.as_os_str().is_empty() {
+            fs::create_dir_all(dir)?;
+        }
+    }
+    let mut f = fs::OpenOptions::new()
+        .write(true)
+        .create(true)
+        .truncate(true)
+        .mode(0o600)
+        .open(path)?;
+    f.write_all(bytes)?;
+    // 覆盖已存在文件可能偏宽的旧权限
+    fs::set_permissions(path, fs::Permissions::from_mode(0o600))?;
+    Ok(())
+}
+
+// ———— 名字校验（SPEC §4：正则同 project/slot；保留名只约束 project，slot 仅正则）————
+
+pub mod names {
+    /// `^[a-z0-9][a-z0-9-]{0,30}$`（总长 1..=31，ASCII，手写避免 regex 依赖）。
+    pub fn valid_name(s: &str) -> bool {
+        let b = s.as_bytes();
+        !b.is_empty()
+            && b.len() <= 31
+            && (b[0].is_ascii_lowercase() || b[0].is_ascii_digit())
+            && b.iter().all(|&c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == b'-')
+    }
+
+    /// docker tag 规则：首字符 [A-Za-z0-9_]，其余 [A-Za-z0-9_.-]，总长 ≤128。
+    pub fn valid_tag(s: &str) -> bool {
+        let b = s.as_bytes();
+        !b.is_empty()
+            && b.len() <= 128
+            && (b[0].is_ascii_alphanumeric() || b[0] == b'_')
+            && b.iter().all(|&c| c.is_ascii_alphanumeric() || matches!(c, b'_' | b'.' | b'-'))
+    }
+
+    pub const RESERVED: [&str; 4] = ["v2", "_api", "_bootstrap", "_console"];
+
+    /// slot 仅正则（保留名不约束 slot）。
+    pub fn check_slot(s: &str) -> Result<(), String> {
+        if valid_name(s) {
+            Ok(())
+        } else {
+            Err(format!("非法 slot '{s}'：须匹配 ^[a-z0-9][a-z0-9-]{{0,30}}$"))
+        }
+    }
+
+    /// project = slot 正则 + 保留名。
+    pub fn check_project(s: &str) -> Result<(), String> {
+        check_slot(s).map_err(|_| format!("非法 project '{s}'：须匹配 ^[a-z0-9][a-z0-9-]{{0,30}}$"))?;
+        if RESERVED.contains(&s) {
+            return Err(format!("project '{s}' 是保留名"));
+        }
+        Ok(())
+    }
+
+    pub fn check_tag(s: &str) -> Result<(), String> {
+        if valid_tag(s) {
+            Ok(())
+        } else {
+            Err(format!("非法 tag '{s}'：首字符字母/数字/_，仅 [A-Za-z0-9_.-]，≤128 字符"))
+        }
+    }
+}
+
 // ———— SR-SIG1（SPEC §1）————
 
 pub struct OwnerKey(SigningKey);
@@ -80,20 +170,7 @@ impl OwnerKey {
     /// 写裸 32B seed（0600；wasm32 无文件系统语义，仅原生提供）。
     #[cfg(not(target_arch = "wasm32"))]
     pub fn save_seed(&self, path: &Path) -> Result<()> {
-        if let Some(dir) = path.parent() {
-            if !dir.as_os_str().is_empty() {
-                fs::create_dir_all(dir)?;
-            }
-        }
-        let mut f = fs::OpenOptions::new()
-            .write(true)
-            .create(true)
-            .truncate(true)
-            .mode(0o600)
-            .open(path)?;
-        f.write_all(&self.0.to_bytes())?;
-        // 覆盖已存在文件可能偏宽的旧权限
-        fs::set_permissions(path, fs::Permissions::from_mode(0o600))?;
+        write_private(path, &self.0.to_bytes())?;
         Ok(())
     }
 
@@ -129,7 +206,7 @@ pub fn build_canonical(
 }
 
 /// 生成完整 Authorization 值 `SR-SIG1 <owner>:<ts>:<nonce>:<sig_b64url>`（sig 为 base64url 无 padding）。
-/// nonce 由调用方生成（SPEC 建议 8 随机字节的 hex16）；method 传大写。
+/// nonce 由调用方生成（nonce_hex）；method 传大写。
 pub fn sign(
     owner: &str,
     key: &OwnerKey,
@@ -139,9 +216,23 @@ pub fn sign(
     now_unix: i64,
     nonce: &str,
 ) -> String {
-    let canonical = build_canonical(owner, now_unix, nonce, method, path_with_query, &sha256_hex(body));
+    sign_prehashed(owner, key, method, path_with_query, &sha256_hex(body), now_unix, nonce)
+}
+
+/// 预哈希签名：body 哈希由调用方算好（sha256_hex/ sha256_hex_stream），
+/// 与 sign 同格式——大文件流式上传先哈希再签，避免整文件进内存。
+pub fn sign_prehashed(
+    owner: &str,
+    key: &OwnerKey,
+    method: &str,
+    path_with_query: &str,
+    body_sha256_hex: &str,
+    ts: i64,
+    nonce: &str,
+) -> String {
+    let canonical = build_canonical(owner, ts, nonce, method, path_with_query, body_sha256_hex);
     let sig = key.0.sign(canonical.as_bytes()).to_bytes();
-    format!("SR-SIG1 {owner}:{now_unix}:{nonce}:{}", URL_SAFE_NO_PAD.encode(sig))
+    format!("SR-SIG1 {owner}:{ts}:{nonce}:{}", URL_SAFE_NO_PAD.encode(sig))
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -180,6 +271,19 @@ pub fn verify(
     body: &[u8],
     now_unix: i64,
 ) -> std::result::Result<Verified, AuthError> {
+    verify_with_hash(auth_value, pubkeys, method, path_with_query, &sha256_hex(body), now_unix)
+}
+
+/// 预计算哈希版验签：与 verify 完全同语义（格式 → ±300s → 任一登记公钥命中），
+/// body 只认 sha256_hex——import 等只落盘+哈希、不留 body 本体的调用方复用。
+pub fn verify_with_hash(
+    auth_value: &str,
+    pubkeys: &[VerifyingKey],
+    method: &str,
+    path_q: &str,
+    body_sha_hex: &str,
+    now: i64,
+) -> std::result::Result<Verified, AuthError> {
     let rest = auth_value.strip_prefix("SR-SIG1 ").ok_or(AuthError::Format)?;
     let mut parts = rest.splitn(4, ':');
     let (owner, ts, nonce, sig_b64) = match (parts.next(), parts.next(), parts.next(), parts.next())
@@ -194,10 +298,10 @@ pub fn verify(
     let raw = URL_SAFE_NO_PAD.decode(sig_b64).map_err(|_| AuthError::Format)?;
     let sig_arr: [u8; 64] = raw.try_into().map_err(|_| AuthError::Format)?;
     let sig = Signature::from_bytes(&sig_arr);
-    if (now_unix - ts).abs() > SIG_WINDOW_SECS {
+    if (now - ts).abs() > SIG_WINDOW_SECS {
         return Err(AuthError::Stale);
     }
-    let canonical = build_canonical(owner, ts, nonce, method, path_with_query, &sha256_hex(body));
+    let canonical = build_canonical(owner, ts, nonce, method, path_q, body_sha_hex);
     for vk in pubkeys {
         if vk.verify(canonical.as_bytes(), &sig).is_ok() {
             return Ok(Verified {
@@ -222,17 +326,9 @@ impl PlatformKeys {
     /// 写 `<dir>/platform_rsa`（PKCS#8 PEM，0600）与 `<dir>/platform_rsa.pub`，返回私钥路径。
     #[cfg(not(target_arch = "wasm32"))]
     pub fn save_pem(&self, dir: &Path) -> Result<PathBuf> {
-        fs::create_dir_all(dir)?;
         let priv_path = dir.join("platform_rsa");
         let pem = self.0.to_pkcs8_pem(LineEnding::LF)?;
-        let mut f = fs::OpenOptions::new()
-            .write(true)
-            .create(true)
-            .truncate(true)
-            .mode(0o600)
-            .open(&priv_path)?;
-        f.write_all(pem.as_bytes())?;
-        fs::set_permissions(&priv_path, fs::Permissions::from_mode(0o600))?;
+        write_private(&priv_path, pem.as_bytes())?;
         fs::write(dir.join("platform_rsa.pub"), self.public_pem().as_bytes())?;
         Ok(priv_path)
     }
@@ -499,5 +595,61 @@ mod tests {
         let loaded = PlatformKeys::load_pem(&dir).unwrap();
         assert_eq!(loaded.public_pem(), platform().public_pem());
         let _ = fs::remove_dir_all(&dir);
+    }
+
+    // 9. 名字规则统一（SPEC §4）：保留名只约束 project；slot 仅正则。
+    //    （_api/_bootstrap/_console 首字符即不合正则，真正的分歧点只有 v2）
+    #[test]
+    fn names_reserved_project_only() {
+        assert!(names::check_project("demo").is_ok());
+        assert!(names::check_slot("pr42").is_ok());
+        for r in names::RESERVED {
+            assert!(names::check_project(r).is_err(), "project 保留名应拒: {r}");
+        }
+        assert!(names::check_slot("v2").is_ok(), "slot 不受保留名约束");
+        for bad in ["", "-a", "Aa", "a_b", "a b", "a.b", "a/b", "中文", &"a".repeat(32)] {
+            assert!(names::check_slot(bad).is_err(), "slot 应拒: {bad}");
+            assert!(names::check_project(bad).is_err(), "project 应拒: {bad}");
+        }
+        for t in ["v1", "1.0.0", "latest", "a_b.c-d", "0", &"a".repeat(128)] {
+            assert!(names::check_tag(t).is_ok(), "tag 应合法: {t}");
+        }
+        for t in ["", ".x", "-x", "a b", "a/b", "中", &"a".repeat(129)] {
+            assert!(names::check_tag(t).is_err(), "tag 应拒: {t}");
+        }
+    }
+
+    // 10. 预哈希签名 / 流式哈希：与 sign/verify 同语义往返 + 已知向量
+    #[test]
+    fn prehashed_sign_verify_and_stream_hash() {
+        let hash = sha256_hex_stream(Cursor::new(b"stream-me")).unwrap();
+        assert_eq!(hash, sha256_hex(b"stream-me"));
+        assert_eq!(
+            sha256_hex_stream(Cursor::new(b"")).unwrap(),
+            "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+        );
+        let k = OwnerKey::generate();
+        let pq = "/_api/import?project=demo&slot=stable&tag=v1";
+        let auth = sign_prehashed("alice", &k, "POST", pq, &hash, 7, "aabb0011ccdd2233");
+        let vk = [k.0.verifying_key()];
+        let v = verify_with_hash(&auth, &vk, "POST", pq, &hash, 7).unwrap();
+        assert_eq!((v.owner.as_str(), v.nonce.as_str()), ("alice", "aabb0011ccdd2233"));
+        assert_eq!(
+            verify_with_hash(&auth, &vk, "POST", pq, &sha256_hex(b"other"), 7),
+            Err(AuthError::BadSignature)
+        );
+    }
+
+    // 11. write_private：0600、内容、覆盖偏宽权限后收紧
+    #[test]
+    fn write_private_is_0600() {
+        let p = tmp("priv.bin");
+        write_private(&p, b"secret").unwrap();
+        assert_eq!(fs::read(&p).unwrap(), b"secret");
+        assert_eq!(fs::metadata(&p).unwrap().permissions().mode() & 0o777, 0o600);
+        fs::set_permissions(&p, fs::Permissions::from_mode(0o644)).unwrap();
+        write_private(&p, b"again").unwrap();
+        assert_eq!(fs::metadata(&p).unwrap().permissions().mode() & 0o777, 0o600);
+        let _ = fs::remove_file(&p);
     }
 }

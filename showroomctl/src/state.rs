@@ -4,15 +4,14 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
-use std::io::Write;
 use std::path::{Path, PathBuf};
 
+use serde_json::{json, Value};
 use showroom_common::{ed25519_dalek::VerifyingKey, sha256_hex, OwnerKey};
 
 pub const PORT_MIN: u16 = 8100;
 pub const PORT_MAX: u16 = 8199;
 pub const REDIS_DBS: u8 = 16;
-const RESERVED: [&str; 4] = ["v2", "_api", "_bootstrap", "_console"];
 
 // —— 错误：code 对齐 SPEC §3 ——
 #[derive(Debug)]
@@ -64,30 +63,16 @@ pub fn rand_hex(n: usize) -> String {
     hex::encode(b)
 }
 
-// —— 名字（SPEC §4）——
+// —— 名字（SPEC §4；实现收口在 common::names）——
 
-/// `^[a-z0-9][a-z0-9-]{0,30}$` 且不在保留名单（v2/_api/_bootstrap/_console）。
-pub fn valid_name(s: &str) -> bool {
-    let mut cs = s.chars();
-    match cs.next() {
-        Some(c) if c.is_ascii_lowercase() || c.is_ascii_digit() => {}
-        _ => return false,
-    }
-    let rest: Vec<char> = cs.collect();
-    rest.len() <= 30
-        && rest.iter().all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || *c == '-')
-        && !RESERVED.contains(&s)
-}
-
+/// project：正则 + 保留名；slot/owner 等其余名字仅正则（保留名只约束 project）。
 pub fn check_name(kind: &str, s: &str) -> R<()> {
-    if valid_name(s) {
-        Ok(())
+    let r = if kind == "project" {
+        showroom_common::names::check_project(s)
     } else {
-        Err(ApiError::new(
-            "E_NAME",
-            format!("{kind} '{s}': need ^[a-z0-9][a-z0-9-]{{0,30}}$, not reserved"),
-        ))
-    }
+        showroom_common::names::check_slot(s)
+    };
+    r.map_err(|e| ApiError::new("E_NAME", format!("{kind}: {e}")))
 }
 
 // —— 路径（SPEC §5）——
@@ -176,6 +161,15 @@ impl SlotConf {
         fs::create_dir_all(path.parent().unwrap_or(Path::new("/")))?;
         fs::write(&path, self.to_conf())?;
         Ok(())
+    }
+
+    /// ps / GET /_api/projects 共用的列表行（SPEC §3 projects 响应字段）。
+    pub fn to_json(&self, p: &str, s: &str, status: &str) -> Value {
+        json!({
+            "project": p, "slot": s, "owner": self.owner, "tag": self.tag,
+            "url": public_url(p, s), "status": status,
+            "port": self.port, "mem": self.mem, "cpu": self.cpu, "updated": self.updated,
+        })
     }
 }
 
@@ -443,18 +437,7 @@ pub fn remove_htpasswd_user(root: &Path, user: &str) -> R<()> {
 }
 
 pub fn write_private(path: &Path, contents: &str) -> R<()> {
-    use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
-    if let Some(d) = path.parent() {
-        fs::create_dir_all(d)?;
-    }
-    let mut f = fs::OpenOptions::new()
-        .write(true)
-        .create(true)
-        .truncate(true)
-        .mode(0o600)
-        .open(path)?;
-    f.write_all(contents.as_bytes())?;
-    fs::set_permissions(path, fs::Permissions::from_mode(0o600))?;
+    showroom_common::write_private(path, contents.as_bytes())?;
     Ok(())
 }
 
@@ -512,18 +495,48 @@ mod tests {
         d
     }
 
-    // 1. 名字校验：合法 / 保留 / 大小写 / 长度 / 字符集
+    // 1. 名字校验（转发 common::names）：正则 / 保留名只约束 project
     #[test]
     fn names() {
         for good in ["abc", "a-b2", "0", "a", &"a".repeat(31), "pr-42-x1"] {
-            assert!(valid_name(good), "{good} should be valid");
+            assert!(check_name("project", good).is_ok(), "{good} should be valid");
         }
-        for bad in [
-            "", "Abc", "aBc", "-a", "a_", "_api", "v2", "_bootstrap", "_console", "a b", "中文",
-            &"a".repeat(32), "a.b", "a/b",
-        ] {
-            assert!(!valid_name(bad), "{bad} should be invalid");
+        for bad in ["", "Abc", "aBc", "-a", "a_", "a b", "中文", &"a".repeat(32), "a.b", "a/b"] {
+            assert!(check_name("slot", bad).is_err(), "{bad} should be invalid");
         }
+        // 保留名：project 拒、slot 放行（SPEC §4 统一语义；_api 等本就不合正则，分歧点在 v2）
+        for r in ["v2", "_api", "_bootstrap", "_console"] {
+            assert!(check_name("project", r).is_err(), "{r} reserved for project");
+        }
+        assert!(check_name("slot", "v2").is_ok(), "slot not bound by reserved names");
+        assert_eq!(check_name("project", "v2").unwrap_err().code, "E_NAME");
+    }
+
+    // 1b. SlotConf::to_json（ps 与 /_api/projects 共用行）
+    #[test]
+    fn conf_to_json() {
+        let c = SlotConf {
+            owner: "alice".into(),
+            tag: "v1.2".into(),
+            port: 8123,
+            cport: 3000,
+            mem: "256m".into(),
+            cpu: 1.5,
+            redisdb: 7,
+            updated: 1700000000,
+            stopped: false,
+        };
+        let v = c.to_json("demo", "pr42", "running");
+        assert_eq!(v["project"], "demo");
+        assert_eq!(v["slot"], "pr42");
+        assert_eq!(v["owner"], "alice");
+        assert_eq!(v["tag"], "v1.2");
+        assert_eq!(v["status"], "running");
+        assert_eq!(v["url"], public_url("demo", "pr42"));
+        assert_eq!(v["port"], 8123);
+        assert_eq!(v["mem"], "256m");
+        assert_eq!(v["cpu"], 1.5);
+        assert_eq!(v["updated"], 1700000000);
     }
 
     // 2a. conf 序列化往返（§5 全字段，含/不含 stopped）

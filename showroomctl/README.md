@@ -27,7 +27,9 @@ Showroom 主机侧唯一管理工具：HTTP 控制面（`serve`）+ 全部运维
 
 ## serve 部署要点
 
-systemd 单元已存在（`deploy/showroom-api.service`，root 运行，勿改）。
+systemd 单元已存在（`deploy/showroom-api.service`，root 运行，勿改）。部署脚本
+`deploy/install.sh`（ssh 公钥免密 + scp；验证 unsigned `/_api/health` 得 404 即鉴权生效）。
+注：`deploy/install.sh` 的历史提交中含过 SSH 密码，如需可 rotate。
 
 **零信息暴露（SPEC §3）**：`/_api` 下所有端点（含 health/projects）一律要求 SR-SIG1 签名；
 未认证或验签失败的任何请求——无论路径是否存在、方法是否支持——统一返回
@@ -48,8 +50,8 @@ systemd 单元已存在（`deploy/showroom-api.service`，root 运行，勿改�
 5. 首次 `showroomctl init-keys`（serve 启动缺失也会自动生成），再 `owner-add` 登记发布者。
 
 环境变量（均可省略）：`SHOWROOM_ROOT`（默认 `/srv/showroom`）、`SHOWROOM_BASE_URL`
-（`url` 字段对外前缀，默认 `http://127.0.0.1`）、`SHOWROOM_DOCKER_NET`（默认 `showroom`）、
-`SHOWROOM_CADDY_FILE`（默认 `/etc/caddy/Caddyfile`）。
+（`url` 字段对外前缀，默认 `http://127.0.0.1`）。docker 网络名（`showroom-net`）与
+Caddyfile 路径（`/etc/caddy/Caddyfile`）为常量。
 
 已知天花板（ponytail 注释同步在代码里）：滚动更新因同槽位唯一 host 端口先停旧再起新（秒级中断）；
 gc-registry 标签按字典序近似新旧（registry:2 无时间戳 API）；端口分配无并发锁（本机唯一管理通道）；

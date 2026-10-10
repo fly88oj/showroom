@@ -1,8 +1,6 @@
 //! ~/.showroom/config.toml（0600）：owner、密钥路径、双服务端地址、registry 凭据。
 
 use std::fs;
-use std::io::Write;
-use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
 use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
@@ -77,24 +75,9 @@ impl Config {
     }
 
     pub fn save_to(&self, path: &Path) -> Result<(), String> {
-        if let Some(d) = path.parent() {
-            if !d.as_os_str().is_empty() {
-                fs::create_dir_all(d).map_err(|e| format!("创建 {} 失败：{e}", d.display()))?;
-            }
-        }
         let s = toml::to_string_pretty(self).map_err(|e| format!("序列化失败：{e}"))?;
-        let mut f = fs::OpenOptions::new()
-            .write(true)
-            .create(true)
-            .truncate(true)
-            .mode(0o600)
-            .open(path)
-            .map_err(|e| format!("写 {} 失败：{e}", path.display()))?;
-        f.write_all(s.as_bytes())
-            .map_err(|e| format!("写 {} 失败：{e}", path.display()))?;
-        fs::set_permissions(path, fs::Permissions::from_mode(0o600))
-            .map_err(|e| format!("设置 {} 权限失败：{e}", path.display()))?;
-        Ok(())
+        showroom_common::write_private(path, s.as_bytes())
+            .map_err(|e| format!("写 {} 失败：{e}", path.display()))
     }
 
     pub fn key_file(&self) -> PathBuf {
@@ -105,6 +88,7 @@ impl Config {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::os::unix::fs::PermissionsExt as _;
 
     fn tmpdir() -> PathBuf {
         let d = std::env::temp_dir().join(format!("showroom-cfg-test-{}", std::process::id()));

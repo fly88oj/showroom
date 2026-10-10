@@ -3,7 +3,6 @@
 
 mod api;
 mod config;
-mod names;
 
 use std::fs;
 use std::io::Write as _;
@@ -15,7 +14,7 @@ use serde_json::{json, Value};
 
 use api::{Api, Which};
 use config::Config;
-use names::{check_name, check_project, check_tag};
+use showroom_common::names::{check_project, check_slot, check_tag};
 use showroom_common::OwnerKey;
 
 #[derive(Parser)]
@@ -74,8 +73,9 @@ enum Cmd {
         tag: String,
         #[arg(long)]
         mem: Option<String>,
-        #[arg(long)]
-        cpu: Option<String>,
+        /// CPU 配额（核数，如 0.5、2；与服务端 cpu 数字字段对齐）
+        #[arg(long, value_parser = parse_cpu)]
+        cpu: Option<f64>,
         #[arg(long)]
         container_port: Option<u16>,
         /// 等待 status=running（2s 轮询，90s 超时）后打印完整 URL
@@ -157,7 +157,7 @@ fn run(cli: &Cli) -> Result<(), String> {
             slot,
             tag,
             mem.as_deref(),
-            cpu.as_deref(),
+            *cpu,
             *container_port,
             *wait,
         ),
@@ -251,7 +251,7 @@ fn push(
 ) -> Result<(), String> {
     check_project(project)?;
     check_tag(tag)?;
-    check_name(slot, "slot")?;
+    check_slot(slot)?;
     let t0 = Instant::now();
     let (base, which) = select(cfg, force)?;
     match via {
@@ -365,8 +365,7 @@ fn push_import(
     let src = format!("{project}:{tag}");
     let image_id = docker_capture(&["image", "inspect", &src, "--format", "{{.Id}}"])?;
     let present = api
-        .signed_post_json("/_api/import-check", &json!({ "image_id": image_id }))
-        .map_err(|e| e.render(&api.key.pub_string()))?["present"]
+        .signed_post_json("/_api/import-check", &json!({ "image_id": image_id }))?["present"]
         .as_bool()
         .unwrap_or(false);
 
@@ -392,8 +391,7 @@ fn push_import(
             if !child.wait().map_err(|e| e.to_string())?.success() {
                 return Err("docker save 失败".into());
             }
-            api.signed_post_file(&api::import_query(project, slot, tag), &tmp)
-                .map_err(|e| e.render(&api.key.pub_string()))?;
+            api.signed_post_file(&api::import_query(project, slot, tag), &tmp)?;
             Ok(())
         })();
         let _ = fs::remove_file(&tmp);
@@ -409,6 +407,19 @@ fn push_import(
 
 // ———— publish / 查询 ————
 
+/// --cpu 解析：正有限 f64（与服务端 PubReq.cpu: Option<f64> 对齐；docker --cpus 须为正）。
+fn parse_cpu(s: &str) -> Result<f64, String> {
+    let v: f64 = s
+        .trim()
+        .parse()
+        .map_err(|_| format!("E_NAME: 非法 cpu “{s}”：须为正数（如 0.5、2）"))?;
+    if v.is_finite() && v > 0.0 {
+        Ok(v)
+    } else {
+        Err(format!("E_NAME: 非法 cpu “{s}”：须为正数（如 0.5、2）"))
+    }
+}
+
 fn publish(
     cfg: &Config,
     force: Option<Which>,
@@ -416,12 +427,12 @@ fn publish(
     slot: &str,
     tag: &str,
     mem: Option<&str>,
-    cpu: Option<&str>,
+    cpu: Option<f64>,
     container_port: Option<u16>,
     wait: bool,
 ) -> Result<(), String> {
     check_project(project)?;
-    check_name(slot, "slot")?;
+    check_slot(slot)?;
     check_tag(tag)?;
     let api = Api::connect(cfg, force)?;
     let mut body = json!({ "project": project, "slot": slot, "tag": tag });
@@ -435,8 +446,7 @@ fn publish(
         body["container_port"] = json!(x);
     }
     let v = api
-        .signed_post_json("/_api/publish", &body)
-        .map_err(|e| e.render(&api.key.pub_string()))?;
+        .signed_post_json("/_api/publish", &body)?;
     if let Some(u) = v["url"].as_str().filter(|s| !s.is_empty()) {
         println!("发布成功: {u}");
     } else {
@@ -447,8 +457,7 @@ fn publish(
         let mut last = String::new();
         loop {
             let projects = api
-                .signed_get("/_api/projects")
-                .map_err(|e| e.render(&api.key.pub_string()))?;
+                .signed_get("/_api/projects")?;
             match slot_status(&projects, project, slot) {
                 Some(st) if st == "running" => {
                     println!("{}", api::slot_url(&api.base, project, slot));
@@ -479,7 +488,7 @@ fn slot_status(projects: &Value, project: &str, slot: &str) -> Option<String> {
 
 fn ps(cfg: &Config, force: Option<Which>, json_out: bool) -> Result<(), String> {
     let api = Api::connect(cfg, force)?;
-    let v = api.signed_get("/_api/projects").map_err(|e| e.render(&api.key.pub_string()))?;
+    let v = api.signed_get("/_api/projects")?;
     if json_out {
         println!("{}", serde_json::to_string_pretty(&v["projects"]).unwrap_or_default());
         return Ok(());
@@ -511,10 +520,10 @@ fn trunc(s: &str, n: usize) -> String {
 fn url_cmd(cfg: &Config, force: Option<Which>, project: &str, slot: Option<&str>) -> Result<(), String> {
     check_project(project)?;
     if let Some(s) = slot {
-        check_name(s, "slot")?;
+        check_slot(s)?;
     }
     let api = Api::connect(cfg, force)?;
-    let v = api.signed_get("/_api/projects").map_err(|e| e.render(&api.key.pub_string()))?;
+    let v = api.signed_get("/_api/projects")?;
     let entries: Vec<&Value> = match v["projects"].as_array() {
         Some(a) => a
             .iter()
@@ -548,12 +557,12 @@ fn logs_cmd(
 ) -> Result<(), String> {
     check_project(project)?;
     let slot = slot.unwrap_or("stable");
-    check_name(slot, "slot")?;
+    check_slot(slot)?;
     let api = Api::connect(cfg, force)?;
     let q = api::logs_query(project, slot, tail);
     let mut printed = 0usize;
     loop {
-        let v = api.signed_get(&q).map_err(|e| e.render(&api.key.pub_string()))?;
+        let v = api.signed_get(&q)?;
         let s = v["logs"].as_str().unwrap_or("").to_string();
         // 追加式输出；日志被截短/重置时整体重打
         match s.get(printed..) {
@@ -578,11 +587,10 @@ fn logs_cmd(
 fn env_cmd(cfg: &Config, force: Option<Which>, project: &str, slot: Option<&str>) -> Result<(), String> {
     check_project(project)?;
     let slot = slot.unwrap_or("stable");
-    check_name(slot, "slot")?;
+    check_slot(slot)?;
     let api = Api::connect(cfg, force)?;
     let v = api
-        .signed_get(&api::env_query(project, slot))
-        .map_err(|e| e.render(&api.key.pub_string()))?;
+        .signed_get(&api::env_query(project, slot))?;
     let map = v["env"].as_object().ok_or("响应缺少 env 对象")?;
     for (k, val) in map {
         let s = val.as_str().map(str::to_string).unwrap_or_else(|| val.to_string());
@@ -599,11 +607,10 @@ fn slot_action(
     slot: &str,
 ) -> Result<(), String> {
     check_project(project)?;
-    check_name(slot, "slot")?;
+    check_slot(slot)?;
     let api = Api::connect(cfg, force)?;
     let v = api
-        .signed_post_json(path, &json!({ "project": project, "slot": slot }))
-        .map_err(|e| e.render(&api.key.pub_string()))?;
+        .signed_post_json(path, &json!({ "project": project, "slot": slot }))?;
     println!("ok");
     for key in ["msg", "url"] {
         if let Some(s) = v[key].as_str().filter(|s| !s.is_empty()) {
@@ -660,8 +667,8 @@ fn doctor(cfg: &Config) -> Result<(), String> {
         all_ok = false;
     }
 
-    // 5. 签名自测：签名请求不存在的 project，服务端验签通过才会走到 E_NOTFOUND；
-    //    E_AUTH 且 message 含 "no key" = 公钥未登记。
+    // 5. 签名自测：签名请求不存在的 project。服务端零信息暴露（SPEC §3）：验签失败统一
+    //    404 E_AUTH 无 msg，故 E_NOTFOUND = 验签通过走到业务层 = 密钥已登记；E_AUTH = 未登记/时钟偏差。
     if key.is_some() && (lan_ok || pub_ok) {
         let base = if lan_ok {
             cfg.server_lan.as_deref().unwrap().trim_end_matches('/')
@@ -669,17 +676,9 @@ fn doctor(cfg: &Config) -> Result<(), String> {
             cfg.server_public.as_deref().unwrap().trim_end_matches('/')
         };
         match Api::open(base.to_string(), cfg)
-            .and_then(|api| {
-                api.signed_get(&api::logs_query("__selftest", "stable", 100))
-                    .map_err(|e| e.to_string())
-            })
-            .map_err(String::from)
+            .and_then(|api| api.signed_get(&api::logs_query("__selftest", "stable", 100)))
         {
             Ok(_) => println!("✓ 签名自测通过（密钥已登记）"),
-            Err(msg) if msg.contains("no key") => {
-                all_ok = false;
-                println!("✗ 签名自测：公钥未登记（把上面的公钥串发给管理员）");
-            }
             Err(msg) if msg.starts_with("E_NOTFOUND") => {
                 println!("✓ 签名自测通过（密钥已登记）");
             }
@@ -695,8 +694,8 @@ fn doctor(cfg: &Config) -> Result<(), String> {
     }
 
     // 6. registry 快通道探测（非关键：失败时 push 自动回落 import）
-    let reg_user = cfg.registry.user.as_deref().filter(|s| !s.is_empty());
-    let reg_pass = cfg.registry.password.as_deref().filter(|s| !s.is_empty());
+    let reg_user = (!cfg.registry.user.is_empty()).then_some(cfg.registry.user.as_str());
+    let reg_pass = (!cfg.registry.password.is_empty()).then_some(cfg.registry.password.as_str());
     if let (Some(lan), Some(u), Some(pw)) = (&cfg.server_lan, reg_user, reg_pass) {
         let url = format!("{}/v2/", lan.trim_end_matches('/'));
         match reqwest::blocking::Client::builder().timeout(Duration::from_secs(5)).build()
@@ -723,5 +722,23 @@ fn doctor(cfg: &Config) -> Result<(), String> {
         Ok(())
     } else {
         Err("doctor: 存在未通过的关键项（见上）".into())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // A1 回归：--cpu 解析为 f64（正有限），且 JSON 值可被服务端 PubReq.cpu: Option<f64> 反序列化
+    #[test]
+    fn cpu_option_parses_to_f64() {
+        assert_eq!(parse_cpu("0.5").unwrap(), 0.5);
+        assert_eq!(parse_cpu("2").unwrap(), 2.0);
+        for bad in ["abc", "", "-1", "0", "nan", "inf"] {
+            let e = parse_cpu(bad).unwrap_err();
+            assert!(e.starts_with("E_NAME"), "{bad}: {e}");
+        }
+        let cpu: Option<f64> = serde_json::from_value(json!(parse_cpu("2").unwrap())).unwrap();
+        assert_eq!(cpu, Some(2.0));
     }
 }
