@@ -15,8 +15,8 @@ cp target/release/showroom ~/.local/bin/   # 或任意 PATH 目录
 
 ```sh
 showroom keygen                                            # 生成密钥，把打印的公钥串发给管理员登记
-showroom config --owner alice --server-lan http://your-host.example.com \
-    --server-public http://your-frp-server.example.com:your-frp-port \
+showroom config --owner alice --server-lan http://<内网地址> \
+    --server-public http://<公网地址:端口> \
     --registry-user alice --registry-password <registry密码>  # 写 ~/.showroom/config.toml（0600）
 showroom push demo v1                                      # 推镜像：lan 可达走 registry，否则加密 import 通道
 showroom deploy demo v1                                    # 一键部署：push + publish --wait + 大字打印最终 URL（§12.1）
@@ -42,7 +42,7 @@ showroom env demo                                          # 查看注入容器�
 ```
 DB_HOST  DB_PORT  DB_NAME  DB_USER  DB_PASSWORD  DATABASE_URL
 REDIS_HOST  REDIS_PORT  REDIS_DB  REDIS_URL
-SHOWROOM_PROJECT  SHOWROOM_SLOT  SHOWROOM_BASE_PATH
+SHOWROOM_PROJECT  SHOWROOM_BASE_PATH
 ```
 
 随时查看真实值（数据库/Redis 连接地址一目了然）：
