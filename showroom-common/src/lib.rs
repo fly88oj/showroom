@@ -32,6 +32,7 @@ use sha2::{Digest, Sha256};
 pub use {ed25519_dalek, rsa};
 
 /// wasm32 控制台 C-ABI 垫片（SPEC §8.3）；文件内以 `#![cfg(target_arch = "wasm32")]` 整体隔离。
+pub mod opaque;
 pub mod wasm_shim;
 
 // wasm32：getrandom 在该目标无默认后端（"js" feature 需 wasm-bindgen，SPEC §8.3 禁引），

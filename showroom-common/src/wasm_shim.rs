@@ -704,3 +704,215 @@ pub extern "C" fn sr_zstd_end(sid: i32) -> i32 {
         }
     })
 }
+
+// —— OPAQUE 登录/注册会话（plan-16 / SPEC §16；与 seal 会话同构的句柄模型）——
+//
+// 浏览器侧一步登录（账号+密码）与登录态改密码的 native 内核入口：
+// - `sr_rwd`：argon2id 硬化（native/wasm 漂移由 common 的固定向量测试把关，垫片不重定义）；
+// - `sr_login_start/sr_login_ke1/sr_login_finish`：登录三步 ke1→ke2→ke3；
+// - `sr_reg_start/sr_reg_msg/sr_reg_finish`：改密码 m1→m2→record（pw-commit 上行）。
+// ABI 惯例与本文件其余部分一致：b64 串输入指针+长度、输出 b64 串 NUL 结尾写入调用方
+// 缓冲（容量不足返回 -(所需字节数)）；盲化因子与 KE 临时份额取全局熵池；会话槽位只增
+// 不回收、finish 一次性消费（ponytail）；密码错误/协议失败 = -7（本地失败，线上无差异）。
+
+use crate::opaque::Suite;
+use opaque_ke::{ClientLogin, ClientRegistration};
+
+struct OpaqueLoginSession {
+    state: ClientLogin<Suite>,
+    /// rwd 盐与三方标识都要 user；状态对象不含它，会话保存。
+    user: String,
+    /// ke1（b64）——幂等可重复取。
+    ke1: String,
+}
+
+struct OpaqueRegSession {
+    state: ClientRegistration<Suite>,
+    user: String,
+    /// m1（b64）。
+    m1: String,
+}
+
+enum OpaqueState {
+    Login(OpaqueLoginSession),
+    Reg(OpaqueRegSession),
+}
+
+static OPAQUE_SESSIONS: Mutex<Vec<Option<OpaqueState>>> = Mutex::new(Vec::new());
+
+fn opaque_slot(st: OpaqueState) -> Result<i32, i32> {
+    let mut v = OPAQUE_SESSIONS.lock().unwrap();
+    v.push(Some(st)); // 槽位只增不回收（ponytail；句柄从 1 起）
+    Ok(v.len() as i32)
+}
+
+/// 一次性取走会话（finish 语义：取后槽位即空，重复 finish = E_SESSION）。
+fn opaque_take(sid: i32) -> Result<OpaqueState, i32> {
+    if sid <= 0 {
+        return Err(E_SESSION);
+    }
+    let mut v = OPAQUE_SESSIONS.lock().unwrap();
+    match v.get_mut(sid as usize - 1) {
+        Some(slot) => slot.take().ok_or(E_SESSION),
+        None => Err(E_SESSION),
+    }
+}
+
+/// 读会话首条消息（ke1/m1，幂等只读）。
+fn opaque_msg(sid: i32) -> Result<String, i32> {
+    if sid <= 0 {
+        return Err(E_SESSION);
+    }
+    let v = OPAQUE_SESSIONS.lock().unwrap();
+    match v.get(sid as usize - 1) {
+        Some(Some(OpaqueState::Login(s))) => Ok(s.ke1.clone()),
+        Some(Some(OpaqueState::Reg(s))) => Ok(s.m1.clone()),
+        _ => Err(E_SESSION),
+    }
+}
+
+/// rwd（argon2id 硬化）：pw+user → 32B 写往 out。0 成功 / -2 参数 / -7 计算。
+#[no_mangle]
+pub extern "C" fn sr_rwd(
+    pw: *const u8,
+    pw_len: usize,
+    user: *const u8,
+    user_len: usize,
+    out: *mut u8,
+) -> i32 {
+    guarded(|| {
+        let pw = utf8(pw, pw_len)?;
+        let user = utf8(user, user_len)?;
+        if pw.is_empty() || user.is_empty() || out.is_null() {
+            return Err(E_ARGS);
+        }
+        let o = unsafe { std::slice::from_raw_parts_mut(out, crate::opaque::RWD_LEN) };
+        let r = crate::opaque::rwd(&pw, &user).map_err(|_| E_CRYPTO)?;
+        o.copy_from_slice(&r);
+        Ok(0)
+    })
+}
+
+/// 开启登录会话（熵池驱动盲化）：返回句柄（>0）或负错误码（-6 熵未注入 / -7 协议失败）。
+#[no_mangle]
+pub extern "C" fn sr_login_start(
+    pw: *const u8,
+    pw_len: usize,
+    user: *const u8,
+    user_len: usize,
+) -> i32 {
+    guarded(|| {
+        let pw = utf8(pw, pw_len)?;
+        let user = utf8(user, user_len)?;
+        if pw.is_empty() || user.is_empty() {
+            return Err(E_ARGS);
+        }
+        let got = with_global_rng(|r| crate::opaque::login_start(r, &pw, &user));
+        let (state, ke1) = match got {
+            Err(_) => return Err(E_ENTROPY),
+            Ok(Err(_)) => return Err(E_CRYPTO),
+            Ok(Ok(v)) => v,
+        };
+        opaque_slot(OpaqueState::Login(OpaqueLoginSession { state, user, ke1 }))
+    })
+}
+
+/// 取登录会话的 ke1（b64，NUL 结尾写 out；幂等可重复取）。
+#[no_mangle]
+pub extern "C" fn sr_login_ke1(sid: i32, out: *mut u8, cap: usize) -> i32 {
+    guarded(|| {
+        let ke1 = opaque_msg(sid)?;
+        write_cstr(&ke1, out, cap)
+    })
+}
+
+/// 登录收尾：喂 ke2（b64）+ 密码 → 写出 ke3（b64，NUL 结尾）。密码错误 = -7（本地失败，
+/// 不产生第三请求）。成功后会话终结（句柄不可复用）。
+#[no_mangle]
+#[allow(clippy::too_many_arguments)]
+pub extern "C" fn sr_login_finish(
+    sid: i32,
+    pw: *const u8,
+    pw_len: usize,
+    ke2: *const u8,
+    ke2_len: usize,
+    out: *mut u8,
+    cap: usize,
+) -> i32 {
+    guarded(|| {
+        let pw = utf8(pw, pw_len)?;
+        let ke2 = utf8(ke2, ke2_len)?;
+        if pw.is_empty() || ke2.is_empty() {
+            return Err(E_ARGS);
+        }
+        let st = opaque_take(sid)?;
+        let OpaqueState::Login(s) = st else {
+            return Err(E_ARGS); // 注册会话句柄误用
+        };
+        let ke3 =
+            crate::opaque::login_finish(s.state, &pw, &s.user, &ke2).map_err(|_| E_CRYPTO)?;
+        write_cstr(&ke3, out, cap)
+    })
+}
+
+/// 开启注册（改密码）会话：新密码+user → m1。熵池驱动。
+#[no_mangle]
+pub extern "C" fn sr_reg_start(
+    pw: *const u8,
+    pw_len: usize,
+    user: *const u8,
+    user_len: usize,
+) -> i32 {
+    guarded(|| {
+        let pw = utf8(pw, pw_len)?;
+        let user = utf8(user, user_len)?;
+        if pw.is_empty() || user.is_empty() {
+            return Err(E_ARGS);
+        }
+        let got = with_global_rng(|r| crate::opaque::reg_start(r, &pw, &user));
+        let (state, m1) = match got {
+            Err(_) => return Err(E_ENTROPY),
+            Ok(Err(_)) => return Err(E_CRYPTO),
+            Ok(Ok(v)) => v,
+        };
+        opaque_slot(OpaqueState::Reg(OpaqueRegSession { state, user, m1 }))
+    })
+}
+
+/// 取注册会话的 m1（b64；幂等可重复取）。
+#[no_mangle]
+pub extern "C" fn sr_reg_msg(sid: i32, out: *mut u8, cap: usize) -> i32 {
+    guarded(|| {
+        let m1 = opaque_msg(sid)?;
+        write_cstr(&m1, out, cap)
+    })
+}
+
+/// 注册收尾：喂 m2（b64）+ 新密码 → 写出 record（b64，pw-commit 上行）。成功后会话终结。
+#[no_mangle]
+#[allow(clippy::too_many_arguments)]
+pub extern "C" fn sr_reg_finish(
+    sid: i32,
+    pw: *const u8,
+    pw_len: usize,
+    m2: *const u8,
+    m2_len: usize,
+    out: *mut u8,
+    cap: usize,
+) -> i32 {
+    guarded(|| {
+        let pw = utf8(pw, pw_len)?;
+        let m2 = utf8(m2, m2_len)?;
+        if pw.is_empty() || m2.is_empty() {
+            return Err(E_ARGS);
+        }
+        let st = opaque_take(sid)?;
+        let OpaqueState::Reg(s) = st else {
+            return Err(E_ARGS); // 登录会话句柄误用
+        };
+        let record = with_global_rng(|r| crate::opaque::reg_finish(r, s.state, &pw, &s.user, &m2))
+            .map_err(|_| E_CRYPTO)?
+            .map_err(|_| E_CRYPTO)?;
+        write_cstr(&record, out, cap)
+    })
+}

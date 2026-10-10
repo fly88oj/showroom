@@ -15,6 +15,11 @@ sha2 = "0.10"
 rand = "0.8"
 base64 = "0.22"
 hex = "0.4"
+# plan-16（SPEC §16）OPAQUE 登录：default-features=false 免 getrandom "js"（§8.3 禁引
+# wasm-bindgen；wasm 熵走既有 custom 后端桥，见 wasm_shim.rs）；ristretto255-voprf 即 Suite 全集。
+opaque-ke = { version = "3", default-features = false, features = ["ristretto255-voprf"] }
+# rwd 硬化（argon2id）：纯 Rust 无 C 工具链可交叉 wasm32；只用核心 hash_password_into。
+argon2 = { version = "0.5", default-features = false, features = ["alloc"] }
 
 # wasm32 专用：getrandom 无该目标默认后端（js feature 会引 wasm-bindgen，SPEC §8.3 禁用），
 # 走 "custom" 后端桥到熵池（见 lib.rs register_custom_getrandom / wasm_shim.rs）；
