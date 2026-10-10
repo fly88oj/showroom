@@ -25,7 +25,7 @@
   /* 表单一律 label 上、控件下 */
   .field { display: flex; flex-direction: column; gap: .2rem; min-width: 0; }
   .field > span { color: #aeb6c2; font-size: 13px; }
-  input[type=text], input[type=number], input[type=file], textarea, select {
+  input[type=text], input[type=password], input[type=number], input[type=file], textarea, select {
     background: #14161a; color: #d7dce3; border: 1px solid #343b47; border-radius: 4px;
     padding: .3rem .45rem; font: inherit; max-width: 100%;
   }
@@ -95,6 +95,10 @@
   #wz-key-choices { display: flex; flex-direction: column; gap: .45rem; }
   #wz-key-choices label { cursor: pointer; }
   #wz-pub { font-size: 16px; letter-spacing: .4px; user-select: all; }
+  /* plan-16 §3：钥匙登录收进折叠（专家路径）；主路径一步「账号+密码」 */
+  details > summary { cursor: pointer; color: #9fc3e8; }
+  #lg-expert { margin-top: .9rem; border-top: 1px dashed #2a2f39; padding-top: .5rem; }
+  #lg-expert > summary { padding: .1rem 0; }
   /* 行内反馈（操作后就近显示，错误另走顶部条） */
   .fb { font-size: 12px; color: #a9e8b8; min-height: 1.2em; margin: .3rem 0 0; }
   .fb.warn { color: #e8c37f; }
@@ -117,59 +121,62 @@
 
 <div id="msg" role="alert" aria-live="polite"></div>
 
-<!-- ———— 登录向导（SPEC §10.1：线性三步；签名自测通过前只渲染本区块，不渲染任何管理 UI） ———— -->
+<!-- ———— 登录（plan-16 §3：一步「账号+密码」；密钥生成/绑定/签名全程后台无感，用户不见
+       seed/公钥串；签名自测通过前只渲染本区块，不渲染任何管理 UI） ———— -->
 <section id="login">
   <h1>Showroom 控制台</h1>
   <p class="note">服务器（同源代理，经 <span class="mono">/_api/*</span> 签名调用）：<span class="mono" id="lg-srv"></span></p>
-  <div class="row" style="gap:.4rem;margin-top:.6rem">
-    <span class="wz-step" id="wz-s1">1/3 你是谁</span>
-    <span class="wz-step" id="wz-s2">2/3 选择密钥</span>
-    <span class="wz-step" id="wz-s3">3/3 验证</span>
-  </div>
 
-  <!-- 步骤 1「你是谁」：唯一控件 = 账号输入 + 下一步 -->
-  <div class="wz-pane" id="wz-p1">
-    <label class="field" for="wz-user"><span>账号（发布者账号）</span>
-      <input type="text" id="wz-user" placeholder="如 alice…" size="14" pattern="[a-z0-9][a-z0-9-]{0,30}" autocomplete="username" aria-describedby="wz-user-err"></label>
-    <p class="ferr" id="wz-user-err" aria-live="polite"></p>
-    <div class="row" style="margin-top:.6rem"><button id="wz-next1">下一步</button></div>
-  </div>
+  <!-- 主路径：一步登录（OPAQUE → 绑定本机钥匙 → 进入控制台，plan-16 §2.2 报文序列） -->
+  <form id="lg-form" style="margin-top:.6rem">
+    <label class="field" for="lg-user"><span>账号（发布者账号）</span>
+      <input type="text" id="lg-user" placeholder="如 alice…" size="14" pattern="[a-z0-9][a-z0-9-]{0,30}" autocomplete="username" aria-describedby="lg-user-err"></label>
+    <p class="ferr" id="lg-user-err" aria-live="polite"></p>
+    <label class="field" for="lg-pass" style="margin-top:.4rem"><span>密码（管理员发放；与 docker push 用的 registry 密码是两把不同密码）</span>
+      <input type="password" id="lg-pass" placeholder="输入账号密码…" size="14" autocomplete="current-password" aria-describedby="lg-pass-err"></label>
+    <p class="ferr" id="lg-pass-err" aria-live="polite"></p>
+    <div class="row" style="margin-top:.6rem">
+      <button type="submit" id="lg-submit">登录</button>
+      <button type="button" id="lg-reenter" class="hidden" title="本机钥匙自测通过即可免密码进入">免密码进入</button>
+      <button type="button" id="lg-forget" class="hidden danger" title="清除本机密钥与账号记忆（可选远程注销本机钥匙）">忘记此设备…</button>
+      <span class="fb" id="lg-fb" aria-live="polite"></span>
+    </div>
+  </form>
+  <p class="note">新设备 / 换浏览器：直接输入账号密码登录即可自动绑定本设备（无需迁移密钥）；忘记密码请联系管理员重置。
+    本设备登录钥匙由控制台自动生成并保管于浏览器 localStorage（属试验性存储，清除浏览器数据后重新密码登录即可），全程无需人工干预。</p>
 
-  <!-- 步骤 2「选择密钥」：自动检测本机存量，单选三选一（导入时才出现粘贴框） -->
-  <div class="wz-pane hidden" id="wz-p2">
-    <fieldset>
-      <legend>为账号 <span class="mono" id="wz-userEcho"></span> 选择密钥</legend>
+  <!-- 专家路径（plan-16 §3）：钥匙登录收进折叠——CLI / 机器用户用本机已有或导入种子，
+       公钥串交管理员登记（user-add --pubkey：机器对机器钥匙不受密码绑定钥匙的自动回收） -->
+  <details id="lg-expert">
+    <summary>钥匙登录（CLI / 机器用户 · 专家路径）</summary>
+    <fieldset style="margin-top:.6rem">
+      <legend>为账号（上方「账号」输入框）选择本机密钥</legend>
       <div id="wz-key-choices">
         <label class="row" id="wz-l-use" for="wz-r-use" style="gap:.4rem"><input type="radio" name="wz-key" id="wz-r-use"><span>使用本机已有密钥（指纹 <span class="mono" id="wz-fp"></span>）</span></label>
-        <label class="row" for="wz-r-new" style="gap:.4rem"><input type="radio" name="wz-key" id="wz-r-new"><span id="wz-new-text">生成新密钥</span></label>
         <label class="row" for="wz-r-import" style="gap:.4rem"><input type="radio" name="wz-key" id="wz-r-import"><span>导入密钥种子</span></label>
       </div>
       <label class="field hidden" id="wz-import-box" for="wz-seed" style="margin-top:.5rem"><span>粘贴 64 位十六进制密钥种子（showroom keygen 产物 / 其他设备导出）</span>
         <textarea id="wz-seed" class="mono" spellcheck="false" placeholder="64 位十六进制字符（32 字节）…" aria-describedby="wz-seed-err"></textarea></label>
       <p class="ferr hidden" id="wz-seed-err" aria-live="polite" style="margin-top:.3rem"></p>
     </fieldset>
-    <div class="row" style="margin-top:.6rem">
-      <button id="wz-back2">上一步</button>
-      <button id="wz-next2">下一步</button>
-    </div>
-    <p class="note">密钥即身份：32 字节 seed 以十六进制存于浏览器 localStorage——<b>属试验性存储</b>，换设备/清缓存即失效；正式场景请用 CLI <span class="mono">showroom keygen</span>。</p>
-  </div>
-
-  <!-- 步骤 3「验证」：自动签名自测；未登记 → 展示公钥串等待登记，点【重新检测】循环；通过 → 自动进入管理界面 -->
-  <div class="wz-pane hidden" id="wz-p3">
-    <p class="note">账号 <span class="mono" id="wz-v-user"></span> · 密钥指纹 <span class="mono" id="wz-v-fp"></span></p>
-    <p class="fb" id="wz-v-fb" aria-live="polite"></p>
-    <div id="wz-pubbox" class="hidden">
-      <p class="note">尚未登记：把下方公钥串发给管理员登记（<span class="mono">showroomctl user-add &lt;账号&gt; --pubkey &lt;公钥串&gt;</span>），登记后点【重新检测】。</p>
-      <div class="row" style="align-items:center;gap:.6rem;flex-wrap:nowrap">
-        <code id="wz-pub" class="pub"></code>
-        <button id="wz-copypub">复制公钥</button>
+    <div class="row" style="margin-top:.6rem"><button type="button" id="wz-verify">使用钥匙登录</button></div>
+    <!-- 验证：自动签名自测；未登记 → 展示公钥串等待登记，点【重新检测】循环；通过 → 自动进入管理界面 -->
+    <div class="wz-pane hidden" id="wz-p3">
+      <p class="note">密钥指纹 <span class="mono" id="wz-v-fp"></span></p>
+      <p class="fb" id="wz-v-fb" aria-live="polite"></p>
+      <div id="wz-pubbox" class="hidden">
+        <p class="note">尚未登记：把下方公钥串发给管理员登记（<span class="mono">showroomctl user-add &lt;账号&gt; --pubkey &lt;公钥串&gt;</span>），登记后点【重新检测】。</p>
+        <div class="row" style="align-items:center;gap:.6rem;flex-wrap:nowrap">
+          <code id="wz-pub" class="pub"></code>
+          <button type="button" id="wz-copypub">复制公钥</button>
+        </div>
+      </div>
+      <div class="row" style="margin-top:.6rem">
+        <button type="button" id="wz-recheck">重新检测</button>
       </div>
     </div>
-    <div class="row" style="margin-top:.6rem">
-      <button id="wz-recheck">重新检测</button>
-    </div>
-  </div>
+    <p class="note">密钥即身份：32 字节 seed 以十六进制存于浏览器 localStorage——<b>属试验性存储</b>，换设备/清缓存即失效；正式场景请用 CLI <span class="mono">showroom login &lt;账号&gt;</span>（密码一次、密钥常驻）。</p>
+  </details>
 </section>
 
 <!-- ———— 管理壳（模板：惰性，登录成功后才克隆进文档流；SPEC §3「登录成功前不加载管理资源」） ———— -->
@@ -438,6 +445,22 @@
 
   <!-- ———— 标签页 4：帮助 ———— -->
   <section id="tab-help" class="hidden" role="tabpanel" aria-labelledby="tabbtn-help">
+    <h2>登录与账号</h2>
+    <ul class="note" style="margin:.2rem 0 0;padding-left:1.2rem">
+      <li>控制台用「账号 + 密码」登录：密码只在登录时使用一次，登录后本设备自动保管专用钥匙，此后全部操作自动签名，无需再输密码。</li>
+      <li>新设备 / 换浏览器：直接输入账号密码登录即可，平台自动为本设备绑定新钥匙（旧设备钥匙按平台策略自动回收，回收后该设备重新密码登录）。</li>
+      <li>忘记密码：请联系管理员重置（控制台无法自助找回；重置不影响各设备已绑定的钥匙）。</li>
+      <li>登录密码与 registry 密码是两把独立发放的密码：前者登录控制台 / CLI，后者在 docker push 推送镜像时使用。</li>
+      <li>本设备钥匙由浏览器自动生成并保存在 localStorage（属试验性存储）：清除浏览器数据即失效，届时重新密码登录即可；「忘记此设备」可主动清除（可选同时远程注销本机钥匙）。</li>
+    </ul>
+
+    <h2>专家路径：公钥与机器用户（CLI / CI）</h2>
+    <ul class="note" style="margin:.2rem 0 0;padding-left:1.2rem">
+      <li>CLI 与控制台同一模型：<span class="mono">showroom login &lt;账号&gt;</span> 输一次密码即自动配置本机（含 registry 凭据），此后全部子命令免密码（gh/ssh 模型）；<span class="mono">showroom logout [--purge]</span> 退出（--purge 同时远程注销本机钥匙）。</li>
+      <li>机器对机器 / CI：不走密码，由管理员登记公钥（<span class="mono">showroomctl user-add &lt;账号&gt; --pubkey &lt;公钥串&gt;</span>）；此类钥匙不参与密码绑定钥匙的自动回收，生命周期人工管理。</li>
+      <li>控制台登录页的「钥匙登录（CLI / 机器用户）」折叠入口即此路径：用本机已有或导入的种子，公钥串交管理员登记。</li>
+    </ul>
+
     <h2>镜像规范</h2>
     <ul class="note" style="margin:.2rem 0 0;padding-left:1.2rem">
       <li>Demo 服务须监听容器内 <span class="mono">8080</span> 端口（其他端口在发布表单「Demo 服务监听端口（容器内）」如实填写）。</li>
@@ -457,8 +480,10 @@
     <div class="tbl-wrap"><table>
       <thead><tr><th>控制台功能</th><th>CLI 等价命令</th></tr></thead>
       <tbody>
-        <tr><td>生成密钥</td><td class="mono">showroom keygen</td></tr>
-        <tr><td>登记公钥（管理员）</td><td class="mono">showroomctl user-add &lt;账号&gt; --pubkey &lt;公钥串&gt;</td></tr>
+        <tr><td>账号密码登录（自动绑定本机）</td><td class="mono">showroom login &lt;账号&gt;</td></tr>
+        <tr><td>退出登录 / 忘记此设备</td><td class="mono">showroom logout [--purge]</td></tr>
+        <tr><td>生成密钥（专家：CI / 机器用户）</td><td class="mono">showroom keygen</td></tr>
+        <tr><td>登记公钥（管理员 · 专家路径）</td><td class="mono">showroomctl user-add &lt;账号&gt; --pubkey &lt;公钥串&gt;</td></tr>
         <tr><td>展项列表</td><td class="mono">showroom ps</td></tr>
         <tr><td>一键部署 / 仅上传 / 部署（选镜像）</td><td class="mono">showroom deploy / push / publish</td></tr>
         <tr><td>启动 / 停止 / 回滚 / 删除</td><td class="mono">showroom start / stop / rollback / rm</td></tr>
@@ -472,7 +497,7 @@
     <div class="tbl-wrap"><table>
       <thead><tr><th>提示</th><th>含义与处理</th></tr></thead>
       <tbody>
-        <tr><td class="mono">E_AUTH</td><td>公钥未登记（或本机时间偏差过大 / 非本人项目）：把登录页公钥串交管理员登记；时钟问题可用 <span class="mono">showroom doctor</span> 排查。</td></tr>
+        <tr><td class="mono">E_AUTH</td><td>钥匙未登记或验签未通过（非本人项目同样报此错）。密码登录用户：重新输入账号密码登录即可自动绑定新钥匙；CLI/钥匙用户：把公钥串交管理员登记。时钟偏差可用 <span class="mono">showroom doctor</span> 排查。</td></tr>
         <tr><td class="mono">E_NAME</td><td>命名不符合规则 <span class="mono">^[a-zA-Z0-9][a-zA-Z0-9-]{0,30}$</span> 或使用了保留名（v2/_api/_bootstrap/_console）。</td></tr>
         <tr><td class="mono">E_QUOTA</td><td>超出限额：内存需求 / 导入体积 / 磁盘空间（扣除预留）不足；请调低内存需求、精简镜像，磁盘不足时可在部署区镜像清单删除旧镜像后重试。</td></tr>
         <tr><td class="mono">E_NOTFOUND</td><td>展项或上传/下载会话不存在。</td></tr>
@@ -694,7 +719,7 @@ function shimCStr(call, cap0) {
 
 // —— 消息条（错误统一顶部：「错误码：中文解释（含下一步动作）」）与行内反馈 ——
 const ERR_CN = {
-  E_AUTH: '公钥未登记或验签未通过（非本人项目同样报此错）；请把公钥串交管理员登记后重试',
+  E_AUTH: '钥匙未登记或验签未通过（非本人项目同样报此错）：请退出后重新用账号密码登录（自动绑定新钥匙）；CLI/钥匙用户请把公钥串交管理员登记',
   E_NAME: '命名不符合规则或使用了保留名；请按提示修正名称后重试',
   E_QUOTA: '超出平台限额（内存需求/导入体积/磁盘空间不足）；请调低内存需求、精简镜像，磁盘不足时可先删除旧镜像',
   E_NOTFOUND: '对象不存在（展项/会话）；请确认名称或重新发起',
@@ -741,7 +766,7 @@ const statusCn = (s) => STATUS_CN[s] || s || '未知';
 const statusCls = (s) => s === 'running' ? 'status-ok' : (s === 'missing' ? 'status-bad' : 'status-mid');
 
 // —— 密钥状态（localStorage：sr.seed hex64 / sr.user / sr.pempub）——
-const state = { seed: null, pub: '', user: '', loggedIn: false, projects: [], kid: '', admin: false };
+const state = { seed: null, pub: '', user: '', loggedIn: false, projects: [], kid: '', admin: false, boundAdmin: false };
 function Buffer_fromHex(hex) {
   const b = new Uint8Array(hex.length / 2);
   for (let i = 0; i < b.length; i++) b[i] = parseInt(hex.substr(i * 2, 2), 16);
@@ -765,41 +790,198 @@ function loadSeed() {
 // 密钥指纹 = 公钥串载荷（b64）前 8 位
 const pubFp = () => state.pub.replace(/^ed25519:/, '').slice(0, 8);
 
-// —— 登录向导状态机（SPEC §10.1：线性三步，每步只出现当前控件）——
-const wiz = { step: 1, choice: 'new' };
-function gotoStep(n) {
-  wiz.step = n;
-  for (const s of [1, 2, 3]) {
-    $(`wz-p${s}`).classList.toggle('hidden', s !== n);
-    $(`wz-s${s}`).classList.toggle('on', s === n);
+// —— 密钥无感管理（plan-16 §3）：无 sr.seed 即自动生成（登录前也一样），用户全程不可见 ——
+function ensureSeed() {
+  loadSeed();
+  if (state.seed) return;
+  const sp = alloc(32);
+  try {
+    if (ex.sr_generate(sp) !== 0) throw { error: 'E_NET', msg: '密钥生成失败（垫片错误）' };
+    localStorage.setItem('sr.seed', toHex(mem().slice(sp, sp + 32)));
+  } finally { unput(sp, 32); }
+  loadSeed();
+}
+
+// —— OPAQUE 客户端适配层（plan-16 §2.2 报文序列 / §6.1 垫片导出）——
+// 垫片导出已由服务端侧落入 showroom-common/src/wasm_shim.rs（真实 ABI，下方 real 分支已按其
+// 接线）：sr_rwd / sr_login_start(pw,user)→sid / sr_login_ke1(sid)→b64 / sr_login_finish(sid,pw,ke2)→ke3。
+// TODO(opaque-shim)：dist/showroom_bg.wasm 尚未随新垫片重建（导出探测不到），就绪前以「形状兼容
+// mock」先行——假报文不具任何安全性，仅驱动界面与冒烟；ke2 内嵌验证因子使错密码在本地 finish
+// 即失败（行为契约与真协议一致：不产生第三请求）。垫片 wasm 重建合入后自动切换真分支
+// （OPAQUE_SHIM 探测导出），届时删除 MOCK_* 与 mock 分支即可。
+// 真分支 ABI 要点（与垫片源码一致）：b64 串进出；输出 NUL 结尾、容量不足 -(所需) ≤ -40；
+// finish 一次性消费会话（不做容量探测重试，首给足容量）；密码错误/协议失败 = -7。
+const OPAQUE_SHIM = typeof ex.sr_login_start === 'function' && typeof ex.sr_login_ke1 === 'function' && typeof ex.sr_login_finish === 'function';
+const MOCK_FP = (s) => { let h = 0x811c9dc5; for (const b of enc.encode(s)) { h ^= b; h = Math.imul(h, 0x01000193) >>> 0; } return h.toString(16).padStart(8, '0'); };
+const MOCK_B64 = (o) => bytesToB64(enc.encode(JSON.stringify(o)));
+function MOCK_PARSE(b64) { try { return JSON.parse(dec.decode(Uint8Array.from(atob(b64), (c) => c.charCodeAt(0)))); } catch { return null; } }
+let mockSidSeq = 0;
+const MOCK_SESS = new Map();
+/** ① login_start：产出 ke1（真垫片=盲化 OPRF 份额 + 临时份额；mock=形状兼容假报文）。返回 {sid, ke1}。 */
+function opaqueStart(user, pass) {
+  if (OPAQUE_SHIM) {
+    const [pp, pl] = put(enc.encode(pass)), [up, ul] = put(enc.encode(user));
+    let sid;
+    try { sid = ex.sr_login_start(pp, pl, up, ul); } // rwd 硬化在垫片内部完成
+    finally { unput(pp, pl); unput(up, ul); }
+    if (sid <= 0) throw { error: 'E_NET', msg: `login_start 失败（${sid}；-6=熵未注入）` };
+    const ke1 = shimCStr((p, c) => ex.sr_login_ke1(sid, p, c), 2048); // 幂等可重复取
+    return { sid, ke1 };
+  }
+  const sid = ++mockSidSeq;
+  MOCK_SESS.set(sid, { user, r: MOCK_FP(`showroom-opaque-mock|${user}|${pass}`) });
+  return { sid, ke1: MOCK_B64({ v: 1, m: 'ke1', u: user, n: nonceHex() }) };
+}
+/** ② login_finish：以 ke2 在本地完成密钥交换；密码错误在此抛 E_PW_LOCAL（不产生第三请求）。 */
+function opaqueFinish(sid, pass, ke2) {
+  if (OPAQUE_SHIM) {
+    const [pp, pl] = put(enc.encode(pass)), [kp, kl] = put(enc.encode(ke2));
+    const cap = 2048, out = alloc(cap); // finish 一次性消费会话：首给足容量，不做探测重试
+    const r = ex.sr_login_finish(sid, pp, pl, kp, kl, out, cap);
+    unput(pp, pl); unput(kp, kl);
+    const ke3 = r > 0 ? readCStr(out, r) : null;
+    unput(out, cap);
+    if (r === -7) throw { error: 'E_PW_LOCAL', msg: '' }; // 密码错误/协议失败：本地判定
+    if (!ke3) throw { error: 'E_NET', msg: `login_finish 失败（${r}）` };
+    return ke3;
+  }
+  const st = MOCK_SESS.get(sid), j = MOCK_PARSE(ke2);
+  if (!st || !j || j.m !== 'ke2' || j.mac !== MOCK_FP(`mac|${j.n}|${st.r}`)) throw { error: 'E_PW_LOCAL', msg: '' };
+  return MOCK_B64({ v: 1, m: 'ke3', mac: j.mac });
+}
+function opaqueEnd(sid) { MOCK_SESS.delete(sid); } // 真垫片会话在 finish 时一次性自弃；此处仅清 mock 映射
+
+// —— 一步登录（plan-16 §2.2/§3）：login-begin → 本地 finish → login-finish → key-bind → 进入 ——
+async function postAuthJson(path, body) { // /_api/auth/*：唯一应答未签名请求的端点族（§2.3）
+  const resp = await fetch(path, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
+  return checkResp(resp);
+}
+/** key-bind：候选钥匙签名（服务端按 body 内公钥验签而非已登记钥匙）+ 一次性 bind_token。 */
+async function apiBind(user, pubkey, bindToken) {
+  const body = enc.encode(JSON.stringify({ user, pubkey }));
+  const [bp, bl] = put(body);
+  const auth = signHeaderPtr('POST', '/_api/auth/key-bind', bp, bl);
+  unput(bp, bl);
+  const resp = await fetch('/_api/auth/key-bind', {
+    method: 'POST',
+    headers: { Authorization: auth, 'X-Sr-Bind': bindToken, 'Content-Type': 'application/json' },
+    body,
+  });
+  return checkResp(resp);
+}
+/** 密码登录全程：密钥生成/绑定无感；密码只在本地参与 OPAQUE 盲化，永不明文上线。 */
+async function passwordLogin(user, pass) {
+  ensureSeed();               // 无感：无本地钥匙即刻生成（key-bind 的候选钥匙）
+  state.user = user;
+  state.boundAdmin = false;
+  const st = opaqueStart(user, pass);                                    // ① ke1（未签名）
+  let r;
+  try { r = await postAuthJson('/_api/auth/login-begin', { user, ke1: st.ke1 }); }
+  catch (e) { opaqueEnd(st.sid); throw e; }
+  let ke3;
+  try { ke3 = opaqueFinish(st.sid, pass, r.ke2); }                            // ② 本地 finish（错密码即败）
+  finally { opaqueEnd(st.sid); }
+  const r2 = await postAuthJson('/_api/auth/login-finish', { user, ke3 }); // ③ ke3 → bind_token（60s 单次）
+  const kb = await apiBind(user, state.pub, r2.bind_token);                // ④ 绑定（幂等：同钥匙重绑=ok）
+  state.kid = kb.kid || '';
+  state.boundAdmin = !!kb.admin; // §2.2：账号持 admin 钥匙 → 密码绑定的新钥匙继承 admin（显式提示）
+  localStorage.setItem('sr.user', user); // 账号与钥匙一起记忆：下次自测直达（免密码）
+}
+async function onLoginSubmit(ev) {
+  ev.preventDefault();
+  clearErrs('lg-user', 'lg-pass');
+  const user = $('lg-user').value.trim();
+  if (!NAME_RE.test(user)) return fieldErr('lg-user', `账号「${user}」不合法（须匹配 ^[a-z0-9][a-z0-9-]{0,30}$），请修改后重试`);
+  const pass = $('lg-pass').value;
+  if (!pass) return fieldErr('lg-pass', '请输入密码；忘记密码请联系管理员重置');
+  busy($('lg-submit'), true, '登录中…');
+  $('lg-fb').textContent = '正在登录…';
+  try {
+    await passwordLogin(user, pass);
+    $('lg-pass').value = ''; // 用后即清，不留在 DOM
+    $('lg-fb').textContent = '';
+    enterApp();
+    if (state.boundAdmin) showMsg('管理员账号：本设备已继承管理员权限（顶部「管理」标签可用）。', 'ok');
+  } catch (e) {
+    $('lg-fb').textContent = '';
+    if (e && e.error === 'E_PW_LOCAL') {
+      // 客户端无法也不应区分「密码错」与「未设密码」（防枚举的一致代价，§3）
+      fieldErr('lg-pass', '密码错误，或该账号尚未设置密码（请联系管理员重置）');
+    } else if (e && e.error === 'E_AUTH') {
+      fieldErr('lg-pass', '登录被服务端拒绝（可能为限流或服务暂不可用），请稍后重试；忘记密码请联系管理员重置');
+    } else {
+      apiFail('登录', e);
+    }
+  } finally { busy($('lg-submit'), false); }
+}
+
+// —— 登录门引导：有 seed+user → 签名 health 自测直达；E_AUTH 回落密码表单（§2.2「找回/换设备」） ——
+async function bootSelfTest() {
+  try {
+    await api('GET', '/_api/health');
+    enterApp();
+  } catch (e) {
+    if (e.error === 'E_AUTH') {
+      $('lg-fb').textContent = '本设备登录凭据已失效（钥匙可能已被删除或回收）：请输入账号密码重新登录，将自动绑定新钥匙。';
+      $('lg-pass').focus?.();
+    } else {
+      apiFail('登录（连接探测）', e);
+    }
   }
 }
+/** 「忘记此设备」（plan-16 §3）：清 sr.seed/sr.user；可选联动 key-selfrm 远端注销本机钥匙。 */
+async function onForgetDevice() {
+  if (!confirm('确认忘记此设备？将清除本机保存的钥匙与账号记忆（不影响服务端数据与其他设备）。')) return;
+  let note = '';
+  if (state.seed && NAME_RE.test(state.user || '')) {
+    if (confirm('是否同时在本平台注销本机钥匙（远程删除，其他设备不受影响）？服务端不可达时可跳过。')) {
+      try {
+        const w = await api('GET', '/_api/whoami');
+        await api('POST', '/_api/key-selfrm', { kid: w.kid || '' }); // 仅允许删除签名所用钥匙自身
+        note = '，并已远程注销本机钥匙';
+      } catch { note = '（远程注销未完成：服务端不可达或钥匙已失效；本机数据仍已清除）'; }
+    }
+  }
+  localStorage.removeItem('sr.seed');
+  localStorage.removeItem('sr.user');
+  state.seed = null; state.pub = ''; state.user = ''; state.kid = ''; state.loggedIn = false;
+  $('lg-user').value = ''; $('lg-pass').value = '';
+  $('lg-reenter').classList.add('hidden');
+  $('lg-fb').textContent = '';
+  refreshLoginChrome();
+  showMsg(`已忘记此设备${note}。请重新登录。`, 'ok');
+  ensureSeed();     // 无感基线：下一轮登录的候选钥匙即刻就绪
+  setupExpert();
+}
+function refreshLoginChrome() { // 「忘记此设备」仅在有记忆账号时出现
+  $('lg-forget').classList.toggle('hidden', !localStorage.getItem('sr.user'));
+}
+
+// —— 专家路径：钥匙登录（plan-16 §3 折叠）——本机已有 / 导入种子 → 自测 → 公钥登记+重检循环 ——
+const wiz = { choice: 'use' };
 function pickKeyChoice(v) {
   wiz.choice = v;
-  for (const r of ['use', 'new', 'import']) $(`wz-r-${r}`).checked = r === v;
+  for (const r of ['use', 'import']) $(`wz-r-${r}`).checked = r === v;
   $('wz-import-box').classList.toggle('hidden', v !== 'import'); // 选「导入」才出现粘贴框
   $('wz-seed-err').classList.toggle('hidden', v !== 'import');
 }
-function setupStep2() { // 自动检测：本机已有种子 → 默认「使用已有」；否则默认「生成」
-  $('wz-userEcho').textContent = state.user;
+function setupExpert() { // 折叠打开时刷新：本机指纹可见性与默认单选（种子由无感层保证存在）
   loadSeed();
   const has = !!state.seed;
   $('wz-l-use').classList.toggle('hidden', !has);
   if (has) $('wz-fp').textContent = pubFp();
-  $('wz-new-text').textContent = has ? '重新生成新密钥' : '生成新密钥（本设备推荐）';
   $('wz-seed').value = '';
-  pickKeyChoice(has ? 'use' : 'new');
+  pickKeyChoice(has ? 'use' : 'import');
 }
-function enterStep3(auto) {
-  gotoStep(3);
-  $('wz-v-user').textContent = state.user;
+function enterVerify(auto) {
+  $('wz-p3').classList.remove('hidden');
   $('wz-v-fp').textContent = pubFp();
   $('wz-pub').textContent = state.pub;
   $('wz-pubbox').classList.add('hidden');
   $('wz-v-fb').textContent = '';
-  if (auto) verifyLogin();
+  if (auto) expertVerify();
 }
-async function verifyLogin() { // 步骤 3：签名自测；E_AUTH → 公钥展示 + 手动重检循环
+async function expertVerify() { // 签名自测；E_AUTH → 公钥串展示 + 手动重检循环（专家路径保留）
   if (!state.seed || !state.user) return;
   $('wz-v-fb').textContent = '正在自动验证密钥（签名自测）…';
   $('wz-recheck').disabled = true;
@@ -813,35 +995,16 @@ async function verifyLogin() { // 步骤 3：签名自测；E_AUTH → 公钥展
       $('wz-pubbox').classList.remove('hidden');
     } else {
       $('wz-v-fb').textContent = '';
-      apiFail('登录（连接探测）', e);
+      apiFail('钥匙登录（连接探测）', e);
     }
   }
 }
-
-// —— 向导事件 ——
-$('lg-srv').textContent = location.origin + '/_api';
-$('wz-user').addEventListener('keydown', (ev) => { if (ev.key === 'Enter') { ev.preventDefault(); $('wz-next1').click(); } });
-$('wz-user').addEventListener('input', () => fieldErr('wz-user', ''));
-$('wz-next1').addEventListener('click', () => {
-  const v = $('wz-user').value.trim();
-  if (!NAME_RE.test(v)) return fieldErr('wz-user', `账号「${v}」不合法（须匹配 ^[a-z0-9][a-z0-9-]{0,30}$），请修改后重试`);
-  state.user = v;
-  setupStep2();
-  gotoStep(2);
-});
-for (const r of ['use', 'new', 'import']) $(`wz-r-${r}`).addEventListener('change', () => pickKeyChoice(r));
-$('wz-back2').addEventListener('click', () => gotoStep(1));
-$('wz-seed').addEventListener('input', () => fieldErr('wz-seed', ''));
-$('wz-next2').addEventListener('click', () => {
+function onExpertKey() {
+  const user = $('lg-user').value.trim();
+  if (!NAME_RE.test(user)) return fieldErr('lg-user', `账号「${user}」不合法（须匹配 ^[a-z0-9][a-z0-9-]{0,30}$），请先在上方登录卡填写账号`);
+  state.user = user;
   if (wiz.choice === 'use') {
-    if (!state.seed) return showMsg('本机没有已有密钥，请选择生成或导入');
-  } else if (wiz.choice === 'new') {
-    const sp = alloc(32);
-    if (ex.sr_generate(sp) !== 0) { unput(sp, 32); return showMsg('密钥生成失败（垫片错误）'); }
-    const hex = toHex(mem().slice(sp, sp + 32));
-    unput(sp, 32);
-    localStorage.setItem('sr.seed', hex);
-    showMsg('已生成新密钥并存入 localStorage（试验性存储）。', 'ok');
+    if (!state.seed) return showMsg('本机没有已有密钥：请选「导入密钥种子」，或收起本折叠直接用账号密码登录');
   } else { // 导入
     const hex = $('wz-seed').value.trim().toLowerCase();
     if (!/^[0-9a-f]{64}$/.test(hex)) return fieldErr('wz-seed', 'seed 必须是 64 位十六进制（32 字节），请粘贴 showroom keygen 导出的完整种子');
@@ -849,10 +1012,29 @@ $('wz-next2').addEventListener('click', () => {
     showMsg('密钥已导入本机（试验性存储）。', 'ok');
   }
   loadSeed();
-  localStorage.setItem('sr.user', state.user); // 账号与种子一起记忆：下次直达第 3 步
-  enterStep3(true);
+  localStorage.setItem('sr.user', state.user); // 账号与种子一起记忆
+  enterVerify(true);
+}
+
+// —— 登录区事件 ——
+$('lg-srv').textContent = location.origin + '/_api';
+$('lg-form').addEventListener('submit', onLoginSubmit);
+$('lg-user').addEventListener('input', () => fieldErr('lg-user', ''));
+$('lg-pass').addEventListener('input', () => fieldErr('lg-pass', ''));
+$('lg-expert').addEventListener('toggle', setupExpert);
+for (const r of ['use', 'import']) $(`wz-r-${r}`).addEventListener('change', () => pickKeyChoice(r));
+$('wz-seed').addEventListener('input', () => fieldErr('wz-seed', ''));
+$('wz-verify').addEventListener('click', onExpertKey);
+$('wz-recheck').addEventListener('click', () => expertVerify());
+$('wz-copypub').addEventListener('click', () => copyText(state.pub, '公钥串'));
+$('lg-reenter').addEventListener('click', async () => { // 退出登录后：本机钥匙仍有效，免密码重进
+  busy($('lg-reenter'), true, '进入中…');
+  $('lg-fb').textContent = '正在验证本机钥匙…';
+  await bootSelfTest();
+  busy($('lg-reenter'), false);
+  if (!state.loggedIn && !$('lg-fb').textContent) $('lg-fb').textContent = '本机钥匙未通过自测：请输入账号密码重新登录。';
 });
-$('wz-recheck').addEventListener('click', () => verifyLogin());
+$('lg-forget').addEventListener('click', onForgetDevice);
 /** 复制到剪贴板（优先 Clipboard API，降级 execCommand；均失败提示手动复制）。 */
 async function copyText(text, what) {
   try {
@@ -864,7 +1046,6 @@ async function copyText(text, what) {
   catch { showMsg(`复制失败，请手动选中${what}复制。`); }
   ta.remove();
 }
-$('wz-copypub').addEventListener('click', () => copyText(state.pub, '公钥串'));
 
 // —— SR-SIG1 签名请求（SPEC §1/§3：所有 /_api 一律签名）——
 function nonceHex() {
@@ -968,8 +1149,12 @@ function logout() {
   stopEventsStream();               // 平台事件流同上
   $('app').classList.add('hidden');
   $('login').classList.remove('hidden');
-  enterStep3(false); // 密钥仍在：回到第 3 步等待手动重检（不自动重进）
-  $('wz-v-fb').textContent = '已退出登录（密钥仍保留在本机）。点【重新检测】可重新进入。';
+  // 密钥仍保留在本机（plan-16 §3：退出登录不删 seed）：可免密码重进，或密码登录切换账号
+  $('wz-p3').classList.add('hidden');
+  $('lg-pass').value = '';
+  $('lg-reenter').classList.remove('hidden');
+  refreshLoginChrome();
+  $('lg-fb').textContent = '已退出登录（本机钥匙仍保留）。可点【免密码进入】再次进入，或输入账号密码切换账号。';
 }
 // —— §11 随机项目名：crypto.getRandomValues 拒绝采样生成 8 位 [a-zA-Z0-9]（降低字典遍历发现门槛） ——
 function randomProject() {
@@ -2367,12 +2552,16 @@ async function onRedisKeyPick() {
   } catch (e) { $('rd-meta').textContent = ''; apiFail('Redis 值读取', e); }
 }
 
-// —— 初始化（SPEC §10.1）：本机已有「账号+种子」→ 直达第 3 步自测；否则从第 1 步走完整向导 ——
+// —— 初始化（plan-16 §3）：无感生成钥匙；有「钥匙+账号」→ 签名自测直达（免密码）；
+//    自测失败回落密码表单（E_AUTH=钥匙被删/回收 → 密码重绑新钥匙=「找回/换设备」） ——
 state.user = localStorage.getItem('sr.user') || '';
-loadSeed();
-$('wz-user').value = state.user;
-if (state.seed && NAME_RE.test(state.user)) enterStep3(true);
-else gotoStep(1);
+ensureSeed();
+$('lg-user').value = state.user;
+refreshLoginChrome();
+setupExpert();
+if (state.seed && NAME_RE.test(state.user)) bootSelfTest();
+else if (state.user) $('lg-pass').focus?.();
+else $('lg-user').focus?.();
 </script>
 </body>
 </html>

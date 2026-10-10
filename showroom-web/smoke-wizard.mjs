@@ -1,38 +1,47 @@
 #!/usr/bin/env node
-// showroom-web 向导冒烟（SPEC §10.1/§10.2/§10.3/§10.4/§11/§12/§13；无浏览器依赖，node ≥ 18）：
+// showroom-web 向导冒烟（SPEC §10.2/§10.3/§10.4/§11/§12/§13 + plan-16 认证重设计；无浏览器依赖，node ≥ 18）：
 //   把 dist/index.html 的 <script type="module"> 挂到 mock DOM/localStorage/fetch 上执行，
-//   驱动登录向导状态机走完全部分支：
-//   1) 全新浏览器（无种子无账号）→ 三步向导 → E_AUTH 公钥展示与重检循环
-//      → 模拟管理员登记成功 → 进入管理壳（展项列表请求渲染）
-//   2) 同浏览器再访（账号+种子匹配）→ 直达第 3 步并自动进入
-//   3) 种子在、账号换 → 走完整向导（第 2 步默认「使用本机已有密钥」，指纹与公钥一致）
-//   4) 「导入密钥种子」分支：非法 seed 拒绝（字段内联错误+聚焦）；合法 seed 进入第 3 步
-//   5) §11 去版本字段：发布表单随机 8 位项目名 +「换一个」+ URL 恒 /<project>/
-//   6) §10.4 流式消费：日志实时流（ndjson 行缓冲/1000 行帽/时间戳/开关停流）、
+//   驱动登录与控制台状态机走完全部分支：
+//   1) plan-16 一步登录（账号+密码，密钥无感）：全新浏览器 → 无感自动生成 seed（零提示、
+//      DOM 无 seed/公钥展示）→ 错密码本地 finish 即失败（两态文案+无第三请求）→ 正确密码
+//      login-begin/finish → key-bind（SR-SIG1 候选钥匙签名 + X-Sr-Bind 一次性令牌）→ 进入管理壳；
+//      全部上线请求体无密码明文（OPAQUE 形状级断言，mock 垫片下）
+//   2) 同浏览器再访（钥匙+账号记忆）→ 签名自测直达（零 auth 请求）；§12.2 管理员态；
+//      退出登录不删 seed → 「免密码进入」重进
+//   3) E_AUTH 回落（钥匙被删/GC）→ 密码表单 + 失效提示 → 密码重绑（同钥匙幂等）→ 进入
+//   4) 失败两态之二：服务端 404 E_AUTH（限流/拒绝文案，无后续请求）；未知用户 login-begin
+//      仍 200 且与错密码同文案（防枚举）；换账号密码登录（沿用本机钥匙 + admin 继承显式提示）；
+//      whoami 失败顶部条报错
+//   5) 「忘记此设备」：confirm 取消不清除；确认 → key-selfrm {kid}（仅删自身）→ 本地清
+//      sr.seed/sr.user → 无感层即刻重生成新候选钥匙 → 干净登录卡
+//   6) 专家路径（钥匙登录折叠）：本机已有默认选中（指纹=公钥载荷前 8 位）/ 导入种子
+//      （非法 seed 字段内联拒绝；合法导入）→ E_AUTH 公钥展示与重检循环 → 登记后进入
+//   7) §11 去版本字段：发布表单随机 8 位项目名 +「换一个」+ URL 恒 /<project>/
+//   8) §10.4 流式消费：日志实时流（ndjson 行缓冲/1000 行帽/时间戳/开关停流）、
 //      平台事件流（sr- 过滤/心跳忽略/20 条滚动/2s 去抖刷新/断线 5 秒重连）、
 //      三段式备份下载（begin → status 两轮轮询 → 两个 4MB chunk → wasm 流式解密 → Blob 落地）
-//   7) 上传压缩统一（zstd）：发布表单选普通镜像 tar → 自动 zstd-19 压缩 → import-begin
+//   9) 上传压缩统一（zstd）：发布表单选普通镜像 tar → 自动 zstd-19 压缩 → import-begin
 //      的 total_bytes 按压缩后长度申报（与独立 wasm 实例同粒度重压缩逐字节对账）；
 //      恢复上传魔数两态（已是 zstd 原样 / 原生 -Fc 压缩后），信封长度按对应载荷核算
-//   8) §12.1 一键部署：状态条①压缩（x%）→②上传（已传/压缩后总长）→③发布→④完成（大字 URL）
+//  10) §12.1 一键部署：状态条①压缩（x%）→②上传（已传/压缩后总长）→③发布→④完成（大字 URL）
 //      四段流转；发布失败标红重试（项目留空自动生成回填）；上传失败断点续传重试
-//   9) §12.2 管理员：whoami 两态（admin=false 管理 DOM 不存在 / true 第五标签渲染）、
+//  11) §12.2 管理员：whoami 两态（admin=false 管理 DOM 不存在 / true 第五标签渲染）、
 //      账号与钥匙表、发卡对话框提交体校验（registry 密码仅显示一次）、行内管理动作
 //      （key-admin/key-rm/user-revoke + 中文 confirm 文案）、平台状态面板、30s 自动刷新、
 //      admin 接口 404 E_AUTH 顶部条报错、whoami 失败顶部条报错
-//  10) §13 发布三入口并存：一键部署 / 仅上传（无 publish 调用，③④ skip，镜像已入库提示）/
+//  12) §13 发布三入口并存：一键部署 / 仅上传（无 publish 调用，③④ skip，镜像已入库提示）/
 //      部署表单（/_api/images 惰性加载+刷新+选择自动带出项目标签+发布）；
 //      §13.2 Redis 浏览用户隔离文案 + 管理员视图标注（whoami 两态）
-//  11) 静态断言：「内存上限」「槽位/slot」零残留 / §10.3-§13 端点已接入 /
-//      旧单发 db-dump 已移除 / 新增文案全中文（无英文混排）/
-//      界面规范（无内联事件/无 transition:all/无 outline:none/占位符 … 结尾/
-//      tablist 语义/reduced-motion/overscroll/touch-action/tabular-nums/theme-color）
-//  12) §14 磁盘空间与镜像删除：上传区空间条（/_api/space 常显「可用空间（已扣预留）」一位小数 /
+//  13) 静态断言：「内存上限」「槽位/slot」零残留 / 旧三步向导主路径零残留 /
+//      §10.3-§13 + plan-16 auth 端点已接入 / 旧单发 db-dump 已移除 /
+//      新增文案全中文（无英文混排）/ 界面规范（无内联事件/无 transition:all/无 outline:none/
+//      占位符 … 结尾/tablist 语义/reduced-motion/overscroll/touch-action/tabular-nums/theme-color）
+//  14) §14 磁盘空间与镜像删除：上传区空间条（/_api/space 常显「可用空间（已扣预留）」一位小数 /
 //      手动刷新 / 拉取失败静默「空间信息不可用」/ import-end 成功后自动刷新）、
 //      镜像清单每行删除（confirm 含镜像名与回滚失效语义 → image-rm 提交体 → alert 回收量 →
 //      清单+空间条刷新；confirm 取消不提交；失败走顶部条）、
 //      磁盘 E_QUOTA 顶部条追加删除引导并刷新空间条（内存类 E_QUOTA 不追加）
-//  13) §15 主机编排：期望状态渲染（中间件开关+「已启用」徽标 / host.env 其余键通用键值渲染
+//  15) §15 主机编排：期望状态渲染（中间件开关+「已启用」徽标 / host.env 其余键通用键值渲染
 //      含 FRP 不特判 / 四参数当前值回填 / 漂移黄条 warn-err 两档）、两段式（无 confirm 仅预演
 //      返回 actions+impact 人读行不落盘；confirm=true 才 POST 执行并渲染报告；禁用中间件
 //      impact 含受影响项目 → 红色警示 + 二次 confirm 取消不提交）、Redis 池黄条两态
@@ -81,15 +90,19 @@ function makeEl(id) {
 const fire = (el, ev, arg) => { for (const fn of el.listeners[ev] || []) fn(arg || { preventDefault() {}, target: el, key: '' }); };
 const $s = (id) => { if (!els.has(id)) els.set(id, makeEl(id)); return els.get(id); };
 const click = (id) => fire($s(id), 'click', { preventDefault() {} });
-const typeIn = (id) => fire($s(id), 'keydown', { key: 'Enter', preventDefault() {} });
 const hidden = (id) => $s(id).classList.contains('hidden');
 const shown = (id) => !hidden(id);
 const tabBtn = (name) => ({ dataset: { tab: name }, classList: new Cls(), closest: () => ({ dataset: { tab: name } }) });
 const clickTab = (name) => fire($s('tabs'), 'click', { target: tabBtn(name) });
 /** tabs 方向键支持：querySelectorAll 桩返回按钮序列（与页面 #tabs 初始顺序一致）。 */
 const armTabs = () => { $s('tabs').querySelectorAll = () => ['proj', 'db', 'status', 'help'].map(tabBtn); };
+/** 与真实登录 HTML 的初始 class 对齐（惰性元素桩无 class 信息；断言「初始不可见」前先打桩）。 */
+const armLoginInit = () => {
+  for (const id of ['wz-p3', 'wz-pubbox', 'wz-import-box', 'wz-seed-err', 'lg-reenter', 'lg-forget']) $s(id).classList.add('hidden');
+};
 /** 模拟浏览器渲染 HTML：给关键按钮桩设置初始文案（busy 恢复断言按真实文字比对）。 */
 const BTN_TEXT = {
+  'lg-submit': '登录',
   'pub-submit': '一键部署', 'btn-upload-only': '仅上传', 'dep-submit': '发布', 'ad-na-submit': '发放',
   'hs-apply': '查看变更', 'hs-confirm': '确认执行', 'hs-rx-preview': '获取确认提示', 'hs-rx-run': '我已了解，执行扩容',
 };
@@ -122,6 +135,30 @@ const wasmBytes = readFileSync(new URL('./dist/showroom_bg.wasm', import.meta.ur
 const enc2 = new TextEncoder(), dec2 = new TextDecoder();
 const exW = (await WebAssembly.instantiate(wasmBytes, {})).instance.exports;
 const wmem = () => new Uint8Array(exW.memory.buffer);
+
+// —— OPAQUE 导出剥离钩子：本冒烟的 auth 服务端是 toy mock，只能与页面的 mock 垫片分支对话 ——
+// 无论 dist/showroom_bg.wasm 是否已随新垫片重建（含 sr_login_*），页面加载路径在此一律剥掉
+// OPAQUE 导出，确定性地驱动 mock 分支（报文序列形状 + 界面行为）；真 OPAQUE 往返由
+// cargo test（common 固定向量 / serve 端到端）覆盖。上方 exW 用原始 instantiate，不受影响。
+{
+  const strip = (exports) => {
+    const e = { ...exports };
+    for (const k of Object.keys(e)) if (k === 'sr_rwd' || k.startsWith('sr_login') || k.startsWith('sr_reg')) delete e[k];
+    return e;
+  };
+  const origInstantiate = WebAssembly.instantiate.bind(WebAssembly);
+  WebAssembly.instantiate = async (bytes, imports) => {
+    const r = await origInstantiate(bytes, imports);
+    return { module: r.module, instance: { exports: strip(r.instance.exports) } };
+  };
+  const origStreaming = WebAssembly.instantiateStreaming?.bind(WebAssembly);
+  if (origStreaming) {
+    WebAssembly.instantiateStreaming = async (src, imports) => {
+      const r = await origStreaming(src, imports);
+      return { module: r.module, instance: { exports: strip(r.instance.exports) } };
+    };
+  }
+}
 function pubOf(hexSeed) {
   const p = exW.sr_alloc(32), o = exW.sr_alloc(128);
   for (let i = 0; i < 32; i++) wmem()[p + i] = parseInt(hexSeed.substr(i * 2, 2), 16);
@@ -196,7 +233,20 @@ const sealedTotal = (n) => WRAP + n + Math.ceil(n / SEG) * (NONCE + TAG);
 // —— fetch 垫片：wasm 服务真实字节；/_api 按 mode 返回（unregistered → 404 E_AUTH） ——
 const resp = (status, obj) => ({ ok: status < 400, status, text: async () => JSON.stringify(obj) });
 const PROJECTS = { projects: [{ project: 'demo', user: 'alice', tag: 'v1', url: '/demo/', status: 'running', port: 8100, mem: '256m', cpu: 0, updated: '2026-10-10T12:00:00' }] };
-let mode = 'unregistered'; // unregistered | ok
+let mode = 'unregistered'; // unregistered | ok（key-bind 成功 → ok）
+// —— plan-16 §2.2 auth 端点族 mock（与页面 MOCK 垫片同一 toy 协议：ke2 内嵌验证因子，
+//    错密码/未知用户在客户端本地 finish 即失败——行为契约与真 OPAQUE 一致：无第三请求） ——
+const fnv = (s) => { let h = 0x811c9dc5; for (const b of enc2.encode(s)) { h ^= b; h = Math.imul(h, 0x01000193) >>> 0; } return h.toString(16).padStart(8, '0'); };
+const mockR = (user, pass) => fnv(`showroom-opaque-mock|${user}|${pass}`);
+const mB64 = (o) => Buffer.from(JSON.stringify(o)).toString('base64');
+const mParse = (b64) => { try { return JSON.parse(Buffer.from(String(b64), 'base64').toString('utf8')); } catch { return null; } };
+const PWDB = { alice: { pass: 'alice-pw', admin: false }, bob: { pass: 'bob-pw', admin: true } };
+let authBeginN = 0, authFinishN = 0, authBindN = 0, selfrmN = 0, bindSeq = 0;
+let authServerDown = false;              // true：login-begin 一律 404 E_AUTH（失败态二：限流/拒绝）
+let pendingBind = null;                  // 服务端在途 bind_token（单次使用语义）
+const authBeginBodies = [], authFinishBodies = [], keyBindBodies = [], keyBindAuths = [], keyBindToks = [];
+const selfrmBodies = [];
+const wireTexts = [];                    // 全部上线请求体（密码零明文断言用）
 // 观测计数 / 捕获（场景 6 断言用）
 let projectsN = 0, eventsN = 0, logsN = 0, statusN = 0;
 let lastLogsUrl = '', lastLogsAuth = '', lastEventsAuth = '', beginBody = null;
@@ -293,7 +343,42 @@ const LOG_LINES = Array.from({ length: 1003 }, (_, i) => `{"t":1760000100000,"l"
 globalThis.fetch = async (url, init = {}) => {
   const u = String(url);
   const auth = init?.headers?.Authorization || '';
+  // 上线内容全量留档（密码零明文断言用；二进制体按 utf8 有损解码仅为子串扫描）
+  const t = typeof init.body === 'string' ? init.body
+    : (init.body instanceof Uint8Array ? dec2.decode(init.body) : '');
+  if (t) wireTexts.push(`${u} ${t}`);
   if (u.includes('showroom_bg.wasm')) return { ok: true, status: 200, text: async () => '', arrayBuffer: async () => wasmBytes.buffer.slice(wasmBytes.byteOffset, wasmBytes.byteOffset + wasmBytes.byteLength) };
+  // —— plan-16 §2.2：唯一应答未签名请求的端点族；畸形/限流一律 404 E_AUTH（与未知路径一致） ——
+  if (u.includes('/_api/auth/login-begin')) {
+    authBeginN++;
+    const body = JSON.parse(t);
+    authBeginBodies.push(body);
+    if (authServerDown) return resp(404, { error: 'E_AUTH' });
+    const rec = PWDB[body.user];
+    const rCorrect = rec ? mockR(body.user, rec.pass) : fnv(`unknown|${body.user}`); // 未知用户走假记录路径（防枚举）
+    const n = `n${authBeginN}`;
+    return resp(200, { ke2: mB64({ v: 1, m: 'ke2', n, mac: fnv(`mac|${n}|${rCorrect}`) }) });
+  }
+  if (u.includes('/_api/auth/login-finish')) {
+    authFinishN++;
+    const body = JSON.parse(t);
+    authFinishBodies.push(body);
+    const j = mParse(body.ke3);
+    if (!j || j.m !== 'ke3') return resp(404, { error: 'E_AUTH' });
+    pendingBind = { user: body.user, token: `bindtok-${++bindSeq}` };
+    return resp(200, { bind_token: pendingBind.token });
+  }
+  if (u.includes('/_api/auth/key-bind')) {
+    authBindN++;
+    const body = JSON.parse(t);
+    const tok = init?.headers?.['X-Sr-Bind'] || '';
+    keyBindBodies.push(body); keyBindAuths.push(auth); keyBindToks.push(tok);
+    if (!pendingBind || pendingBind.token !== tok || pendingBind.user !== body.user) return resp(404, { error: 'E_AUTH' });
+    pendingBind = null; // bind_token 单次使用
+    mode = 'ok';        // 绑定成功 ⇒ 候选钥匙此后 health 自测通过
+    return resp(200, { kid: `kid-bind-${authBindN}`, admin: !!(PWDB[body.user] && PWDB[body.user].admin) });
+  }
+  if (u.includes('/_api/key-selfrm')) { selfrmN++; selfrmBodies.push(JSON.parse(t)); return resp(200, { ok: true }); }
   if (u.includes('/_api/health')) return mode === 'ok' ? resp(200, { ok: true }) : resp(404, { error: 'E_AUTH' });
   if (u.includes('/_api/projects')) { projectsN++; return resp(200, PROJECTS); }
   if (u.includes('/_api/images')) { // §13.1：admin 钥匙全量（admin_view），普通仅本人前缀；§14.3 删除后清单收敛
@@ -437,40 +522,63 @@ const file = join(mkdtempSync(join(tmpdir(), 'sr-wiz-')), 'wiz.mjs');
 writeFileSync(file, script);
 const load = (t) => import(pathToFileURL(file).href + `?t=${t}`);
 
-// ═══ 场景 1：全新浏览器 → 三步向导 → E_AUTH 循环 → 登记成功进入管理壳 ═══
+// ═══ 场景 1：全新浏览器 → 无感生成钥匙 → 密码登录（失败两态/成功绑定）→ 进入管理壳 ═══
 mode = 'unregistered';
 els.clear();
 await load(1);
 armTabs(); // tabs 方向键桩
 armBtnText(); // 按钮初始文案（busy 恢复断言用）
+armLoginInit(); // 登录卡初始 hidden 桩（对齐真实 HTML）
 await sleep(40);
-ok(shown('wz-p1') && hidden('wz-p2') && hidden('wz-p3'), '全新访问：仅第 1 步可见');
-ok($s('wz-s1').classList.contains('on') && !$s('wz-s2').classList.contains('on'), '步骤条指示 1/3');
-ok(shown('login') && !els.has('hd-user'), '登录前：只有登录向导，管理壳未构建（零管理信息）');
-$s('wz-user').value = 'alice';
-typeIn('wz-user'); // 回车 = 下一步
-ok(shown('wz-p2') && hidden('wz-p1'), '回车提交：进入第 2 步「选择密钥」');
-ok(hidden('wz-l-use'), '无存量密钥：「使用本机已有密钥」不出现');
-ok($s('wz-r-new').checked && !$s('wz-r-import').checked && hidden('wz-import-box'), '无存量：默认「生成新密钥」，导入粘贴框隐藏');
-ok($s('wz-userEcho').textContent === 'alice', '第 2 步回显账号');
-click('wz-next2');
+ok(shown('login') && !els.has('hd-user'), '登录前：只有登录卡（一步「账号+密码」），管理壳未构建（零管理信息）');
 const seed1 = store.get('sr.seed');
-ok(/^[0-9a-f]{64}$/.test(seed1 || ''), `生成 seed 写入 localStorage（${(seed1 || '').slice(0, 8)}…）`);
-ok(store.get('sr.user') === 'alice', '账号与种子一起记忆（sr.user）');
-ok(shown('wz-p3'), '进入第 3 步「验证」');
-await sleep(60);
-ok(shown('wz-pubbox'), 'E_AUTH：展示公钥串区块');
-ok($s('wz-pub').textContent === pubOf(seed1), '公钥串与 wasm 独立推导一致');
-ok(/^ed25519:[A-Za-z0-9+/]{43}$/.test($s('wz-pub').textContent), '公钥串格式 ed25519:<b64-43>');
-ok(shown('login'), '未登记：停留在登录向导');
-click('wz-recheck');
-await sleep(40);
-ok(shown('wz-pubbox') && shown('login'), '重新检测：仍未登记 → 公钥展示循环');
-mode = 'ok'; // 模拟管理员完成 user-add 登记
-click('wz-recheck');
+ok(/^[0-9a-f]{64}$/.test(seed1 || ''), `无感断言：首访自动生成 seed 入 localStorage（${(seed1 || '').slice(0, 8)}…）`);
+ok(($s('msg').textContent || '') === '', '无感断言：密钥生成零提示（顶部条静默）');
+ok(hidden('wz-pubbox') && ($s('wz-pub').textContent || '') === '' && hidden('wz-p3'), '无感断言：主路径 DOM 无公钥串/验证面板展示');
+{
+  const pub1 = pubOf(seed1);
+  const leaked = [...els.values()].some((el) =>
+    (el.textContent || '').includes(seed1) || (el.textContent || '').includes(pub1)
+    || (el.innerHTML || '').includes(seed1) || (el.innerHTML || '').includes(pub1));
+  ok(!leaked, '无感断言：任何 DOM 文本不含 seed 十六进制与公钥串');
+}
+ok(els.has('lg-user') && els.has('lg-pass'), '一步登录表单：账号 + 密码两个输入');
+ok(hidden('lg-forget') && hidden('lg-reenter'), '无记忆账号：「忘记此设备」/「免密码进入」不出现');
+// —— 失败态一（本地密码错）：两态文案 + 无第三请求 ——
+const ab1 = authBeginN, af1 = authFinishN, kb1 = keyBindBodies.length;
+$s('lg-user').value = 'alice';
+$s('lg-pass').value = 'wrong-pw';
+wireTexts.length = 0;
+fire($s('lg-form'), 'submit', { preventDefault() {} });
 await sleep(80);
-ok(hidden('login') && shown('app') && els.has('hd-user'), '登记后重检：自动进入管理壳');
-ok($s('hd-user').textContent === 'alice', '管理壳回显账号');
+ok(authBeginN === ab1 + 1 && authBeginBodies.at(-1).user === 'alice'
+  && typeof authBeginBodies.at(-1).ke1 === 'string' && authBeginBodies.at(-1).ke1.length > 16,
+  'login-begin 提交体 {user, ke1}（未签名 POST，OPAQUE 报文序列①）');
+ok(authFinishN === af1 && keyBindBodies.length === kb1, '失败态一（本地密码错）：客户端本地 finish 即失败，无 login-finish/key-bind 请求');
+const perr1 = $s('lg-pass-err').textContent || '';
+ok(perr1.includes('密码错误') && perr1.includes('尚未设置密码') && perr1.includes('请联系管理员'),
+  '失败态一文案：「密码错误，或该账号尚未设置密码（请联系管理员…）」两态合一（防枚举一致代价）');
+ok(shown('login') && !els.has('hd-user'), '失败后停留登录卡（管理壳未构建）');
+ok(!$s('lg-submit').disabled && $s('lg-submit').textContent === '登录', '登录按钮恢复可用与原文');
+// —— 成功路径：login-finish → key-bind（SR-SIG1 + X-Sr-Bind）→ 进入管理壳 ——
+$s('lg-pass').value = 'alice-pw';
+fire($s('lg-form'), 'submit', { preventDefault() {} });
+ok(await waitFor(() => keyBindBodies.length === kb1 + 1 && hidden('login'), 5000), '登录成功：login-finish → key-bind → 自动进入管理壳');
+ok(authFinishN === af1 + 1 && authFinishBodies.at(-1).user === 'alice'
+  && typeof authFinishBodies.at(-1).ke3 === 'string' && authFinishBodies.at(-1).ke3.length > 16,
+  'login-finish 提交体 {user, ke3}（报文序列③）');
+ok(keyBindBodies.at(-1).user === 'alice' && keyBindBodies.at(-1).pubkey === pubOf(seed1)
+  && /^ed25519:/.test(keyBindBodies.at(-1).pubkey),
+  'key-bind 提交体 {user, pubkey}（公钥=本机无感生成钥匙：登录成功即绑定）');
+ok(/^SR-SIG1 /.test(keyBindAuths.at(-1)), 'key-bind 以候选钥匙 SR-SIG1 签名（服务端按 body 公钥验签）');
+ok(keyBindToks.at(-1) === `bindtok-${bindSeq}` && keyBindToks.at(-1).startsWith('bindtok-'),
+  'key-bind 携带 X-Sr-Bind 一次性令牌（login-finish 应答的 bind_token）');
+ok(shown('app') && els.has('hd-user') && $s('hd-user').textContent === 'alice', '管理壳回显账号');
+ok(store.get('sr.user') === 'alice' && store.get('sr.seed') === seed1, '账号记忆（sr.user）；seed 未变动');
+ok(!wireTexts.some((t) => t.includes('alice-pw') || t.includes('wrong-pw')),
+  'OPAQUE 断言：全部上线请求体（含 ke1/ke3 与签名体）均无密码明文（mock 垫片形状级验证）');
+ok(!($s('msg').textContent || '').includes('继承管理员'), '非管理员账号：无 admin 继承提示');
+await sleep(60); // 展项列表异步渲染
 ok(($s('proj-fb').textContent || '').includes('已加载 1 个展项'), '展项列表已请求并渲染');
 await sleep(60); // whoami 异步返回（§12.2）
 ok(!els.has('tab-admin') && !els.has('ad-users-tbl') && !els.has('dlg-user-add') && !els.has('ad-st-auto'),
@@ -791,14 +899,16 @@ ok(($s('db-out').textContent || '').includes('三段式下载完成'), 'dbOut �
   ok(($s('db-out').textContent || '').includes('压缩后'), '未压缩态回显「压缩后」');
 }
 
-// ═══ 场景 2：同浏览器再访（账号+种子匹配）→ 直达第 3 步自动进入；§12.2 管理员态 ═══
+// ═══ 场景 2：同浏览器再访（钥匙+账号记忆）→ 签名自测直达（免密码）；§12.2 管理员态 ═══
 whoamiAdmin = true; // 本次登录的钥匙是管理员钥匙
 imagesAdminView = true; // 服务端对 admin 钥匙返回全量镜像（§13.1）
+const ab2 = authBeginN, kb2n = keyBindBodies.length;
 els.clear();
 await load(2);
 armBtnText(); // 发卡按钮初始文案（busy 恢复断言用）
 await sleep(80);
-ok(hidden('wz-p1') && hidden('wz-p2') && hidden('login') && shown('app'), '再访匹配账号：跳过 1/2 步直达验证并自动进入');
+ok(hidden('login') && shown('app'), '再访（钥匙+账号记忆）：签名自测通过自动进入（免密码）');
+ok(authBeginN === ab2 && keyBindBodies.length === kb2n, '再访直达：零 auth 请求（不重走密码登录）');
 ok(store.get('sr.seed') === seed1 && store.get('sr.user') === 'alice', '种子与账号未被改动');
 await sleep(60); // whoami 异步返回
 ok(els.has('ad-users-tbl') && els.has('ad-st-auto') && els.has('ad-refresh'),
@@ -1010,51 +1120,166 @@ ok($s('rd-scope').textContent === '管理员视图', 'admin 钥匙：Redis 浏�
 clickTab('proj');
 whoamiAdmin = false;
 
-// ═══ 场景 3：种子在、账号缺（换了账号走完整向导；第 2 步默认「使用已有」）；whoami 失败 ═══
-mode = 'ok';
-whoamiFail = true; // §12.2：whoami 404 E_AUTH → 顶部条报错、管理标签不渲染
-store.delete('sr.user');
+// —— 退出登录（plan-16 §3：不删 seed）→「免密码进入」重进 ——
+click('btn-logout');
+ok(shown('login') && hidden('app'), '退出登录：回到登录卡（管理壳隐藏）');
+ok(store.has('sr.seed') && store.get('sr.user') === 'alice', '退出登录不删 seed 与账号记忆');
+ok(shown('lg-reenter') && shown('lg-forget'), '「免密码进入」与「忘记此设备」按钮出现（本机凭据仍有效）');
+ok(($s('lg-fb').textContent || '').includes('已退出登录') && ($s('lg-fb').textContent || '').includes('免密码进入'),
+  '退出提示：钥匙保留 + 免密码重进指引');
+const ab2b = authBeginN;
+click('lg-reenter');
+await sleep(80);
+ok(hidden('login') && shown('app') && authBeginN === ab2b, '免密码进入：本机钥匙自测通过重新进入（仍零 auth 请求）');
+
+// ═══ 场景 3：E_AUTH 回落（钥匙被删/GC）→ 密码表单 → 同钥匙重绑（找回/换设备路径） ═══
+mode = 'unregistered'; // 模拟服务端已删除/GC 本机钥匙
 els.clear();
 await load(3);
-await sleep(40);
-ok(shown('wz-p1') && hidden('wz-p3'), '无记忆账号：从第 1 步走完整向导');
-$s('wz-user').value = 'bob';
-click('wz-next1');
-ok(shown('wz-l-use') && $s('wz-r-use').checked, '有存量种子：默认「使用本机已有密钥」');
-ok($s('wz-fp').textContent === pubOf(seed1).replace('ed25519:', '').slice(0, 8), '指纹 = 公钥载荷前 8 位');
-ok($s('wz-new-text').textContent.includes('重新生成'), '次级单选为「重新生成新密钥」');
-click('wz-back2');
-ok(shown('wz-p1'), '第 2 步「上一步」可回退');
-click('wz-next1');
-click('wz-next2'); // 维持默认「使用已有」
+armBtnText();
+armLoginInit();
 await sleep(80);
-ok(store.get('sr.seed') === seed1 && store.get('sr.user') === 'bob', '沿用已有种子，记忆新账号');
-ok(hidden('login') && shown('app'), '验证通过进入管理壳');
-await sleep(60); // whoami 失败异步返回
-ok(($s('msg').textContent || '').includes('身份查询'), 'whoami 失败（404 E_AUTH）：顶部条报错');
+ok(shown('login') && !els.has('hd-user'), '钥匙失效：自测失败回落密码表单（不自动进入，管理壳未构建）');
+ok(($s('lg-fb').textContent || '').includes('失效') && ($s('lg-fb').textContent || '').includes('重新登录'),
+  '回落提示：凭据失效 → 输账号密码重绑新钥匙（找回/换设备）');
+ok(hidden('lg-reenter'), 'E_AUTH 回落：不出「免密码进入」（本机钥匙已失效）');
+const kb3 = keyBindBodies.length;
+$s('lg-pass').value = 'alice-pw';
+fire($s('lg-form'), 'submit', { preventDefault() {} });
+await sleep(120);
+ok(keyBindBodies.length === kb3 + 1 && keyBindBodies.at(-1).pubkey === pubOf(seed1)
+  && hidden('login') && shown('app'),
+  '密码重登：同一把本地钥匙重新绑定（幂等重绑）并进入');
+
+// ═══ 场景 4：失败两态之二（服务端 404）/ 未知用户防枚举 / 换账号（admin 继承提示）/ whoami 失败 ═══
+mode = 'unregistered';
+store.clear(); // 全新浏览器（新 seed，无账号记忆）
+els.clear();
+await load(4);
+armBtnText();
+await sleep(40);
+const seed4 = store.get('sr.seed');
+// —— 4a. 服务端拒绝（login-begin → 404 E_AUTH：限流/畸形一律不可区分） ——
+authServerDown = true;
+const af4 = authFinishN;
+$s('lg-user').value = 'alice';
+$s('lg-pass').value = 'alice-pw';
+fire($s('lg-form'), 'submit', { preventDefault() {} });
+await sleep(80);
+const perr4 = $s('lg-pass-err').textContent || '';
+ok(perr4.includes('服务端拒绝') && perr4.includes('稍后重试'), '失败态二（服务端 404 E_AUTH）：限流/拒绝文案 + 稍后重试');
+ok(authFinishN === af4 && keyBindBodies.length === kb3 + 1, '服务端拒绝：不产生 login-finish/key-bind 请求');
+authServerDown = false;
+// —— 4b. 未知用户：login-begin 仍 200（假记录路径），本地 finish 失败 → 与错密码同文案 ——
+const ab4 = authBeginN;
+$s('lg-user').value = 'nobody';
+$s('lg-pass').value = 'whatever-pw';
+fire($s('lg-form'), 'submit', { preventDefault() {} });
+await sleep(80);
+ok(authBeginN === ab4 + 1, '未知用户：login-begin 仍 200（防枚举：与已注册用户不可区分）');
+ok(authFinishN === af4 && ($s('lg-pass-err').textContent || '').includes('密码错误'),
+  '未知用户：本地 finish 失败 → 与「密码错误」同一文案（客户端无法也不应区分）');
+// —— 4c. 换账号密码登录（bob=管理员）：沿用本机钥匙绑定新账号 + admin 继承显式提示 ——
+$s('lg-user').value = 'bob';
+$s('lg-pass').value = 'bob-pw';
+fire($s('lg-form'), 'submit', { preventDefault() {} });
+await sleep(120);
+ok(keyBindBodies.at(-1).user === 'bob' && keyBindBodies.at(-1).pubkey === pubOf(seed4),
+  '换账号密码登录：用本机既有钥匙绑定新账号');
+ok(store.get('sr.seed') === seed4 && store.get('sr.user') === 'bob', '沿用同一 seed，记忆新账号');
+ok(hidden('login') && shown('app') && $s('hd-user').textContent === 'bob', '进入管理壳（回显新账号）');
+ok(($s('msg').textContent || '').includes('继承管理员'), 'admin 账号密码登录：显式提示新钥匙继承管理员权限');
+// —— 4d. whoami 失败（404 E_AUTH）：顶部条报错、管理标签不渲染 ——
+whoamiFail = true; // §12.2：whoami 404 E_AUTH → 顶部条报错、管理标签不渲染
+click('btn-logout');
+click('lg-reenter'); // 免密码重进 → enterApp → syncAdmin → whoami 失败
+await sleep(100);
+ok(hidden('login') && shown('app'), '免密码重进成功（whoami 失败不影响本地自测进入）');
+ok(($s('msg').textContent || '').includes('身份查询') || ($s('msg').textContent || '').includes('E_AUTH'),
+  'whoami 失败（404 E_AUTH）：顶部条报错');
 ok(!els.has('tab-admin') && !els.has('ad-users-tbl'), 'whoami 失败：管理标签不渲染');
 whoamiFail = false;
 
-// ═══ 场景 4：「导入密钥种子」分支 ═══
-mode = 'ok';
+// ═══ 场景 5：「忘记此设备」（key-selfrm 联动 + 本地清除 + 取消路径 + 无感重生成） ═══
+click('btn-logout'); // 回登录卡（sr.user 仍在 → lg-forget 可见）
+ok(shown('lg-forget'), '有记忆账号：「忘记此设备」按钮出现');
+const selfrm0 = selfrmN, seed5a = store.get('sr.seed');
+confirmRet = false;
+click('lg-forget');
+await sleep(60);
+ok(store.has('sr.seed') && store.has('sr.user') && selfrmN === selfrm0, 'confirm 取消：不清除本地、不注销远端');
+confirmRet = true;
+confirmMsgs.length = 0;
+click('lg-forget');
+await sleep(120);
+ok(selfrmN === selfrm0 + 1 && selfrmBodies.at(-1).kid === 'kid-self', '忘记此设备：key-selfrm 提交体 {kid}（仅删签名所用钥匙自身）');
+ok(!store.has('sr.user'), '账号记忆已清除（sr.user）');
+const seed5b = store.get('sr.seed');
+ok(/^[0-9a-f]{64}$/.test(seed5b || '') && seed5b !== seed5a, '旧 seed 已清除且无感层即刻重新生成新候选钥匙');
+ok(hidden('lg-reenter') && hidden('lg-forget'), '回到干净登录卡（辅助按钮收起）');
+ok(($s('msg').textContent || '').includes('已忘记此设备') && ($s('msg').textContent || '').includes('远程注销'),
+  '回报文案：已忘记此设备 + 远程注销结果');
+const forgetConfirms = confirmMsgs.map(String);
+ok(forgetConfirms.some((m) => m.includes('忘记此设备') || m.includes('清除')) && forgetConfirms.some((m) => m.includes('注销')),
+  '两段 confirm：本地清除与远程注销分别确认');
+
+// ═══ 场景 6：专家路径（钥匙登录折叠）：本机已有默认选中 / 导入种子 / 公钥串登记+重检循环 ═══
+mode = 'unregistered';
 store.clear();
 els.clear();
-await load(4);
+await load(6);
+armLoginInit();
 await sleep(40);
-$s('wz-user').value = 'carl';
-click('wz-next1');
+const seed6 = store.get('sr.seed');
+fire($s('lg-expert'), 'toggle'); // 打开折叠 → setupExpert
+ok($s('wz-r-use').checked && shown('wz-l-use'), '专家路径：本机已有（无感生成的）钥匙默认选中');
+ok($s('wz-fp').textContent === pubOf(seed6).replace('ed25519:', '').slice(0, 8), '指纹 = 公钥载荷前 8 位');
+ok(hidden('wz-p3') && hidden('wz-pubbox'), '折叠初始：验证面板与公钥串不展示');
 fire($s('wz-r-import'), 'change'); // 选导入 → 出现粘贴框
 ok(shown('wz-import-box') && $s('wz-r-import').checked, '选「导入」：粘贴框出现');
+$s('lg-user').value = 'carl';
 $s('wz-seed').value = 'not-hex!';
-click('wz-next2');
-ok(shown('wz-p2') && ($s('wz-seed-err').textContent || '').includes('64 位十六进制'), '非法 seed：字段内联拒绝并停在第 2 步');
-$s('wz-seed').value = seed1;
-click('wz-next2');
+click('wz-verify');
+ok(($s('wz-seed-err').textContent || '').includes('64 位十六进制'), '非法 seed：字段内联拒绝（不进入验证）');
+$s('wz-seed').value = seed1; // 复用 alice 的种子（专家：其他设备导出）
+click('wz-verify');
 await sleep(80);
-ok(store.get('sr.seed') === seed1 && store.get('sr.user') === 'carl', '合法 seed 导入并记忆');
-ok(hidden('login') && shown('app'), '导入后验证通过进入管理壳');
+ok(store.get('sr.seed') === seed1 && store.get('sr.user') === 'carl', '合法 seed 导入并记忆（账号+种子）');
+ok(shown('wz-p3') && shown('wz-pubbox'), '未登记：验证面板 + 公钥串区块展示（专家路径可见）');
+ok($s('wz-pub').textContent === pubOf(seed1), '公钥串与 wasm 独立推导一致');
+ok(/^ed25519:[A-Za-z0-9+/]{43}$/.test($s('wz-pub').textContent), '公钥串格式 ed25519:<b64-43>');
+ok(($s('wz-v-fp').textContent || '') === pubOf(seed1).replace('ed25519:', '').slice(0, 8), '验证面板回显指纹');
+click('wz-recheck');
+await sleep(40);
+ok(shown('wz-pubbox') && shown('login'), '重新检测：仍未登记 → 公钥展示循环');
+mode = 'ok'; // 模拟管理员完成 user-add --pubkey 登记
+click('wz-recheck');
+await sleep(80);
+ok(hidden('login') && shown('app') && $s('hd-user').textContent === 'carl', '登记后重检：自动进入管理壳');
 
-// ═══ 场景 5：静态断言（§10.2 更名 / §10.3+§10.4 端点 / §11 零残留 / §12+§13 接入 / 界面规范） ═══
+// ═══ 场景 7：静态断言（plan-16 登录重设计 / §10.2 更名 / §10.3+§10.4 端点 / §11 零残留 / §12+§13 接入 / 界面规范） ═══
+// —— plan-16：一步登录 + 密钥无感 + OPAQUE 端点 + 专家折叠 ——
+ok(!html.includes('wz-s1') && !html.includes('wz-s2') && !html.includes('wz-s3') && !html.includes('wz-p1') && !html.includes('wz-p2')
+  && !html.includes('wz-next1') && !html.includes('wz-next2') && !html.includes('wz-back2'),
+  'plan-16：旧三步向导主路径零残留（步骤条/分步面板/前后步按钮）');
+ok(html.includes('id="lg-form"') && html.includes('id="lg-user"') && html.includes('id="lg-pass"') && html.includes('type="password"'),
+  'plan-16：一步登录表单（账号 + 密码，type=password）');
+ok(!html.includes('已生成新密钥并存入'), 'plan-16：密钥自动生成零提示文案（无感）');
+for (const ep of ['/_api/auth/login-begin', '/_api/auth/login-finish', '/_api/auth/key-bind']) ok(html.includes(ep), `plan-16 §2.2：${ep} 已接线`);
+ok(html.includes('X-Sr-Bind'), 'plan-16 §2.2：key-bind 携带 X-Sr-Bind 头');
+ok(html.includes('/_api/key-selfrm'), 'plan-16 §2.2：key-selfrm（忘记此设备远端注销）已接线');
+ok(html.includes('E_PW_LOCAL'), 'plan-16：本地密码错错误态（E_PW_LOCAL，无第三请求）已接线');
+ok(html.includes('密码错误，或该账号尚未设置密码（请联系管理员重置）'), 'plan-16 §3：失败文案两态合一（防枚举一致代价）');
+ok(html.includes('忘记密码') && html.includes('联系管理员重置'), 'plan-16 §3：忘记密码 → 找管理员重置文案');
+for (const s of ['新设备', '自动绑定', '忘记此设备', '免密码进入']) ok(html.includes(s), `plan-16 §3 文案：${s}`);
+ok(html.includes('<details id="lg-expert"') && html.includes('钥匙登录（CLI / 机器用户 · 专家路径）'),
+  'plan-16 §3：钥匙登录收进 <details> 折叠（专家路径）');
+ok(html.includes('id="lg-forget"') && html.includes('id="lg-reenter"'), 'plan-16 §3：「忘记此设备」/「免密码进入」容器齐备');
+ok(html.includes('登录与账号') && html.includes('两把独立发放的密码') && html.includes('试验性存储'),
+  'plan-16 帮助页：登录方式描述（两把密码分开 + 试验性存储告示保留）');
+ok(html.includes('专家路径：公钥与机器用户（CLI / CI）') && html.includes('showroom keygen') && html.includes('--pubkey')
+  && html.includes('showroom login'),
+  'plan-16 帮助页：保留 CLI/公钥专家节（keygen/user-add --pubkey/login）');
 ok(!html.includes('内存上限'), '§10.2：「内存上限」零残留');
 ok((html.match(/内存需求/g) || []).length >= 3, '§10.2：表单/帮助/错误文案均用「内存需求」');
 ok(!/槽位|slot/i.test(html), '§11：全 HTML「槽位/slot」零残留');
@@ -1064,7 +1289,7 @@ ok(!html.includes('apiRaw'), '旧单发备份路径 apiRaw 已移除');
 ok(!html.includes("'/_api/db-dump'"), '旧单发 POST /_api/db-dump 无残留');
 for (const ep of ['redis-dbs', 'redis-keys', 'redis-get']) ok(html.includes(ep), `§10.3：${ep} 已接入`);
 for (const ep of ['/_api/logs-stream', '/_api/events', '/_api/db-dump-begin', '/_api/db-dump-status', '/_api/db-dump-chunk']) ok(html.includes(ep), `§10.4：${ep} 已接入`);
-ok(!/lg-keygen|lg-importkey|lg-login|renderLoginState|doLogin\b/.test(html), '旧登录区控件/函数无残留');
+ok(!/lg-keygen|lg-importkey|renderLoginState|doLogin\b|gotoStep|enterStep3/.test(html), '旧登录区控件/向导状态机函数无残留');
 // —— 上传压缩统一（zstd）：压缩助手 / wasm 会话接线 / 文案 ——
 ok(html.includes('compressToBlob') && html.includes('uploadPayload'), '上传压缩助手 compressToBlob/uploadPayload 已接入');
 ok(html.includes('sr_zstd_begin') && html.includes('sr_zstd_push') && html.includes('sr_zstd_end'), 'wasm zstd 压缩会话（sr_zstd_*）已接线');
@@ -1134,7 +1359,7 @@ ok(html.includes('select option {'), '规范：select option 显式配色');
   const ph = [...html.matchAll(/placeholder="([^"]*)"/g)].map((x) => x[1]);
   ok(ph.length > 0 && ph.every((p) => p.endsWith('…')), `规范：占位符全部以 … 结尾（${ph.length} 处）`);
 }
-for (const id of ['wz-user', 'pub-project', 'dep-image', 'db-project', 'rd-db', 'ad-na-user']) {
+for (const id of ['lg-user', 'lg-pass', 'wz-seed', 'pub-project', 'dep-image', 'db-project', 'rd-db', 'ad-na-user']) {
   ok(html.includes(`for="${id}"`), `规范：表单控件 label for="${id}"`);
 }
 ok(html.includes('showModal'), '规范：dialog 用 showModal（Esc/焦点圈闭/inert）');
