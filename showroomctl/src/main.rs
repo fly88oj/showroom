@@ -31,18 +31,34 @@ struct Cli {
 enum Cmd {
     /// 启动 HTTP 控制面（127.0.0.1:8090；所有 /_api 端点强制 SR-SIG1 签名）
     Serve,
-    /// 登记发布者公钥 + 生成 registry 凭据（bcrypt 入 registry.htpasswd，明文 0600 入 reg.cred）；
-    /// --admin 同时授管理员钥匙（SPEC §12.2，首个管理员引导用）
+    /// 发账号：登记公钥（可选）+ 设初始登录密码（可选，--password/--gen-password）+
+    /// 生成 registry 凭据（bcrypt 入 registry.htpasswd，明文 0600 入 reg.cred）。
+    /// pubkey 与 password 至少其一；--admin 授管理员（SPEC §12.2 + plan-16 §1.4）
     UserAdd {
         name: String,
-        /// 发布者公钥串（showroom keygen 打印的那串；省略时给出提示）
+        /// 发布者公钥串（showroom keygen 打印的那串；CI 专家路径）
         #[arg(long)]
         pubkey: Option<String>,
+        /// 显式初始登录密码（明文只过管理员终端，不上网线）
+        #[arg(long)]
+        password: Option<String>,
+        /// 自动生成初始登录密码（一次性返回）
+        #[arg(long)]
+        gen_password: bool,
         #[arg(long)]
         replace_key: bool,
         /// 授予管理员钥匙（可远程授权/发卡）
         #[arg(long)]
         admin: bool,
+    },
+    /// 重置/补设登录密码（plan-16 §1.4）：替换 pass.opaque，不动既有钥匙；
+    /// 疑似盗号走 user-revoke/key-rm
+    UserPasswd {
+        user: String,
+        #[arg(long)]
+        password: Option<String>,
+        #[arg(long)]
+        gen_password: bool,
     },
     /// 删除发布者某把公钥（admin 标记随钥匙一并清）
     UserKeyRm { user: String, kid: String },
@@ -187,19 +203,58 @@ fn dispatch(cli: &Cli) -> R<()> {
             .map_err(|e| ApiError::state(e.to_string()))?
             .block_on(serve::run(root)),
 
-        Cmd::UserAdd { name, pubkey, replace_key, admin } => {
-            let pubkey = pubkey.as_deref().ok_or_else(|| {
-                ApiError::new("E_NAME", format!("缺少 --pubkey <公钥串>（发布者跑 showroom keygen 打印的那串；示例：showroomctl user-add {name} --pubkey <串> --admin）"))
-            })?;
-            let added = ops::user_add(&root, name, pubkey, *admin, *replace_key)?;
+        Cmd::UserAdd { name, pubkey, password, gen_password, replace_key, admin } => {
+            // plan-16 §1.4：pubkey 与 password 至少其一（全无 → E_NAME 指引在 ops::user_add）
+            let init_pw = match (password, *gen_password) {
+                (Some(p), _) => ops::InitPw::Set(p.clone()),
+                (None, true) => ops::InitPw::Gen,
+                (None, false) => ops::InitPw::None,
+            };
+            let added = ops::user_add(&root, name, pubkey.as_deref(), *admin, *replace_key, init_pw)?;
+            // 两把密码各自只此一次显示（plan-16 §1.3：分开发放）
+            let kid_part = added
+                .kid
+                .as_deref()
+                .map(|k| format!("kid={k}"))
+                .unwrap_or_else(|| "no key".into());
+            let human = format!(
+                "user {name} added: {kid_part}{}\n  registry 密码（只此一次，docker login 用）: {}\n  registry creds in state/users/{name}/reg.cred",
+                if *admin { " [ADMIN]" } else { "" },
+                added.password,
+            );
+            let human = match &added.login_password {
+                Some(lp) => format!("{human}\n  登录密码（只此一次，控制台/showroom login 用）: {lp}"),
+                None => human,
+            };
+            let mut v = json!({"ok": true, "user": name, "admin": admin, "registry_password": added.password});
+            if let Some(k) = &added.kid {
+                v["kid"] = json!(k);
+            }
+            if let Some(lp) = &added.login_password {
+                v["login_password"] = json!(lp);
+            }
+            out(j, &human, v);
+            Ok(())
+        }
+        Cmd::UserPasswd { user, password, gen_password } => {
+            // --password 与 --gen-password 至少其一（plan-16 §1.4）
+            let pw = match (password, *gen_password) {
+                (Some(p), _) => p.clone(),
+                (None, true) => ops::gen_login_password(),
+                (None, false) => {
+                    return Err(ApiError::new(
+                        "E_NAME",
+                        "缺少密码：--password <pw> 或 --gen-password 至少其一",
+                    ));
+                }
+            };
+            ops::user_passwd_set(&root, user, &pw)?;
             out(
                 j,
                 &format!(
-                    "user {name} added: kid={}{}; registry creds in state/users/{name}/reg.cred (user {name})",
-                    added.kid,
-                    if *admin { " [ADMIN]" } else { "" }
+                    "user {user} 登录密码已重置（旧密码失效，既有钥匙不受影响）；新密码（只此一次）: {pw}"
                 ),
-                json!({"ok": true, "user": name, "kid": added.kid, "admin": admin}),
+                json!({"ok": true, "user": user, "password": pw}),
             );
             Ok(())
         }

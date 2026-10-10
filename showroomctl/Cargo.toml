@@ -18,3 +18,7 @@ rand = "0.8"
 sha2 = "0.10"
 hex = "0.4"
 base64 = "0.22"
+# plan-16 §6.2：OPAQUE 登录两端实现收口在 common::opaque（两端同 crate 无互操作缝隙），
+# 此处直接依赖仅锚定与 common 一致的版本（服务端注册记录/登录序列经由 common 调用）。
+opaque-ke = { version = "3", default-features = false, features = ["ristretto255-voprf"] }
+argon2 = { version = "0.5", default-features = false, features = ["alloc"] }

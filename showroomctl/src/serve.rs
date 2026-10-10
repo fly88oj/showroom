@@ -34,8 +34,61 @@ pub struct AppState {
     /// nonce 查重（SPEC §1）："user:nonce" → 过期时刻；惰性清理。
     /// ponytail: 全局 HashSet 语义，非严格 LRU——重启清零可接受（SPEC 明示）
     pub nonces: Mutex<HashMap<String, i64>>,
+    /// login-begin 双令牌桶（plan-16 §2.3）：per-user 10 次/10 分 + 全局 120 次/10 分
+    ///（滑动窗口时间戳；内存，重启清零；超限同 404 E_AUTH）。
+    pub login_rate: Mutex<LoginRate>,
+    /// 在途登录态（plan-16 §2.2）：login-begin 存（60s，同 user 覆盖）、login-finish
+    /// 一次性消费；重启丢失重试即可（方案明示）。
+    pub pending_logins: Mutex<HashMap<String, PendingLogin>>,
+    /// 一次性 bind_token（plan-16 §2.2）：token → (user, 过期时刻)；key-bind 消费即删。
+    pub bind_tokens: Mutex<HashMap<String, (String, u64)>>,
+    /// pw-begin 在途注册（plan-16 §2.2）：user → 过期时刻；pw-commit 一次性消费（60s）。
+    pub pending_pw: Mutex<HashMap<String, u64>>,
 }
 type S = Arc<AppState>;
+
+/// 滑动窗口双令牌桶（login-begin 专用；纯内存）。
+pub struct LoginRate {
+    per_user: HashMap<String, Vec<u64>>,
+    global: Vec<u64>,
+}
+
+/// 窗口（秒）与双桶容量（plan-16 §2.3：user 10 次/10 分 + 全局 120 次/10 分）。
+pub const LOGIN_RATE_WINDOW_SECS: u64 = 600;
+pub const LOGIN_RATE_PER_USER: usize = 10;
+pub const LOGIN_RATE_GLOBAL: usize = 120;
+
+impl LoginRate {
+    pub fn new() -> Self {
+        LoginRate { per_user: HashMap::new(), global: Vec::new() }
+    }
+
+    /// 判定并记账：窗口外时间戳先修剪，两桶任一满即拒（不记账）。
+    pub fn allow(&mut self, user: &str, now: u64) -> bool {
+        let cutoff = now.saturating_sub(LOGIN_RATE_WINDOW_SECS);
+        let bucket = self.per_user.entry(user.to_string()).or_default();
+        bucket.retain(|t| *t > cutoff);
+        self.global.retain(|t| *t > cutoff);
+        if bucket.len() >= LOGIN_RATE_PER_USER || self.global.len() >= LOGIN_RATE_GLOBAL {
+            return false;
+        }
+        bucket.push(now);
+        self.global.push(now);
+        true
+    }
+}
+
+impl Default for LoginRate {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+/// login-begin 存下的服务端登录状态（序列化字节 + 过期时刻）。
+pub struct PendingLogin {
+    pub state: Vec<u8>,
+    pub expiry: u64,
+}
 
 impl IntoResponse for ApiError {
     fn into_response(self) -> Response {
@@ -61,13 +114,25 @@ pub async fn run(root: PathBuf) -> R<()> {
         let p = ops::init_keys(&root)?;
         eprintln!("showroomctl: platform rsa generated at {}", p.display());
     }
+    // 服务端 OPRF key 缺失自动生成（首次；plan-16 §1.2 同 platform_rsa 模式）
+    if !state::opaque_key_path(&root).exists() {
+        ops::opaque_setup(&root)?;
+        eprintln!("showroomctl: opaque key generated at {}", state::opaque_key_path(&root).display());
+    }
     // owner→user 更名的状态目录迁移（幂等：state/owners/ → state/users/，SPEC §5）
     state::migrate_state_dirs(&root);
     // v1.4 槽位布局迁移（§11，幂等；state 上提 + caddy reload + 容器收养，stderr/日志如实记录）
     for l in ops::migrate_legacy(&root) {
         eprintln!("showroomctl: migrate: {l}");
     }
-    let st: S = Arc::new(AppState { root, nonces: Mutex::new(HashMap::new()) });
+    let st: S = Arc::new(AppState {
+        root,
+        nonces: Mutex::new(HashMap::new()),
+        login_rate: Mutex::new(LoginRate::new()),
+        pending_logins: Mutex::new(HashMap::new()),
+        bind_tokens: Mutex::new(HashMap::new()),
+        pending_pw: Mutex::new(HashMap::new()),
+    });
     let app = Router::new().fallback(api).with_state(st);
     let listener = tokio::net::TcpListener::bind("127.0.0.1:8090")
         .await
@@ -116,6 +181,21 @@ async fn dispatch(
     headers: &HeaderMap,
     collected: &Collected,
 ) -> Result<Response, ApiError> {
+    // plan-16 §2.2/§2.3：/_api/auth/* 先于常规验签——login-begin/login-finish/key-bind
+    // 走密码（OPAQUE）/bind_token 通道；pw-begin/pw-commit 在同前缀下但走常规 SR-SIG1
+    //（主 match 处理）；族内其余路径/方法一律 404 E_AUTH（零信息，防子路径枚举）。
+    if path.starts_with("/_api/auth/") {
+        if matches!((method.as_str(), path),
+            ("POST", "/_api/auth/login-begin") | ("POST", "/_api/auth/login-finish") | ("POST", "/_api/auth/key-bind"))
+        {
+            let r = auth_family(s, method.as_str(), path, &uri_str(uri), sha, headers, collected).await?;
+            return Ok(r.into_response());
+        }
+        if !matches!((method.as_str(), path), ("POST", "/_api/auth/pw-begin") | ("POST", "/_api/auth/pw-commit")) {
+            return Err(ApiError::new("E_AUTH", format!("auth family: {method} {path}")));
+        }
+        // pw-begin/pw-commit 落常规验签（下方主 match）
+    }
     // 一切端点先验签（含未知路径/方法；SPEC §3 零信息暴露）
     let Verified { user, kid } = auth(s, method.as_str(), &uri_str(uri), sha, headers).await?;
     if matches!(collected, Collected::Overflow) {
@@ -166,6 +246,75 @@ async fn dispatch(
             "admin": ops::key_is_admin(&s.root, &user, &kid),
         }))),
 
+        // —— 登录后信任通道下发 registry 凭据（plan-16 §2.2 末段）：CLI login 免手工 config；
+        //     暴露面=已绑定钥匙=账号主人（服务端 reg.cred 本就明文常驻，方案论证）——
+        ("GET", "/_api/reg-cred", _) => {
+            let root = s.root.clone();
+            let o = user.clone();
+            let (ru, rp) = blk(move || {
+                let cred = std::fs::read_to_string(state::users_dir(&root, &o).join("reg.cred"))
+                    .map_err(|e| ApiError::state(format!("reg.cred 读取失败（user 未必有 registry 凭据）: {e}")))?;
+                let (u, p) = cred.trim().split_once(':')
+                    .ok_or_else(|| ApiError::state("reg.cred 格式异常（须 user:password）"))?;
+                Ok::<_, ApiError>((u.to_string(), p.to_string()))
+            })
+            .await?;
+            Ok(Json(json!({"user": ru, "registry_password": rp})))
+        }
+
+        // —— 自助下线（plan-16 §2.2）：只能删除请求签名所用 kid 自己（.pub/.bound/.admin 一并清）——
+        ("POST", "/_api/key-selfrm", Collected::Mem(b)) => {
+            let req: KidReq = jbody(b)?;
+            if req.kid != kid {
+                return Err(ApiError::new(
+                    "E_AUTH",
+                    format!("key-selfrm 仅允许删除请求签名所用钥匙自身（签名 kid={kid}，请求 kid={}）", req.kid),
+                ));
+            }
+            let root = s.root.clone();
+            let o = user.clone();
+            blk(move || ops::user_key_rm(&root, &o, &req.kid)).await?;
+            Ok(Json(json!({"ok": true})))
+        }
+
+        // —— 改密码（登录态，旧密码免输——已绑定钥匙即会话证明；plan-16 §2.2）——
+        ("POST", "/_api/auth/pw-begin", Collected::Mem(b)) => {
+            let req: PwBeginReq = jbody(b)?;
+            if req.user != user {
+                return Err(ApiError::new("E_NAME", format!("只能改自己的密码（签名者 {user}）")));
+            }
+            let setup = ops::opaque_setup(&s.root)?;
+            let m2 = common::opaque::server_reg_start(&setup, &req.m1, &user)
+                .map_err(|e| ApiError::state(format!("pw-begin: {e}")))?;
+            // 在途注册态（60s，pw-commit 一次性消费；服务重启即失效重试）
+            let mut pw = s.pending_pw.lock().unwrap();
+            pw.retain(|_, exp| *exp > state::unix_now());
+            pw.insert(user.clone(), state::unix_now() + 60);
+            Ok(Json(json!({"m2": m2})))
+        }
+
+        ("POST", "/_api/auth/pw-commit", Collected::Mem(b)) => {
+            let req: PwCommitReq = jbody(b)?;
+            if req.user != user {
+                return Err(ApiError::new("E_NAME", format!("只能改自己的密码（签名者 {user}）")));
+            }
+            // 60s 内 pw-begin 过（一次性消费）
+            let began = s
+                .pending_pw
+                .lock()
+                .unwrap()
+                .remove(&user)
+                .is_some_and(|exp| exp > state::unix_now());
+            if !began {
+                return Err(ApiError::state("pw-begin 会话缺失或已过期（请重试改密码流程）"));
+            }
+            // 原子替换记录（b64 规范化在 common 侧验证）
+            let record = common::opaque::server_reg_canonical(&req.record)
+                .map_err(|e| ApiError::state(format!("pw-commit: {e}")))?;
+            state::write_private(&state::pass_opaque_path(&s.root, &user), &record)?;
+            Ok(Json(json!({"ok": true})))
+        }
+
         // —— 管理组（SPEC §12.2）：统一验签后再过 admin_guard，非管理员与 E_AUTH 同 404 ——
 
         ("GET", "/_api/admin/users", _) => {
@@ -178,13 +327,44 @@ async fn dispatch(
         ("POST", "/_api/admin/user-add", Collected::Mem(b)) => {
             admin_guard(s, &user, &kid)?; // 先守卫后解析 body：非管理员不因 body 畸形泄露 E_NAME/E_AUTH 差异
             let req: AdminUserAddReq = jbody(b)?;
+            // plan-16 §1.5：body 增 password|gen_password（pubkey 可选，至少其一——内核校验）
+            let init_pw = match (req.password, req.gen_password.unwrap_or(false)) {
+                (Some(p), _) => ops::InitPw::Set(p),
+                (None, true) => ops::InitPw::Gen,
+                (None, false) => ops::InitPw::None,
+            };
             let root = s.root.clone();
             let added = blk(move || {
-                ops::user_add(&root, &req.user, &req.pubkey, req.admin.unwrap_or(false), false)
+                ops::user_add(&root, &req.user, req.pubkey.as_deref(), req.admin.unwrap_or(false), false, init_pw)
             })
             .await?;
-            // 密码只此一次返回（远程发卡；本机 reg.cred 常驻，不再可查）
-            Ok(Json(json!({"ok": true, "kid": added.kid, "registry_password": added.password})))
+            // 两把密码各只此一次返回（plan-16 §1.3：分开发放；本机 reg.cred 常驻不再可查）
+            let mut v = json!({"ok": true, "registry_password": added.password});
+            if let Some(kid) = added.kid {
+                v["kid"] = json!(kid);
+            }
+            if let Some(lp) = added.login_password {
+                v["login_password"] = json!(lp);
+            }
+            Ok(Json(v))
+        }
+
+        // —— 登录密码补发/重置（plan-16 §1.5）：一次性返回新密码；不动既有钥匙 ——
+        ("POST", "/_api/admin/passwd-set", Collected::Mem(b)) => {
+            admin_guard(s, &user, &kid)?; // 先守卫后解析 body（同上）
+            let req: AdminPasswdSetReq = jbody(b)?;
+            let pw = match (req.password, req.gen.unwrap_or(false)) {
+                (Some(p), _) => p,
+                (None, true) => ops::gen_login_password(),
+                (None, false) => {
+                    return Err(ApiError::new("E_NAME", "password 或 gen:true 至少其一"));
+                }
+            };
+            let root = s.root.clone();
+            let pwc = pw.clone();
+            blk(move || ops::user_passwd_set(&root, &req.user, &pwc)).await?;
+            // 密码只此一次返回
+            Ok(Json(json!({"ok": true, "password": pw})))
         }
 
         ("POST", "/_api/admin/user-revoke", Collected::Mem(b)) => {
@@ -607,6 +787,121 @@ async fn collect_body(root: &Path, body: Body, to_file: bool) -> R<(String, Coll
     Ok((sha, collected))
 }
 
+// —— /_api/auth/* 免签家族（plan-16 §2.2：login-begin / login-finish / key-bind）——
+//
+// 零信息语义（§2.3）：畸形 body / 限流超限 / ke3 拒绝 / bind_token 无效一律
+// 404 {"error":"E_AUTH"}（经 IntoResponse 的 E_AUTH 同体惯例），与未知路径不可区分；
+// 未知用户/未设密码 → login-begin 走 crate 原生 dummy 假记录路径仍 200 ke2（防枚举，
+// 客户端本地 finish 必失败）；密码错误在客户端本地判（不产生第三请求）。
+
+async fn auth_family(
+    s: &S,
+    method: &str,
+    path: &str,
+    uri: &str,
+    sha: &str,
+    headers: &HeaderMap,
+    collected: &Collected,
+) -> Result<Json<serde_json::Value>, ApiError> {
+    debug_assert!(matches!(
+        (method, path),
+        ("POST", "/_api/auth/login-begin") | ("POST", "/_api/auth/login-finish") | ("POST", "/_api/auth/key-bind")
+    ));
+    let eauth = |msg: &str| ApiError::new("E_AUTH", msg);
+    let Collected::Mem(b) = collected else {
+        return Err(eauth("auth family: body not in memory"));
+    };
+    let now = state::unix_now();
+    match path {
+        // 第一步：ke1 → ke2（未知用户同形 dummy；限流双桶）
+        "/_api/auth/login-begin" => {
+            let req: LoginBeginReq = jbody(b).map_err(|e| eauth(&format!("login-begin body: {e}")))?;
+            if !showroom_common::names::valid_aux(&req.user) || req.ke1.is_empty() {
+                return Err(eauth("login-begin: bad user or empty ke1"));
+            }
+            if !s.login_rate.lock().unwrap().allow(&req.user, now) {
+                return Err(eauth("login-begin: rate limited"));
+            }
+            let setup = ops::opaque_setup(&s.root)?;
+            let record = state::read_pass_opaque(&s.root, &req.user)
+                .and_then(|b64| common::opaque::server_record_from_b64(&b64).ok());
+            let mut rng = rand::rngs::OsRng;
+            let (ke2, state_bytes) =
+                common::opaque::server_login_start(&mut rng, &setup, record.as_ref(), &req.ke1, &req.user)
+                    .map_err(|e| eauth(&format!("login-start: {e}")))?;
+            // 在途登录态（60s；同 user 覆盖；过期惰性清理）
+            {
+                let mut pl = s.pending_logins.lock().unwrap();
+                pl.retain(|_, p| p.expiry > now);
+                pl.insert(req.user.clone(), PendingLogin { state: state_bytes, expiry: now + 60 });
+            }
+            Ok(Json(json!({"ke2": ke2})))
+        }
+
+        // 第三步：ke3 验证 → 一次性 bind_token（60s）
+        "/_api/auth/login-finish" => {
+            let req: LoginFinishReq = jbody(b).map_err(|e| eauth(&format!("login-finish body: {e}")))?;
+            let pending = s
+                .pending_logins
+                .lock()
+                .unwrap()
+                .remove(&req.user) // 一次性消费（ke3 不可重放）
+                .filter(|p| p.expiry > now)
+                .ok_or_else(|| eauth("login-finish: no pending login (expired or replayed)"))?;
+            common::opaque::server_login_finish(&pending.state, &req.ke3)
+                .map_err(|e| eauth(&format!("ke3 rejected: {e}")))?;
+            let token = state::rand_hex(16);
+            {
+                let mut bt = s.bind_tokens.lock().unwrap();
+                bt.retain(|_, (_, exp)| *exp > now);
+                bt.insert(token.clone(), (req.user.clone(), now + 60));
+            }
+            Ok(Json(json!({"bind_token": token})))
+        }
+
+        // 绑定：bind_token 单次有效 + SR-SIG1 按 body 内公钥验签（候选钥匙，非已登记钥匙）
+        "/_api/auth/key-bind" => {
+            let req: KeyBindReq = jbody(b).map_err(|e| eauth(&format!("key-bind body: {e}")))?;
+            let token = headers
+                .get("x-sr-bind")
+                .and_then(|v| v.to_str().ok())
+                .ok_or_else(|| eauth("key-bind: missing X-Sr-Bind"))?
+                .to_string();
+            let token_user = s
+                .bind_tokens
+                .lock()
+                .unwrap()
+                .remove(&token) // 单次使用
+                .filter(|(_, exp)| *exp > now)
+                .map(|(u, _)| u)
+                .ok_or_else(|| eauth("key-bind: bad or expired bind_token"))?;
+            if token_user != req.user {
+                return Err(eauth("key-bind: bind_token belongs to another user"));
+            }
+            // 验签按 body 内公钥（plan-16 §2.2：服务端按 body 公钥验签而非已登记钥匙）
+            let vk = showroom_common::UserKey::from_pub_string(req.pubkey.trim())
+                .map_err(|e| eauth(&format!("key-bind pubkey: {e}")))?;
+            let authv = headers
+                .get(axum::http::header::AUTHORIZATION)
+                .and_then(|v| v.to_str().ok())
+                .ok_or_else(|| eauth("key-bind: missing Authorization"))?;
+            let v = common::verify_with_hash(authv, &[vk], method, uri, sha, now as i64)
+                .map_err(|e| eauth(&format!("key-bind verify: {e}")))?;
+            if v.user != req.user {
+                return Err(eauth("key-bind: signature user mismatch"));
+            }
+            let mut m = s.nonces.lock().unwrap();
+            if !nonce_fresh(&mut m, &v.user, &v.nonce, now as i64) {
+                return Err(eauth("key-bind: nonce replay"));
+            }
+            let (kid, admin) = ops::key_bind(&s.root, &req.user, &req.pubkey)?;
+            Ok(Json(json!({"kid": kid, "admin": admin})))
+        }
+
+        _ => Err(eauth("unreachable auth family arm")),
+    }
+}
+
 // —— SR-SIG1 验签（common::verify_with_hash，预计算哈希版）+ nonce 查重 ——
 
 /// auth 产物：user + 命中钥匙的 kid（whoami / admin_guard 据此判定，SPEC §12.2）。
@@ -923,8 +1218,67 @@ struct DbResetReq {
 #[derive(Deserialize)]
 struct AdminUserAddReq {
     user: String,
-    pubkey: String,
+    /// plan-16 §1.5：pubkey 可选（password 至少其一；CI 专家路径仍可只给公钥）。
+    #[serde(default)]
+    pubkey: Option<String>,
     admin: Option<bool>,
+    /// 初始登录密码（明示）或自动生成（gen_password:true）。
+    #[serde(default)]
+    password: Option<String>,
+    #[serde(default)]
+    gen_password: Option<bool>,
+}
+
+/// POST /_api/admin/passwd-set body（plan-16 §1.5）：`{"user":u,"password":pw}` 或
+/// `{"user":u,"gen":true}` → 响应 `{password}`（一次性）。
+#[derive(Deserialize)]
+struct AdminPasswdSetReq {
+    user: String,
+    #[serde(default)]
+    password: Option<String>,
+    #[serde(default)]
+    gen: Option<bool>,
+}
+
+/// POST /_api/auth/login-begin body（plan-16 §2.2）：`{"user":u,"ke1":b64}`。
+#[derive(Deserialize)]
+struct LoginBeginReq {
+    user: String,
+    ke1: String,
+}
+
+/// POST /_api/auth/login-finish body：`{"user":u,"ke3":b64}`。
+#[derive(Deserialize)]
+struct LoginFinishReq {
+    user: String,
+    ke3: String,
+}
+
+/// POST /_api/auth/key-bind body：`{"user":u,"pubkey":"ed25519:…"}` + X-Sr-Bind 头。
+#[derive(Deserialize)]
+struct KeyBindReq {
+    user: String,
+    pubkey: String,
+}
+
+/// POST /_api/auth/pw-begin body（登录态改密码第一步）：`{"user":u,"m1":b64}`。
+#[derive(Deserialize)]
+struct PwBeginReq {
+    user: String,
+    m1: String,
+}
+
+/// POST /_api/auth/pw-commit body：`{"user":u,"record":b64}`（原子替换记录）。
+#[derive(Deserialize)]
+struct PwCommitReq {
+    user: String,
+    record: String,
+}
+
+/// POST /_api/key-selfrm body：`{"kid":k}`（仅允许签名所用 kid 自己）。
+#[derive(Deserialize)]
+struct KidReq {
+    kid: String,
 }
 
 #[derive(Deserialize)]
@@ -945,8 +1299,84 @@ struct AdminKeyAdminReq {
     admin: bool,
 }
 
+
 #[cfg(test)]
 mod tests {
+    /// 测试用 AppState（plan-16 新字段全零值）。
+    fn test_state(root: PathBuf) -> AppState {
+        AppState {
+            root,
+            nonces: Mutex::new(HashMap::new()),
+            login_rate: Mutex::new(LoginRate::new()),
+            pending_logins: Mutex::new(HashMap::new()),
+            bind_tokens: Mutex::new(HashMap::new()),
+            pending_pw: Mutex::new(HashMap::new()),
+        }
+    }
+
+    /// 直调 api_inner（免网络）：返回 (status, body bytes)。
+    async fn call(s: &S, method: &str, path: &str, body: &[u8], headers: &[(&str, &str)]) -> (u16, Vec<u8>) {
+        let uri: axum::http::Uri = path.parse().unwrap();
+        let mut hm = HeaderMap::new();
+        for (k, v) in headers {
+            hm.insert(
+                axum::http::HeaderName::from_bytes(k.as_bytes()).unwrap(),
+                axum::http::HeaderValue::from_str(v).unwrap(),
+            );
+        }
+        let r = api_inner(
+            s,
+            &Method::from_bytes(method.as_bytes()).unwrap(),
+            &OriginalUri(uri),
+            &hm,
+            Body::from(body.to_vec()),
+        )
+        .await
+        .into_response();
+        let (parts, b) = r.into_parts();
+        let bytes = axum::body::to_bytes(b, 1 << 20).await.unwrap().to_vec();
+        (parts.status.as_u16(), bytes)
+    }
+
+    /// 走完整 OPAQUE 客户端拿到 bind_token（login→login-finish），返回 (bind_token, 候选钥匙)。
+    async fn full_login(s: &S, user: &str, pw: &str) -> (String, showroom_common::UserKey) {
+        let mut rng = rand::rngs::OsRng;
+        let (st, ke1) = showroom_common::opaque::login_start(&mut rng, pw, user).unwrap();
+        let (code, body) = call(
+            s,
+            "POST",
+            "/_api/auth/login-begin",
+            serde_json::to_vec(&json!({"user": user, "ke1": ke1})).unwrap().as_slice(),
+            &[],
+        )
+        .await;
+        assert_eq!(code, 200, "login-begin: {}", String::from_utf8_lossy(&body));
+        let ke2 = serde_json::from_slice::<Value>(&body).unwrap()["ke2"].as_str().unwrap().to_string();
+        let ke3 = showroom_common::opaque::login_finish(st, pw, user, &ke2).unwrap();
+        let (code, body) = call(
+            s,
+            "POST",
+            "/_api/auth/login-finish",
+            serde_json::to_vec(&json!({"user": user, "ke3": ke3})).unwrap().as_slice(),
+            &[],
+        )
+        .await;
+        assert_eq!(code, 200, "login-finish: {}", String::from_utf8_lossy(&body));
+        let token = serde_json::from_slice::<Value>(&body).unwrap()["bind_token"].as_str().unwrap().to_string();
+        (token, showroom_common::UserKey::generate())
+    }
+
+    /// 生成一个已设密码用户（进程内注册），返回 root。
+    fn mkuser(root: &Path, user: &str, pw: &str) {
+        crate::ops::user_add(root, user, None, false, false, crate::ops::InitPw::Set(pw.into())).unwrap();
+    }
+
+    fn troot(name: &str) -> PathBuf {
+        let d = std::env::temp_dir().join(format!("srctl-serve-test-{}-{name}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&d);
+        std::fs::create_dir_all(&d).unwrap();
+        d
+    }
     use super::*;
     use showroom_common::sha256_hex;
 
@@ -992,16 +1422,16 @@ mod tests {
         let root = std::env::temp_dir().join(format!("srctl-guard-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&root);
         std::fs::create_dir_all(&root).unwrap();
-        let s: S = Arc::new(AppState { root: root.clone(), nonces: Mutex::new(HashMap::new()) });
+        let s: S = Arc::new(test_state(root.clone()));
 
         let k = showroom_common::UserKey::generate();
-        let added = crate::ops::user_add(&s.root, "root", &k.pub_string(), true, false).unwrap();
-        assert!(admin_guard(&s, "root", &added.kid).is_ok());
+        let added = crate::ops::user_add(&s.root, "root", Some(&k.pub_string()), true, false, crate::ops::InitPw::None).unwrap();
+        assert!(admin_guard(&s, "root", added.kid.as_deref().unwrap()).is_ok());
 
         let k2 = showroom_common::UserKey::generate();
-        let plain = crate::ops::user_add(&s.root, "root", &k2.pub_string(), false, false).unwrap();
-        assert_eq!(admin_guard(&s, "root", &plain.kid).unwrap_err().code, "E_AUTH");
-        assert_eq!(admin_guard(&s, "nobody", &added.kid).unwrap_err().code, "E_AUTH");
+        let plain = crate::ops::user_add(&s.root, "root", Some(&k2.pub_string()), false, false, crate::ops::InitPw::None).unwrap();
+        assert_eq!(admin_guard(&s, "root", plain.kid.as_deref().unwrap()).unwrap_err().code, "E_AUTH");
+        assert_eq!(admin_guard(&s, "nobody", added.kid.as_deref().unwrap()).unwrap_err().code, "E_AUTH");
         assert_eq!(admin_guard(&s, "root", "ffffffff").unwrap_err().code, "E_AUTH");
         let _ = std::fs::remove_dir_all(&root);
     }
@@ -1013,7 +1443,7 @@ mod tests {
         let root = std::env::temp_dir().join(format!("srctl-redis-guard-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&root);
         std::fs::create_dir_all(&root).unwrap();
-        let s: S = Arc::new(AppState { root: root.clone(), nonces: Mutex::new(HashMap::new()) });
+        let s: S = Arc::new(test_state(root.clone()));
 
         // alice 名下项目占 db 3/7；bob 占 db 2
         for (p, user, db) in [("demo1", "alice", 3u8), ("demo2", "alice", 7), ("demo3", "bob", 2)] {
@@ -1035,23 +1465,23 @@ mod tests {
 
         // admin 钥匙放开全量（含别人的 2 与池内任意 255）；超池/非数字仍 E_NAME
         let k = showroom_common::UserKey::generate();
-        let added = crate::ops::user_add(&s.root, "root", &k.pub_string(), true, false).unwrap();
-        assert_eq!(redis_db_guard(&s, &qq("2"), "root", &added.kid).unwrap(), 2);
-        assert_eq!(redis_db_guard(&s, &qq("255"), "root", &added.kid).unwrap(), 255);
-        assert_eq!(redis_db_guard(&s, &qq("256"), "root", &added.kid).unwrap_err().code, "E_NAME");
-        assert_eq!(redis_db_guard(&s, &qq("abc"), "root", &added.kid).unwrap_err().code, "E_NAME");
-        assert_eq!(redis_db_guard(&s, &HashMap::new(), "root", &added.kid).unwrap_err().code, "E_NAME");
+        let added = crate::ops::user_add(&s.root, "root", Some(&k.pub_string()), true, false, crate::ops::InitPw::None).unwrap();
+        assert_eq!(redis_db_guard(&s, &qq("2"), "root", added.kid.as_deref().unwrap()).unwrap(), 2);
+        assert_eq!(redis_db_guard(&s, &qq("255"), "root", added.kid.as_deref().unwrap()).unwrap(), 255);
+        assert_eq!(redis_db_guard(&s, &qq("256"), "root", added.kid.as_deref().unwrap()).unwrap_err().code, "E_NAME");
+        assert_eq!(redis_db_guard(&s, &qq("abc"), "root", added.kid.as_deref().unwrap()).unwrap_err().code, "E_NAME");
+        assert_eq!(redis_db_guard(&s, &HashMap::new(), "root", added.kid.as_deref().unwrap()).unwrap_err().code, "E_NAME");
 
         // 非管理员钥匙即便 user 有钥匙档案也不越权（无 E_AUTH 与 404 之外的信息差）
         let k2 = showroom_common::UserKey::generate();
-        let plain = crate::ops::user_add(&s.root, "root", &k2.pub_string(), false, false).unwrap();
-        assert_eq!(redis_db_guard(&s, &qq("3"), "root", &plain.kid).unwrap_err().code, "E_AUTH");
+        let plain = crate::ops::user_add(&s.root, "root", Some(&k2.pub_string()), false, false, crate::ops::InitPw::None).unwrap();
+        assert_eq!(redis_db_guard(&s, &qq("3"), "root", plain.kid.as_deref().unwrap()).unwrap_err().code, "E_AUTH");
 
         // 小池（REDIS_DBS=8）：池内 7 放行、池外 15 → E_NAME（alice 名下 db 7 < 8 仍可用）
         std::fs::create_dir_all(root.join("state")).unwrap();
         std::fs::write(root.join("state/policy.env"), "REDIS_DBS=8\n").unwrap();
         assert_eq!(redis_db_guard(&s, &qq("7"), "alice", "ab12cd34").unwrap(), 7);
-        assert_eq!(redis_db_guard(&s, &qq("15"), "root", &added.kid).unwrap_err().code, "E_NAME");
+        assert_eq!(redis_db_guard(&s, &qq("15"), "root", added.kid.as_deref().unwrap()).unwrap_err().code, "E_NAME");
         let _ = std::fs::remove_dir_all(&root);
     }
 
@@ -1062,7 +1492,7 @@ mod tests {
         let root = std::env::temp_dir().join(format!("srctl-image-guard-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&root);
         std::fs::create_dir_all(&root).unwrap();
-        let s: S = Arc::new(AppState { root: root.clone(), nonces: Mutex::new(HashMap::new()) });
+        let s: S = Arc::new(test_state(root.clone()));
 
         // 本人命名空间：拆分出 (repo, tag) 放行
         assert_eq!(
@@ -1079,9 +1509,9 @@ mod tests {
 
         // admin 钥匙放行他人命名空间
         let k = showroom_common::UserKey::generate();
-        let added = crate::ops::user_add(&s.root, "root", &k.pub_string(), true, false).unwrap();
+        let added = crate::ops::user_add(&s.root, "root", Some(&k.pub_string()), true, false, crate::ops::InitPw::None).unwrap();
         assert_eq!(
-            image_guard(&s, "bob/demo:v1", "root", &added.kid).unwrap(),
+            image_guard(&s, "bob/demo:v1", "root", added.kid.as_deref().unwrap()).unwrap(),
             ("bob/demo".into(), "v1".into())
         );
 
@@ -1104,7 +1534,7 @@ mod tests {
             (parts.status.as_u16(), bytes.to_vec())
         };
         let guard = admin_guard(
-            &Arc::new(AppState { root: PathBuf::from("/nonexistent"), nonces: Mutex::new(HashMap::new()) }),
+            &Arc::new(test_state(PathBuf::from("/nonexistent"))),
             "alice", "ab12cd34",
         )
         .unwrap_err()
@@ -1172,7 +1602,7 @@ mod tests {
 
         // 非管理员访问该端点：与未登记逐字节一致（复用现测法——admin_guard 同一守卫）
         let guard = admin_guard(
-            &Arc::new(AppState { root: root.clone(), nonces: Mutex::new(HashMap::new()) }),
+            &Arc::new(test_state(root.clone())),
             "mallory", "ab12cd34",
         )
         .unwrap_err()
@@ -1184,4 +1614,367 @@ mod tests {
 
         let _ = std::fs::remove_dir_all(&root);
     }
+    // ———— plan-16 §6.5：serve 层（tokio）————
+
+    use serde_json::Value;
+    use showroom_common::{nonce_hex, sign};
+
+    fn now_i64() -> i64 {
+        state::unix_now() as i64
+    }
+
+    /// 常规 SR-SIG1 签名头（serve 测试用）。
+    fn authz(user: &str, key: &showroom_common::UserKey, method: &str, path: &str, body: &[u8]) -> String {
+        sign(user, key, method, path, body, now_i64(), &nonce_hex())
+    }
+
+    const E_AUTH_BODY: &[u8] = br#"{"error":"E_AUTH"}"#;
+
+    // login-begin：已注册/未知用户均 200 且 ke2 同长度（防枚举不可区分）；畸形/未知子路径/
+    // 错误方法 → 404 E_AUTH 逐字节一致（复用现有测法）
+    #[tokio::test]
+    async fn login_begin_indistinguishable_and_zero_info() {
+        let root = troot("lb");
+        mkuser(&root, "alice", "pw-a");
+        let s: S = Arc::new(test_state(root));
+
+        let ke1_of = |user: &str, pw: &str| {
+            let mut rng = rand::rngs::OsRng;
+            let (_st, ke1) = showroom_common::opaque::login_start(&mut rng, pw, user).unwrap();
+            ke1
+        };
+        let begin = |user: &str, ke1: &str| {
+            serde_json::to_vec(&json!({"user": user, "ke1": ke1})).unwrap()
+        };
+
+        // 已注册用户 → 200 {"ke2"}
+        let (c1, b1) = call(&s, "POST", "/_api/auth/login-begin", &begin("alice", &ke1_of("alice", "pw-a")), &[]).await;
+        assert_eq!(c1, 200);
+        let ke2a = serde_json::from_slice::<Value>(&b1).unwrap()["ke2"].as_str().unwrap().to_string();
+        assert!(!ke2a.is_empty());
+
+        // 未知用户 → 200 {"ke2"}，ke2 与已注册用户同长度（结构同形；内容不同）
+        let (c2, b2) = call(&s, "POST", "/_api/auth/login-begin", &begin("ghost", &ke1_of("ghost", "x")), &[]).await;
+        assert_eq!(c2, 200, "未知用户须 200（dummy 假记录路径防枚举）");
+        let ke2b = serde_json::from_slice::<Value>(&b2).unwrap()["ke2"].as_str().unwrap().to_string();
+        assert_eq!(ke2a.len(), ke2b.len(), "ke2 同形（长度不可区分）");
+        assert_ne!(ke2a, ke2b);
+
+        // 未设密码用户（pubkey-only）→ 同 200（存量迁移 §6.6 同形态）
+        let k = showroom_common::UserKey::generate();
+        crate::ops::user_add(&s.root, "ci", Some(&k.pub_string()), false, false, crate::ops::InitPw::None).unwrap();
+        let (c3, b3) = call(&s, "POST", "/_api/auth/login-begin", &begin("ci", &ke1_of("ci", "x")), &[]).await;
+        assert_eq!(c3, 200);
+        let ke2c = serde_json::from_slice::<Value>(&b3).unwrap()["ke2"].as_str().unwrap().to_string();
+        assert_eq!(ke2a.len(), ke2c.len());
+
+        // 畸形 body / 非法 user / 错误方法 / 未知子路径 → 404 E_AUTH 逐字节一致
+        for (m, path, body) in [
+            ("POST", "/_api/auth/login-begin", b"{not json".as_slice()),
+            ("POST", "/_api/auth/login-begin", br#"{"user":"Bad Name","ke1":"x"}"#.as_slice()),
+            ("POST", "/_api/auth/login-begin", br#"{"user":"alice"}"#.as_slice()),
+            ("GET", "/_api/auth/login-begin", b"".as_slice()),
+            ("POST", "/_api/auth/bogus", b"{}".as_slice()),
+            ("GET", "/_api/auth/login-finish", b"".as_slice()),
+            ("DELETE", "/_api/auth/key-bind", b"".as_slice()),
+        ] {
+            let (code, bytes) = call(&s, m, path, body, &[]).await;
+            assert_eq!((code, bytes.as_slice()), (404, E_AUTH_BODY), "{m} {path}");
+        }
+        let _ = std::fs::remove_dir_all(&s.root);
+    }
+
+    // login-finish：伪造 ke3 拒绝、ke3 重放拒绝（pending 一次性）、正确登录发 bind_token；
+    // bind_token 单次使用（key-bind 第二次 404）
+    #[tokio::test]
+    async fn login_finish_reject_replay_and_token_single_use() {
+        let root = troot("lf");
+        mkuser(&root, "alice", "pw-a");
+        let s: S = Arc::new(test_state(root));
+        let mut rng = rand::rngs::OsRng;
+
+        // 伪造 ke3 → 404 E_AUTH（无 pending 也 404）
+        let (c, b) = call(&s, "POST", "/_api/auth/login-finish",
+            &serde_json::to_vec(&json!({"user":"alice","ke3":"QUFBQQ"})).unwrap(), &[]).await;
+        assert_eq!((c, b.as_slice()), (404, E_AUTH_BODY));
+
+        // 正确登录拿 token + 用它 key-bind
+        let (token, key) = full_login(&s, "alice", "pw-a").await;
+        assert_eq!(token.len(), 32);
+        let bind_body = serde_json::to_vec(&json!({"user":"alice","pubkey": key.pub_string()})).unwrap();
+        let auth = authz("alice", &key, "POST", "/_api/auth/key-bind", &bind_body);
+        let (c, b) = call(&s, "POST", "/_api/auth/key-bind", &bind_body,
+            &[("Authorization", auth.as_str()), ("X-Sr-Bind", token.as_str())]).await;
+        assert_eq!(c, 200, "{}", String::from_utf8_lossy(&b));
+        let v: Value = serde_json::from_slice(&b).unwrap();
+        assert_eq!(v["kid"].as_str().map(|s| s.len()), Some(8));
+        assert_eq!(v["admin"], false);
+
+        // 同一 bind_token 第二次 → 404 E_AUTH（单次使用）
+        let key2 = showroom_common::UserKey::generate();
+        let bind_body2 = serde_json::to_vec(&json!({"user":"alice","pubkey": key2.pub_string()})).unwrap();
+        let auth2 = authz("alice", &key2, "POST", "/_api/auth/key-bind", &bind_body2);
+        let (c, b) = call(&s, "POST", "/_api/auth/key-bind", &bind_body2,
+            &[("Authorization", auth2.as_str()), ("X-Sr-Bind", token.as_str())]).await;
+        assert_eq!((c, b.as_slice()), (404, E_AUTH_BODY), "bind_token 单次使用");
+
+        // ke3 重放：再走一次正确登录，把同一 ke3 发两次——第二次须 404（pending 一次性）
+        let (st, ke1) = showroom_common::opaque::login_start(&mut rng, "pw-a", "alice").unwrap();
+        let (_, b) = call(&s, "POST", "/_api/auth/login-begin",
+            &serde_json::to_vec(&json!({"user":"alice","ke1": ke1})).unwrap(), &[]).await;
+        let ke2 = serde_json::from_slice::<Value>(&b).unwrap()["ke2"].as_str().unwrap().to_string();
+        let ke3 = showroom_common::opaque::login_finish(st, "pw-a", "alice", &ke2).unwrap();
+        let body3 = serde_json::to_vec(&json!({"user":"alice","ke3": ke3})).unwrap();
+        let (c, _) = call(&s, "POST", "/_api/auth/login-finish", &body3, &[]).await;
+        assert_eq!(c, 200);
+        let (c, b) = call(&s, "POST", "/_api/auth/login-finish", &body3, &[]).await;
+        assert_eq!((c, b.as_slice()), (404, E_AUTH_BODY), "ke3 重放拒绝");
+        let _ = std::fs::remove_dir_all(&s.root);
+    }
+
+    // key-bind：验签必须按 body 内公钥（候选钥匙），而非已登记钥匙——
+    // 用未登记钥匙 B 签名 + body=B → 200；body=A 签名=B（错位）→ 404
+    #[tokio::test]
+    async fn key_bind_verifies_body_pubkey() {
+        let root = troot("kb");
+        mkuser(&root, "alice", "pw-a");
+        // alice 已有一把登记钥匙 A（旧设备）
+        let key_a = showroom_common::UserKey::generate();
+        crate::ops::user_add(&s_unused(), "x", None, false, false, crate::ops::InitPw::None).ok();
+        let s: S = Arc::new(test_state(root.clone()));
+        crate::ops::user_add(&s.root, "alice", Some(&key_a.pub_string()), false, false, crate::ops::InitPw::None).unwrap();
+
+        let (token, key_b) = full_login(&s, "alice", "pw-a").await;
+        // 未登记钥匙 B 签名 + body=B → 200（按 body 公钥验签通过）
+        let body = serde_json::to_vec(&json!({"user":"alice","pubkey": key_b.pub_string()})).unwrap();
+        let auth = authz("alice", &key_b, "POST", "/_api/auth/key-bind", &body);
+        let (c, b) = call(&s, "POST", "/_api/auth/key-bind", &body,
+            &[("Authorization", auth.as_str()), ("X-Sr-Bind", token.clone().as_str())]).await;
+        assert_eq!(c, 200, "{}", String::from_utf8_lossy(&b));
+
+        // 错位：token 有效但 body=A、签名=B → 404（签名不匹配 body 公钥）
+        let (token2, _) = full_login(&s, "alice", "pw-a").await;
+        let _ = token2;
+        let (token3, key_c) = full_login(&s, "alice", "pw-a").await;
+        let body3 = serde_json::to_vec(&json!({"user":"alice","pubkey": key_a.pub_string()})).unwrap();
+        let auth3 = authz("alice", &key_c, "POST", "/_api/auth/key-bind", &body3);
+        let (c, b) = call(&s, "POST", "/_api/auth/key-bind", &body3,
+            &[("Authorization", auth3.as_str()), ("X-Sr-Bind", token3.as_str())]).await;
+        assert_eq!((c, b.as_slice()), (404, E_AUTH_BODY), "签名与 body 公钥错位须拒");
+
+        // nonce 重放（同签名串二次提交、新 token）→ 404
+        let (token4, key_d) = full_login(&s, "alice", "pw-a").await;
+        let body4 = serde_json::to_vec(&json!({"user":"alice","pubkey": key_d.pub_string()})).unwrap();
+        let auth4 = authz("alice", &key_d, "POST", "/_api/auth/key-bind", &body4);
+        let (c, _) = call(&s, "POST", "/_api/auth/key-bind", &body4,
+            &[("Authorization", auth4.as_str()), ("X-Sr-Bind", token4.as_str())]).await;
+        assert_eq!(c, 200);
+        let (token5, _) = full_login(&s, "alice", "pw-a").await;
+        let (c, b) = call(&s, "POST", "/_api/auth/key-bind", &body4,
+            &[("Authorization", auth4.as_str()), ("X-Sr-Bind", token5.as_str())]).await;
+        assert_eq!((c, b.as_slice()), (404, E_AUTH_BODY), "key-bind nonce 重放拒绝");
+        let _ = std::fs::remove_dir_all(&s.root);
+    }
+
+    fn s_unused() -> PathBuf {
+        PathBuf::from("/nonexistent-s_unused")
+    }
+
+    // login-begin 限流：per-user 10 次/10 分 → 第 11 次 404 E_AUTH（同体）；全局 120 次
+    #[tokio::test]
+    async fn login_begin_rate_limit() {
+        let root = troot("rate");
+        mkuser(&root, "alice", "pw-a");
+        let s: S = Arc::new(test_state(root.clone()));
+        let mut rng = rand::rngs::OsRng;
+        let (_st, ke1) = showroom_common::opaque::login_start(&mut rng, "pw-a", "alice").unwrap();
+        let body = serde_json::to_vec(&json!({"user":"alice","ke1": ke1})).unwrap();
+        for i in 0..10 {
+            let (c, _) = call(&s, "POST", "/_api/auth/login-begin", &body, &[]).await;
+            assert_eq!(c, 200, "第 {i} 次应放行");
+        }
+        let (c, b) = call(&s, "POST", "/_api/auth/login-begin", &body, &[]).await;
+        assert_eq!((c, b.as_slice()), (404, E_AUTH_BODY), "user 桶第 11 次拒绝");
+        // 别的 user 不受影响
+        let (_st2, ke1b) = showroom_common::opaque::login_start(&mut rng, "x", "bob").unwrap();
+        let (c, _) = call(&s, "POST", "/_api/auth/login-begin",
+            &serde_json::to_vec(&json!({"user":"bob","ke1": ke1b})).unwrap(), &[]).await;
+        assert_eq!(c, 200, "per-user 桶互不影响");
+
+        // 全局桶：12 user × 10 次（各 user 桶恰好不超）灌满 120 后，第 121 次（新 user）→ 404。
+        // ke1 复用同一串（内容与 user 无一致性校验，login-begin 只做 OPRF evaluate）。
+        let s2: S = Arc::new(test_state(root.clone()));
+        for u in 0..12u32 {
+            let bu = serde_json::to_vec(&json!({"user": format!("g{u:02}"), "ke1": ke1})).unwrap();
+            for i in 0..10 {
+                let (c, _) = call(&s2, "POST", "/_api/auth/login-begin", &bu, &[]).await;
+                assert_eq!(c, 200, "g{u:02} 第 {i} 次应放行");
+            }
+        }
+        let b121 = serde_json::to_vec(&json!({"user": "g99", "ke1": ke1})).unwrap();
+        let (c, b) = call(&s2, "POST", "/_api/auth/login-begin", &b121, &[]).await;
+        assert_eq!((c, b.as_slice()), (404, E_AUTH_BODY), "全局桶第 121 次拒绝");
+        let _ = std::fs::remove_dir_all(&s.root);
+    }
+
+    // 登录态改密码（pw-begin/pw-commit）：替换后旧密码失效新密码可用、既有钥匙不受影响；
+    // 裸 pw-commit（无 pw-begin）→ E_STATE；key-selfrm 只能删签名所用 kid 自己
+    #[tokio::test]
+    async fn pw_change_and_key_selfrm() {
+        let root = troot("pwch");
+        let old_key = showroom_common::UserKey::generate();
+        crate::ops::user_add(&root, "alice", Some(&old_key.pub_string()), false, false,
+            crate::ops::InitPw::Set("old-pw".into())).unwrap();
+        let s: S = Arc::new(test_state(root.clone()));
+        let mut rng = rand::rngs::OsRng;
+
+        // pw-begin（签名）→ m2 → reg_finish → pw-commit（签名）
+        let (cst, m1) = showroom_common::opaque::reg_start(&mut rng, "new-pw", "alice").unwrap();
+        let b1 = serde_json::to_vec(&json!({"user":"alice","m1": m1})).unwrap();
+        let (c, b) = call(&s, "POST", "/_api/auth/pw-begin", &b1,
+            &[("Authorization", authz("alice", &old_key, "POST", "/_api/auth/pw-begin", &b1).as_str())]).await;
+        assert_eq!(c, 200, "{}", String::from_utf8_lossy(&b));
+        let m2 = serde_json::from_slice::<Value>(&b).unwrap()["m2"].as_str().unwrap().to_string();
+        let record = showroom_common::opaque::reg_finish(&mut rng, cst, "new-pw", "alice", &m2).unwrap();
+        let b2 = serde_json::to_vec(&json!({"user":"alice","record": record})).unwrap();
+        let (c, b) = call(&s, "POST", "/_api/auth/pw-commit", &b2,
+            &[("Authorization", authz("alice", &old_key, "POST", "/_api/auth/pw-commit", &b2).as_str())]).await;
+        assert_eq!(c, 200, "{}", String::from_utf8_lossy(&b));
+
+        // 新密码可登录、旧密码客户端 finish 失败
+        let (st, ke1) = showroom_common::opaque::login_start(&mut rng, "new-pw", "alice").unwrap();
+        let (_, b) = call(&s, "POST", "/_api/auth/login-begin",
+            &serde_json::to_vec(&json!({"user":"alice","ke1": ke1})).unwrap(), &[]).await;
+        let ke2 = serde_json::from_slice::<Value>(&b).unwrap()["ke2"].as_str().unwrap().to_string();
+        assert!(showroom_common::opaque::login_finish(st, "new-pw", "alice", &ke2).is_ok());
+        let (st2, ke1b) = showroom_common::opaque::login_start(&mut rng, "old-pw", "alice").unwrap();
+        let (_, b) = call(&s, "POST", "/_api/auth/login-begin",
+            &serde_json::to_vec(&json!({"user":"alice","ke1": ke1b})).unwrap(), &[]).await;
+        let ke2b = serde_json::from_slice::<Value>(&b).unwrap()["ke2"].as_str().unwrap().to_string();
+        assert!(showroom_common::opaque::login_finish(st2, "old-pw", "alice", &ke2b).is_err(), "旧密码失效");
+
+        // 裸 pw-commit（无在途 pw-begin）→ E_STATE（登录态端点，如实报错）
+        let (c, b) = call(&s, "POST", "/_api/auth/pw-commit", &b2,
+            &[("Authorization", authz("alice", &old_key, "POST", "/_api/auth/pw-commit", &b2).as_str())]).await;
+        assert_eq!(c, 500, "E_STATE → 500");
+        assert!(b.starts_with(br#"{"error":"E_STATE""#));
+
+        // 旧钥匙仍可用（改密码不动钥匙）：GET /_api/reg-cred（读 reg.cred）
+        let (c, b) = call(&s, "GET", "/_api/reg-cred", b"",
+            &[("Authorization", authz("alice", &old_key, "GET", "/_api/reg-cred", b"").as_str())]).await;
+        assert_eq!(c, 200, "{}", String::from_utf8_lossy(&b));
+        let v: Value = serde_json::from_slice(&b).unwrap();
+        assert_eq!(v["user"], "alice");
+        assert!(v["registry_password"].as_str().is_some_and(|p| !p.is_empty()));
+
+        // key-selfrm：只能删签名所用 kid 自己——先绑定第二把，再各自签名试删
+        let (token, key_b) = full_login(&s, "alice", "new-pw").await;
+        let bb = serde_json::to_vec(&json!({"user":"alice","pubkey": key_b.pub_string()})).unwrap();
+        let (c, b) = call(&s, "POST", "/_api/auth/key-bind", &bb,
+            &[("Authorization", authz("alice", &key_b, "POST", "/_api/auth/key-bind", &bb).as_str()),
+              ("X-Sr-Bind", token.as_str())]).await;
+        assert_eq!(c, 200);
+        let kid_b = serde_json::from_slice::<Value>(&b).unwrap()["kid"].as_str().unwrap().to_string();
+
+        // 用 key_b 签名删 old_key 的 kid → E_AUTH（仅允许删自己）
+        let (kid_old, _) = {
+            let vk = showroom_common::UserKey::from_pub_string(&old_key.pub_string()).unwrap();
+            (state::kid_of(&vk), 0)
+        };
+        let bad = serde_json::to_vec(&json!({"kid": kid_old})).unwrap();
+        let (c, b) = call(&s, "POST", "/_api/key-selfrm", &bad,
+            &[("Authorization", authz("alice", &key_b, "POST", "/_api/key-selfrm", &bad).as_str())]).await;
+        assert_eq!((c, b.as_slice()), (404, E_AUTH_BODY), "key-selfrm 仅允许删除签名所用钥匙自身");
+
+        // 删自己 → ok，钥匙消失
+        let good = serde_json::to_vec(&json!({"kid": kid_b})).unwrap();
+        let (c, b) = call(&s, "POST", "/_api/key-selfrm", &good,
+            &[("Authorization", authz("alice", &key_b, "POST", "/_api/key-selfrm", &good).as_str())]).await;
+        assert_eq!(c, 200, "{}", String::from_utf8_lossy(&b));
+        assert!(!state::tokens_dir(&s.root, "alice").join(format!("{kid_b}.pub")).exists());
+        let _ = std::fs::remove_dir_all(&s.root);
+    }
+
+    // admin/passwd-set：gen:true 一次性返回密码且 has_password 翻真；非管理员 404 同体
+    #[tokio::test]
+    async fn admin_passwd_set_endpoint() {
+        let root = troot("pwset");
+        let admin_key = showroom_common::UserKey::generate();
+        crate::ops::user_add(&root, "root", Some(&admin_key.pub_string()), true, false,
+            crate::ops::InitPw::None).unwrap();
+        let plain_key = showroom_common::UserKey::generate();
+        crate::ops::user_add(&root, "alice", Some(&plain_key.pub_string()), false, false,
+            crate::ops::InitPw::None).unwrap();
+        let s: S = Arc::new(test_state(root.clone()));
+        assert!(!crate::ops::user_list(&s.root).iter().find(|u| u.user == "alice").unwrap().has_password);
+
+        // 非管理员 → 404 E_AUTH 同体（不泄露端点存在）
+        let b0 = serde_json::to_vec(&json!({"user":"alice","gen":true})).unwrap();
+        let (c, b) = call(&s, "POST", "/_api/admin/passwd-set", &b0,
+            &[("Authorization", authz("alice", &plain_key, "POST", "/_api/admin/passwd-set", &b0).as_str())]).await;
+        assert_eq!((c, b.as_slice()), (404, E_AUTH_BODY));
+
+        // 管理员 gen:true → {password} 只此一次
+        let (c, b) = call(&s, "POST", "/_api/admin/passwd-set", &b0,
+            &[("Authorization", authz("root", &admin_key, "POST", "/_api/admin/passwd-set", &b0).as_str())]).await;
+        assert_eq!(c, 200, "{}", String::from_utf8_lossy(&b));
+        let pw = serde_json::from_slice::<Value>(&b).unwrap()["password"].as_str().unwrap().to_string();
+        assert_eq!(pw.len(), 24);
+        assert!(crate::ops::user_list(&s.root).iter().find(|u| u.user == "alice").unwrap().has_password);
+        // 新密码可登录
+        let mut rng = rand::rngs::OsRng;
+        let (st, ke1) = showroom_common::opaque::login_start(&mut rng, &pw, "alice").unwrap();
+        let (_, b) = call(&s, "POST", "/_api/auth/login-begin",
+            &serde_json::to_vec(&json!({"user":"alice","ke1": ke1})).unwrap(), &[]).await;
+        let ke2 = serde_json::from_slice::<Value>(&b).unwrap()["ke2"].as_str().unwrap().to_string();
+        assert!(showroom_common::opaque::login_finish(st, &pw, "alice", &ke2).is_ok());
+
+        // 全无密码参数 → E_NAME
+        let b1 = br#"{"user":"alice"}"#;
+        let (c, _) = call(&s, "POST", "/_api/admin/passwd-set", b1,
+            &[("Authorization", authz("root", &admin_key, "POST", "/_api/admin/passwd-set", b1).as_str())]).await;
+        assert_eq!(c, 400, "E_NAME → 400");
+        let _ = std::fs::remove_dir_all(&s.root);
+    }
+
+    // admin/user-add（plan-16 §1.5）：body 增 password/gen_password → 响应两把密码一次性返回；
+    // pubkey-only 与 password-only 均可；两者全无 → E_NAME
+    #[tokio::test]
+    async fn admin_user_add_with_password() {
+        let root = troot("ua");
+        let admin_key = showroom_common::UserKey::generate();
+        crate::ops::user_add(&root, "root", Some(&admin_key.pub_string()), true, false,
+            crate::ops::InitPw::None).unwrap();
+        let s: S = Arc::new(test_state(root.clone()));
+
+        // password-only
+        let b1 = serde_json::to_vec(&json!({"user":"carol","password":"pw-1"})).unwrap();
+        let (c, b) = call(&s, "POST", "/_api/admin/user-add", &b1,
+            &[("Authorization", authz("root", &admin_key, "POST", "/_api/admin/user-add", &b1).as_str())]).await;
+        assert_eq!(c, 200, "{}", String::from_utf8_lossy(&b));
+        let v: Value = serde_json::from_slice(&b).unwrap();
+        assert_eq!(v["login_password"], "pw-1");
+        assert!(v["registry_password"].as_str().is_some_and(|p| !p.is_empty()));
+        assert!(v.get("kid").is_none(), "无公钥无 kid 字段");
+
+        // gen_password + pubkey
+        let k = showroom_common::UserKey::generate();
+        let b2 = serde_json::to_vec(&json!({"user":"dave","pubkey": k.pub_string(),"gen_password":true,"admin":true})).unwrap();
+        let (c, b) = call(&s, "POST", "/_api/admin/user-add", &b2,
+            &[("Authorization", authz("root", &admin_key, "POST", "/_api/admin/user-add", &b2).as_str())]).await;
+        assert_eq!(c, 200);
+        let v: Value = serde_json::from_slice(&b).unwrap();
+        assert_eq!(v["kid"].as_str().map(|s| s.len()), Some(8));
+        assert_eq!(v["login_password"].as_str().map(|s| s.len()), Some(24));
+        assert!(v["registry_password"].as_str().is_some_and(|p| !p.is_empty()));
+
+        // 全无凭证 → E_NAME
+        let b3 = br#"{"user":"erin"}"#;
+        let (c, b) = call(&s, "POST", "/_api/admin/user-add", b3,
+            &[("Authorization", authz("root", &admin_key, "POST", "/_api/admin/user-add", b3).as_str())]).await;
+        assert_eq!(c, 400);
+        assert!(b.starts_with(br#"{"error":"E_NAME""#));
+        let _ = std::fs::remove_dir_all(&s.root);
+    }
 }
+

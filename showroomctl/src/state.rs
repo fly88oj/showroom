@@ -116,6 +116,16 @@ pub fn ports_reg(root: &Path) -> PathBuf {
 pub fn htpasswd_path(root: &Path) -> PathBuf {
     root.join("state/registry.htpasswd")
 }
+/// 服务端 OPRF key（plan-16 §1.2）：`state/opaque.key`（b64 0600；serve 启动缺失自动生成，
+/// 同 platform_rsa 模式）。
+pub fn opaque_key_path(root: &Path) -> PathBuf {
+    root.join("state/opaque.key")
+}
+/// 登录密码注册记录（plan-16 §1.2）：`state/users/<u>/pass.opaque`（b64 0600；user_revoke
+/// 连 users 目录整删，记录随之消失）。
+pub fn pass_opaque_path(root: &Path, user: &str) -> PathBuf {
+    users_dir(root, user).join("pass.opaque")
+}
 
 // —— project.conf：key=value（owner tag port cport mem cpu redisdb updated [stopped] [legacyslot]）——
 // 注：磁盘键名沿用存量 `owner=`（不 break 主机存量 conf，语义即下方 user 字段）。
@@ -323,6 +333,9 @@ pub struct Policy {
     /// 上传空间估算膨胀因子（§14.4；policy.env `UPLOAD_SPACE_FACTOR=` 可调，默认 4）：
     /// sealed 尺寸 × 因子 ≈ docker load 未压缩层 + registry blob 的落盘需求。
     pub upload_space_factor: u64,
+    /// 密码绑定钥匙保留数（plan-16 §1.2；policy.env `BOUND_KEYS_MAX=` 可调，默认 5）：
+    /// key-bind 后按 mtime 只留最近 N 把 .bound 钥匙，CI 无标记公钥不受 GC。
+    pub bound_keys_max: usize,
 }
 
 impl Default for Policy {
@@ -337,6 +350,7 @@ impl Default for Policy {
             redis_dbs: 256,
             disk_reserve_gb: 20,
             upload_space_factor: 4,
+            bound_keys_max: 5,
         }
     }
 }
@@ -355,6 +369,10 @@ impl Policy {
             redis_dbs: m.get("REDIS_DBS").and_then(|v| v.parse().ok()).unwrap_or(256),
             disk_reserve_gb: m.get("DISK_RESERVE_GB").and_then(|v| v.parse().ok()).unwrap_or(20),
             upload_space_factor: m.get("UPLOAD_SPACE_FACTOR").and_then(|v| v.parse().ok()).unwrap_or(4),
+            bound_keys_max: m.get("BOUND_KEYS_MAX")
+                .and_then(|v| v.parse().ok())
+                .filter(|v| *v > 0)
+                .unwrap_or(5),
         }
     }
 
@@ -702,6 +720,70 @@ pub fn user_keys_with_kid(root: &Path, user: &str) -> Vec<(String, VerifyingKey)
 /// 管理员标记：`tokens/<user>/<kid>.admin` 空文件存在 = 该钥匙为管理员（SPEC §12.2）。
 pub fn admin_marker_path(root: &Path, user: &str, kid: &str) -> PathBuf {
     tokens_dir(root, user).join(format!("{kid}.admin"))
+}
+
+/// 密码绑定标记（plan-16 §1.2）：`tokens/<user>/<kid>.bound` 空文件 = 该钥匙由密码登录
+/// 绑定（Web/CLI 同类）——受 keep-N GC 约束；无标记 = CI 专家路径（人工生命周期）。
+pub fn bound_marker_path(root: &Path, user: &str, kid: &str) -> PathBuf {
+    tokens_dir(root, user).join(format!("{kid}.bound"))
+}
+
+/// 该 user 全部密码绑定钥匙的 (kid, mtime)（.bound 标记存在者，.pub 的 mtime=绑定时间）。
+fn bound_keys(root: &Path, user: &str) -> Vec<(String, u64)> {
+    let dir = tokens_dir(root, user);
+    let Ok(rd) = fs::read_dir(&dir) else { return vec![] };
+    let mut out = vec![];
+    for e in rd.filter_map(|e| e.ok()) {
+        let p = e.path();
+        if p.extension().and_then(|o| o.to_str()) != Some("bound") {
+            continue;
+        }
+        let Some(stem) = p.file_stem().and_then(|o| o.to_str()) else { continue };
+        if !valid_kid(stem) {
+            continue; // 非 kid 形状文件不动（防误删任意文件）
+        }
+        let kid = stem.to_string();
+        let mtime = file_mtime(&dir.join(format!("{kid}.pub")));
+        out.push((kid, mtime));
+    }
+    out
+}
+
+/// 密码绑定钥匙 GC 计划（plan-16 §2.2，纯函数）：按 (mtime, kid) 旧→新排序，
+/// 返回应删的最旧超出部分（mtime 并列以 kid 字典序定序，确定性）。
+pub fn plan_bound_gc(keys: &[(String, u64)], keep: usize) -> Vec<String> {
+    let mut v = keys.to_vec();
+    v.sort_by(|a, b| a.1.cmp(&b.1).then(a.0.cmp(&b.0)));
+    let del = v.len().saturating_sub(keep);
+    v.into_iter().take(del).map(|(kid, _)| kid).collect()
+}
+
+/// 密码绑定钥匙 GC（plan-16 §2.2 key-bind 步骤）：全部 .bound 钥匙（含刚绑的新钥匙）
+/// 按 .pub mtime 保留最近 keep 把，超出的旧钥匙整组清除（.pub/.bound/.admin）。
+/// 幂等；无 .bound 标记的公钥不受影响；exclude（当前刚绑的 kid）从删除名单摘除。
+pub fn bound_keys_gc(root: &Path, user: &str, keep: usize, exclude: Option<&str>) -> Vec<String> {
+    let keys = bound_keys(root, user);
+    let dir = tokens_dir(root, user);
+    let mut removed = vec![];
+    for kid in plan_bound_gc(&keys, keep) {
+        if Some(kid.as_str()) == exclude {
+            continue; // 刚绑的新钥匙（正常排序 mtime 最新不会入选；防并列 tie-break 误删）
+        }
+        let _ = fs::remove_file(dir.join(format!("{kid}.pub")));
+        let _ = fs::remove_file(dir.join(format!("{kid}.bound")));
+        let _ = fs::remove_file(admin_marker_path(root, user, &kid));
+        removed.push(kid);
+    }
+    removed
+}
+
+/// 读取用户登录注册记录（pass.opaque，b64 一行）；无记录/不可读 = None
+///（存量用户未设密码 → 登录走 UnknownUser 同形态，plan-16 §6.6）。
+pub fn read_pass_opaque(root: &Path, user: &str) -> Option<String> {
+    fs::read_to_string(pass_opaque_path(root, user))
+        .ok()
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
 }
 
 /// 文件 mtime（unix 秒；读不到给 0）——user_list 的 key 登记时间来源。
@@ -1214,8 +1296,9 @@ mod tests {
                 p.redis_dbs,
                 p.disk_reserve_gb,
                 p.upload_space_factor,
+                p.bound_keys_max,
             ),
-            (5, "128m", "512m", 2, true, 512, 8, 5, 2)
+            (5, "128m", "512m", 2, true, 512, 8, 5, 2, 5)
         );
         assert_eq!(p.import_cap_bytes(), 2 << 30);
         assert_eq!(p.redis_pool_cap(), 8, "§13.3 REDIS_DBS 可调");
@@ -1233,8 +1316,9 @@ mod tests {
                 d.redis_dbs,
                 d.disk_reserve_gb,
                 d.upload_space_factor,
+                d.bound_keys_max,
             ),
-            (30, "256m", "1g", 8, false, 1536, 256, 20, 4)
+            (30, "256m", "1g", 8, false, 1536, 256, 20, 4, 5)
         );
         assert_eq!(d.redis_pool_cap(), 256, "§13.3 默认池 256");
         assert_eq!(d.reserve_bytes(), 20 << 30, "§14.4 缺省预留 20GB");
@@ -1840,5 +1924,99 @@ Mon 2026-10-12 00:00:00 +08  1h 32min Sun 2026-10-10 23:00:12 +08   2h 3min ago 
         assert_eq!(got.len(), 1, "坏 .pub 跳过: {got:?}");
         assert_eq!(got[0].0, want);
         assert!(user_keys_with_kid(&root, "nobody").is_empty());
+    }
+
+    // 14. plan_bound_gc（plan-16 §2.2 纯函数）：保最近 keep 把、删最旧超出；mtime 并列
+    //     以 kid 字典序定序；不足 keep 不删；exclude 在调用方过滤（此层不感知）
+    #[test]
+    fn bound_gc_plan() {
+        let ks = |v: &[(&str, u64)]| -> Vec<(String, u64)> {
+            v.iter().map(|(k, t)| (k.to_string(), *t)).collect()
+        };
+        // 6 把 mtime 递增：keep 5 → 删最旧的 k1
+        let keys = ks(&[("k1", 100), ("k2", 200), ("k3", 300), ("k4", 400), ("k5", 500), ("k6", 600)]);
+        assert_eq!(plan_bound_gc(&keys, 5), vec!["k1".to_string()]);
+        // keep 2 → 删 4 把最旧（保 k5/k6）
+        assert_eq!(plan_bound_gc(&keys, 2), ["k1", "k2", "k3", "k4"].map(String::from).to_vec());
+        // 不足 keep / 恰好 → 空表
+        assert!(plan_bound_gc(&keys, 6).is_empty());
+        assert!(plan_bound_gc(&keys, 100).is_empty());
+        assert!(plan_bound_gc(&[], 5).is_empty());
+        // mtime 并列：kid 字典序大者视为新（保住），删字典序小者
+        let tie = ks(&[("aa", 50), ("zz", 50), ("mm", 50)]);
+        assert_eq!(plan_bound_gc(&tie, 2), vec!["aa".to_string()]);
+        assert_eq!(plan_bound_gc(&tie, 1), ["aa", "mm"].map(String::from).to_vec());
+        // 乱序输入不受影响（内部排序）
+        let shuf = ks(&[("k6", 600), ("k1", 100), ("k4", 400)]);
+        assert_eq!(plan_bound_gc(&shuf, 2), vec!["k1".to_string()]);
+    }
+
+    // 14b. bound_keys_gc 文件系统层：GC 只清 .bound 钥匙三件套，CI 无标记公钥不动；
+    //      exclude（刚绑钥匙）永不入选
+    #[test]
+    fn bound_keys_gc_filesystem() {
+        let root = troot("bound-gc");
+        let dir = tokens_dir(&root, "alice");
+        fs::create_dir_all(&dir).unwrap();
+        let touch = |kid: &str, bound: bool| {
+            fs::write(dir.join(format!("{kid}.pub")), "ed25519:x
+").unwrap();
+            if bound {
+                fs::write(dir.join(format!("{kid}.bound")), "").unwrap();
+            }
+        };
+        // 3 把 .bound + 1 把 CI 公钥（无标记）
+        for kid in ["aaaa0001", "aaaa0002", "aaaa0003"] {
+            touch(kid, true);
+        }
+        touch("bbbb0001", false);
+        // keep=2：删最旧一把（mtime 并列 → kid 字典序小的 aaaa0001）；CI 公钥不动
+        let removed = bound_keys_gc(&root, "alice", 2, None);
+        assert_eq!(removed, vec!["aaaa0001".to_string()]);
+        assert!(!dir.join("aaaa0001.pub").exists());
+        assert!(!dir.join("aaaa0001.bound").exists());
+        assert!(dir.join("aaaa0002.pub").exists() && dir.join("aaaa0002.bound").exists());
+        assert!(dir.join("aaaa0003.pub").exists());
+        assert!(dir.join("bbbb0001.pub").exists(), "无 .bound 标记的 CI 公钥不受 GC");
+        // exclude：全部 .bound（含刚绑的新钥匙）一起按 keep 上限裁；新绑（mtime 最新）保住，删最旧
+        let dir2 = tokens_dir(&root, "bob");
+        fs::create_dir_all(&dir2).unwrap();
+        let touch_bob = |kid: &str| {
+            fs::write(dir2.join(format!("{kid}.pub")), "ed25519:x\n").unwrap();
+            fs::write(dir2.join(format!("{kid}.bound")), "").unwrap();
+        };
+        for kid in ["aaaa0001", "aaaa0002", "aaaa0003"] {
+            touch_bob(kid);
+            std::thread::sleep(std::time::Duration::from_millis(15)); // mtime 分层
+        }
+        touch_bob("aaaa0004"); // 刚绑的新钥匙（mtime 最新）
+        let removed2 = bound_keys_gc(&root, "bob", 3, Some("aaaa0004"));
+        assert_eq!(removed2, vec!["aaaa0001".to_string()], "删最旧一把，总数守恒在 keep");
+        assert!(dir2.join("aaaa0004.pub").exists() && dir2.join("aaaa0004.bound").exists());
+        assert!(dir2.join("aaaa0003.pub").exists());
+        let left = fs::read_dir(&dir2)
+            .unwrap()
+            .filter(|e| e.as_ref().unwrap().path().extension().and_then(|o| o.to_str()) == Some("bound"))
+            .count();
+        assert_eq!(left, 3, "keep=3 恰好剩 3 把 .bound");
+    }
+
+    // 14c. 新路径函数（plan-16 §1.2）与 pass.opaque 读取
+    #[test]
+    fn opaque_paths_and_read() {
+        let root = troot("opaque-paths");
+        assert_eq!(opaque_key_path(&root), root.join("state/opaque.key"));
+        assert_eq!(pass_opaque_path(&root, "alice"), root.join("state/users/alice/pass.opaque"));
+        assert_eq!(
+            bound_marker_path(&root, "alice", "ab12cd34"),
+            tokens_dir(&root, "alice").join("ab12cd34.bound")
+        );
+        assert_eq!(read_pass_opaque(&root, "alice"), None, "无记录 → None（UnknownUser 同形态）");
+        fs::create_dir_all(users_dir(&root, "alice")).unwrap();
+        fs::write(pass_opaque_path(&root, "alice"), "QUJDREVG\n").unwrap();
+        assert_eq!(read_pass_opaque(&root, "alice").as_deref(), Some("QUJDREVG"));
+        fs::create_dir_all(users_dir(&root, "bob")).unwrap();
+        fs::write(pass_opaque_path(&root, "bob"), "  \n").unwrap();
+        assert_eq!(read_pass_opaque(&root, "bob"), None, "空白也是未设密码");
     }
 }
