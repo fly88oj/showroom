@@ -210,9 +210,14 @@ CLI 对应：`showroom db sql|tables|preview|dump|restore|reset`。公网全可�
 - `state/host.env`（setup 生成、可改、幂等应用）：
   ```
   MIDDLEWARE="postgres registry redis"     # 集合：按需增减（如无 redis 主机）
-  REDIS_DBS=256  DISK_RESERVE_GB=20  UPLOAD_SPACE_FACTOR=4  RESERVE_MEM_MB=1536
-  CADDY=yes  TUNING=sysctl  DEDUP=weekly
+  CADDY=yes  LAN_HOST=<内网地址>  PUBLIC_HOST=  TUNING=sysctl  DEDUP=weekly
+  FRP=none  FRP_TOKEN=  FRP_TUNNEL=        # frp 自举（chmlfrp；整文件 0600）
   ```
+  > 勘误（plan-15 落地）：REDIS_DBS/DISK_RESERVE_GB/UPLOAD_SPACE_FACTOR/RESERVE_MEM_MB
+  > 属业务限额，归 `state/policy.env`（§13.3/§14.4 已落），不在 host.env——两类键的变更主体
+  > 与风险等级不同（限额=管理员日常调节；设施=setup 幂等收敛），分层不合并以免双写漂移。
+  > 键分层论证与全集见 docs/plans/plan-15-bootstrap.md §1。首跑限额缺省随实测硬件推导
+  > （hw_defaults），用户显式值永远优先。
 - `showroomctl setup [--apply]`：无 --apply=diff 模式（列出将做的变更与当前偏差）；--apply 幂等执行：目录/btrfs 子卷/policy/env 合成、docker 网络、所选中间件容器（缺则建、多则停删——**有项目引用的中间件禁用需 --force 并列受影响项目**）、caddy 安装(pacman)+Caddyfile 渲染（按中间件集合生成路由）、systemd 单元（api/timers/dedup）安装启用、sysctl/journald/watchdog 调优、预压缩脚本。全新主机流程=下载二进制→`showroomctl setup --apply`→`user-add --admin`。
 - `showroomctl upgrade`：上传新二进制后的就地升级（替换单元/重渲染配置，保数据）。
 ### 15.2 中间件子命令（CLI+admin 端点同源）

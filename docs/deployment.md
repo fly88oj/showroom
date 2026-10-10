@@ -1,29 +1,129 @@
-# Showroom 部署指南（从零开始）
+# Showroom 部署指南（三步自举）
 
-目标：在一台 Linux 主机（假设已有 Docker、root 权限、一块 btrfs 文件系统）上部署完整的 Showroom 控制面。完成后你将拥有：Caddy 双面入口、控制面 API、共享 PostgreSQL/Redis/registry、systemd timers 自愈、首把管理员钥匙。
+目标：在一台 Linux 主机上部署完整的 Showroom 控制面。完成后你将拥有：Caddy 双面入口、控制面 API、共享 PostgreSQL/Redis/registry、systemd timers 自愈、首把管理员钥匙。
 
 > 本文所有 `your-host`、`<USER>`、`<PROJECT>`、`<…>` 均为占位符，替换为你的实际值。协议与安全背景见 [security.md](security.md)；日常运维见 [operations.md](operations.md)。
+> 手工全步骤（原理参考/排障用，setup 已自动化）见[附录 A](#附录-a-手工全步骤原理参考)；调优参数全集见[附录 B](#附录-b-调优参数表)。
 
-## 0. 前置要求
+## 0. 前置检查表
 
 | 项 | 要求 | 原因 |
 |---|---|---|
-| OS | Linux（systemd） | 服务与 timer 单元 |
+| OS | Linux（systemd；包管理 pacman 的发行版可直接装 Caddy，其余见附录 A） | 服务与 timer 单元 |
 | Docker | ≥ 20（含 `docker exec`） | 展项与中间件容器 |
+| 权限 | root | 写 /etc、/usr/local/bin、systemd 单元 |
 | 文件系统 | btrfs | 快照（`snapshot hourly/daily`）依赖子卷 |
-| Caddy | 2.x | 静态面 + 反代 |
-| PostgreSQL | ≥ 13 | `DROP DATABASE … WITH (FORCE)` |
 | 端口 | 80/443 对外（Caddy）；8100–8199 仅本机 | 展项端口不直接暴露 |
 
-## 1. 目录与 btrfs 子卷
+**唯一保留的手工步**：btrfs 子卷创建与挂载（setup 的 BtrfsSubvol Action 只覆盖「父目录即 btrfs」的顺手场景，子卷与 fstab 属磁盘布局，不自动化）：
 
 ```sh
-# 假设 btrfs 池挂在 /mnt/btrfs（按实际路径替换）；快照父卷 /@showroom-snaps 会在首次快照时惰性创建
+# 假设 btrfs 池挂在 /mnt/btrfs（按实际路径替换）；快照父卷 /@showroom-snaps 由 setup 顺手创建
 sudo btrfs subvolume create /mnt/btrfs/@showroom
 sudo mkdir -p /srv/showroom
 echo '/dev/disk/by-uuid/<你的-btrfs-UUID> /srv/showroom btrfs subvol=@showroom,defaults 0 0' | sudo tee -a /etc/fstab
 sudo mount /srv/showroom
+```
 
+## 1. 取二进制
+
+GitHub Releases 下载单文件 `showroomctl`（或源码构建 `cargo build --release` 后取 `target/release/showroomctl`）：
+
+```sh
+sudo install -m755 showroomctl /usr/local/bin/showroomctl
+```
+
+## 2. `showroomctl setup --apply`（幂等收敛）
+
+```sh
+sudo showroomctl setup            # diff 模式：只列出将做的变更与当前偏差
+sudo showroomctl setup --apply    # 幂等执行；二次运行期望 `plan: 0 actions needed (clean)`
+```
+
+首跑缺 `state/host.env` 时按探测值生成并打印（`--lan-host`/`--public-host` 可覆写）。**限额缺省随实测硬件推导**（内存×15%/磁盘×3% 等，见附录 B；host.env 首行注释记录推导依据，audit 可溯；用户显式写入的值永远优先）。host.env 键表（整文件 0600——含 frp 凭据）：
+
+| 键 | 取值 | 默认 | 含义 |
+|---|---|---|---|
+| `MIDDLEWARE` | 空格集合 ⊆ postgres/redis/registry | `postgres redis registry` | 中间件集合（禁用组 env 不再注入） |
+| `CADDY` | yes/no | yes | 安装(pacman)+渲染 Caddyfile |
+| `LAN_HOST` | 地址 | 首跑 `hostname -I` 首地址 | site A（内网面）地址；BASE_URL 由此派生 |
+| `PUBLIC_HOST` | 地址/空 | 空 | site B（公网面）地址；空=纯内网主机 |
+| `TUNING` | sysctl/none | sysctl | 内核调优（sysctl.d 全表见附录 B） |
+| `DEDUP` | weekly/none | weekly | 周日 05:00 duperemove timer |
+| `FRP` | none/chmlfrp | none | ChmlFrp 隧道自举（见 §3 frp） |
+| `FRP_TOKEN` / `FRP_TUNNEL` | 字符串 | 空 | ChmlFrp usertoken 与隧道 ID |
+
+setup 做的事：目录/policy.env（缺键补默认、已有键保留）/host.env 落盘、docker 网络 `showroom-net`、所选中间件容器（pg 12 参数/redis `--databases=policy.REDIS_DBS`/registry 全旗标，规格见附录 B）、Caddy 安装+Caddyfile 渲染（registry ∈ 集合才有 `/v2`）、systemd 单元（api+7 timers+dedup）安装启用、sysctl/journald(400M+30d)/watchdog(10s) 调优、`showroom-precompress` 预压缩脚本与首跑执行。现网 redis 实例 `--databases` 低于 policy 时**不重建**（数据安全优先），只报黄条引导走 §3 扩容流。
+
+## 3. 首把管理员钥匙 + 交付
+
+在**发布者机器**上 `showroom keygen` 取公钥串，然后在主机上：
+
+```sh
+sudo showroomctl user-add <USER> --pubkey 'ed25519:<发布者公钥串>' --admin
+# 输出 registry 凭据：<USER> 的 basic auth 密码（state/users/<USER>/reg.cred 明文留存）
+```
+
+把两样东西交给发布者：registry 密码（快通道 push 用）、`/srv/showroom/state/platform_rsa.pub`（发布者存为 `~/.showroom/platform_rsa.pub`，import 加密通道用）。
+
+## 4. 验证
+
+```sh
+systemctl is-active showroom-api          # 期望 active（本机健康检查用进程级，不用 HTTP）
+# 零信息暴露自检：未签名请求 /_api/health 必须得 404（得 200/403 说明鉴权没接上）
+curl -s -o /dev/null -w '%{http_code}\n' http://127.0.0.1:8090/_api/health   # → 404
+```
+
+发布者机器上走一遍 `keygen → config → doctor → deploy`（见 [README](../README.md) 快速开始），成功后 timers 已由 setup 启用，无需再手工 `enable --now`。
+
+## 5. 日常变更
+
+| 场景 | 命令 |
+|---|---|
+| 增/减中间件 | `showroomctl middleware enable redis` / `showroomctl middleware disable redis [--force]`（有项目引用时拒绝并列出；bind 数据卷保留） |
+| 期望/实际对照 | `showroomctl middleware status`（含 redis 实例库数 vs policy 漂移） |
+| Redis 逻辑库扩容 | `showroomctl middleware set redis databases=256`（先见提示文案，加 `--confirm` 才停删重建实例：AOF 持久、约 3 秒、验证通过才写 policy） |
+| 改主机形状后收敛 | 编辑 `state/host.env`（或 POST `/_api/admin/host` 两段式）→ `showroomctl setup --apply` |
+| 就地升级 | 上传新二进制到 `/tmp/showroomctl` → `showroomctl upgrade`（探针→备份→原子替换→restart 探活→失败回滚；同步 user CLI 与 `_bootstrap/`，不碰 `_console`） |
+| 管理面板 | `GET /_api/admin/host`：期望状态+漂移+redis 池水位+建议；`POST /_api/admin/host`：无 confirm 返回变更清单与影响面（removed_middleware/affected_projects），`confirm=true` 才落盘+apply |
+
+### frp 隧道接入
+
+**ChmlFrp（自举）**：编辑 `state/host.env` 置 `FRP=chmlfrp`、`FRP_TOKEN=<usertoken>`、`FRP_TUNNEL=<隧道ID>` → `showroomctl setup --apply`。setup 将下载 frpc 到 `/usr/local/frpc/frpc`（下载源 `https://chmlfrp.cn/dw/linux/amd64/frpc`）并以 `chmlfrp.service` 常驻（凭据经 0600 的 host.env 以 EnvironmentFile 注入，不落单元明文）。**如实降级**：该下载源当前可能返回 HTML 壳——setup 下载后以 `file` 校验 ELF，非 ELF 即报错并提示「手工放置 linux/amd64 frpc 二进制到 `/usr/local/frpc/frpc` 后重跑 `showroomctl setup --apply`」；`/_api/admin/host` 的 `frp.service` 字段常驻反馈 is-active 状态。
+
+**自建 frp（主机无公网 IP）**：在公网服务器跑 frps（占位配置），在 Showroom 主机跑 frpc 把 Caddy 暴露出去：
+
+```toml
+# /etc/frp/frpc.toml（Showroom 主机）
+serverAddr = "<FRP-SERVER>"
+serverPort = 7000
+auth.token = "<FRP-TOKEN>"
+
+[[proxies]]
+name = "showroom-http"
+type = "tcp"
+remotePort = 28080         # 公网访问端口
+transport.useEncryption = true
+```
+
+frpc 以 systemd 常驻后，公网面即 `http://<FRP-SERVER>:28080`；同时把该地址写入 `state/host.env` 的 `PUBLIC_HOST=` 再 `setup --apply`（渲染 site B）。发布者 CLI 配置双通道：
+
+```sh
+showroom config --server-lan http://showroom-lan.your-host \
+    --server-public http://<FRP-SERVER>:28080
+```
+
+**注意**：frp 仅转发 TCP；管理流量的认证与机密性由 SR-SIG1/信封在应用层保证，不依赖 frp 的加密。
+
+---
+
+## 附录 A：手工全步骤（原理参考）
+
+> 以下为 setup 出现前的手工部署原文，**原理参考/排障用，setup 已自动化**（含 §A.2 的 PG 五参数——实配已扩至 12 参数，见附录 B）。
+
+### A.1 目录与初始策略
+
+```sh
 sudo mkdir -p /srv/showroom/state/{tokens,users,projects,routes} \
              /srv/showroom/_middleware/{postgres,redis,registry} \
              /srv/showroom/_console \
@@ -31,23 +131,21 @@ sudo mkdir -p /srv/showroom/state/{tokens,users,projects,routes} \
 sudo chmod 700 /srv/showroom/state /srv/showroom/state/tokens /srv/showroom/state/users
 ```
 
-写入初始策略（`/srv/showroom/state/policy.env`，键含义与默认值）：
+`state/policy.env`（setup 的 `render_policy` 对缺失键补这些默认、已有键一律保留）：
 
-```sh
-sudo tee /srv/showroom/state/policy.env >/dev/null <<'EOF'
+```ini
 MAX_SLOTS=30
 DEFAULT_MEM=256m
 MAX_MEM=1g
 IMPORT_MAX_GB=8
 ALLOW_LAN_PORT=0
 RESERVE_MEM_MB=1536
-EOF
+REDIS_DBS=256
+DISK_RESERVE_GB=20
+UPLOAD_SPACE_FACTOR=4
 ```
 
-- `MAX_SLOTS`：项目数上限；`DEFAULT_MEM`/`MAX_MEM`：容器内存需求缺省值与上限；
-- `IMPORT_MAX_GB`：import 加密通道单包上限（GB）；`RESERVE_MEM_MB`：内存准入预留（`MemAvailable − 预留 < 需求` 即拒绝）。
-
-## 2. 中间件容器
+### A.2 中间件容器
 
 ```sh
 sudo docker network create showroom-net
@@ -60,13 +158,12 @@ sudo docker run -d --name sr-postgres --network showroom-net --restart unless-st
   -c shared_buffers=256MB -c effective_cache_size=768MB -c work_mem=16MB \
   -c max_connections=200 -c autovacuum_naptime=30s
 
-# Redis（逻辑库 0–15 按项目分配）
+# Redis（逻辑库按项目分配；--databases 与 policy REDIS_DBS 一致）
 sudo docker run -d --name sr-redis --network showroom-net --restart unless-stopped \
   -v /srv/showroom/_middleware/redis:/data \
-  redis:7-alpine --appendonly yes --maxmemory 512mb --maxmemory-policy allkeys-lru
+  redis:7-alpine --appendonly yes --databases 256 --maxmemory 512mb --maxmemory-policy allkeys-lru
 
-# registry（先做第 4 步 user-add 生成 htpasswd，再启动本容器；
-# 或先 touch 空文件占位、user-add 后 restart）
+# registry（先做 user-add 生成 htpasswd，再启动本容器；或先 touch 空文件占位）
 sudo touch /srv/showroom/state/registry.htpasswd
 sudo docker run -d --name sr-registry --network showroom-net --restart unless-stopped \
   -p 127.0.0.1:5000:5000 \
@@ -79,66 +176,28 @@ sudo docker run -d --name sr-registry --network showroom-net --restart unless-st
   registry:2
 ```
 
-要点（均为平台硬约定）：
+要点（均为平台硬约定）：docker 网络名必须是 `showroom-net`（常量）；容器名 `sr-postgres` / `sr-redis` / `sr-registry` 即网络内 DNS 名（注入展项的 `DB_HOST` / `REDIS_HOST` 依赖它们）；registry 必须 `delete.enabled: true` 且以 `state/registry.htpasswd` 做 basic auth；registry 仅发布到 `127.0.0.1:5000`，外部推拉一律经 Caddy `/v2`。
 
-- docker 网络名必须是 `showroom-net`（常量）；容器名 `sr-postgres` / `sr-redis` / `sr-registry` 即网络内 DNS 名，注入展项的 `DB_HOST` / `REDIS_HOST` 依赖它们；
-- registry 必须 `delete.enabled: true`（tag 保留策略 `gc-registry` 用）且以 `state/registry.htpasswd` 做 basic auth；
-- registry 仅发布到 `127.0.0.1:5000`；外部推拉一律经 Caddy `/v2`。
-
-## 3. 构建与安装二进制 + systemd 单元
+### A.3 二进制与 systemd 单元
 
 ```sh
 git clone <本仓库> && cd showroom
 cargo build --release
-
 sudo install -m755 target/release/showroomctl target/release/showroom /usr/local/bin/
 sudo install -m644 deploy/showroom-*.service deploy/showroom-*.timer /etc/systemd/system/
-```
-
-`deploy/` 内单元即实际使用的单元（`showroom-api.service` 为 root 运行的控制面，其余为 7 个 timer）。按你的域名覆盖对外 URL（不改动仓库文件，用 drop-in）：
-
-```sh
-sudo mkdir -p /etc/systemd/system/showroom-api.service.d
-sudo tee /etc/systemd/system/showroom-api.service.d/override.conf >/dev/null <<'EOF'
-[Service]
-Environment=SHOWROOM_BASE_URL=https://your-host
-EOF
-```
-
-> 环境变量：`SHOWROOM_ROOT`（默认 `/srv/showroom`）、`SHOWROOM_BASE_URL`（publish 返回的 `url` 字段前缀，默认 `http://127.0.0.1`）。docker 网络名（`showroom-net`）与 Caddyfile 路径（`/etc/caddy/Caddyfile`）为常量。
-
-启用（先只起 API，timers 在验证后再开）：
-
-```sh
 sudo systemctl daemon-reload
 sudo systemctl enable --now showroom-api
+# timers（setup 已自动；手工路径）：
+sudo systemctl enable --now showroom-reconcile.timer showroom-autoheal.timer \
+  showroom-gc-images.timer showroom-gc-registry.timer showroom-registry-gc.timer \
+  showroom-snapshot-hourly.timer showroom-snapshot-daily.timer
 ```
 
-## 4. 首把管理员钥匙引导
+> 环境变量：`SHOWROOM_ROOT`（默认 `/srv/showroom`）、`SHOWROOM_BASE_URL`（publish 返回的 `url` 字段前缀；setup 渲染 api 单元时由 host.env 的 `LAN_HOST` 注入，无需 drop-in）。docker 网络名（`showroom-net`）与 Caddyfile 路径（`/etc/caddy/Caddyfile`）为常量。
 
-在**发布者机器**上生成密钥并取回公钥串：
+### A.4 Caddyfile（完整样例）
 
-```sh
-showroom keygen        # 打印：密钥路径 + 公钥串（ed25519:<base64>）
-```
-
-在主机上登记为首个管理员：
-
-```sh
-# 平台 RSA 对（serve 启动缺失也会自动生成；显式执行可提前拿到公钥分发给发布者）
-sudo showroomctl init-keys
-
-sudo showroomctl user-add <USER> --pubkey 'ed25519:<发布者公钥串>' --admin
-# 输出 registry 凭据：<USER> 的 basic auth 密码（state/users/<USER>/reg.cred 明文留存）
-
-sudo docker restart sr-registry     # 若启动 registry 时 htpasswd 还是空的
-```
-
-把两样东西交给发布者：registry 密码（快通道 push 用）、`/srv/showroom/state/platform_rsa.pub`（发布者存为 `~/.showroom/platform_rsa.pub`，import 加密通道用）。
-
-## 5. Caddyfile（完整样例）
-
-`/etc/caddy/Caddyfile`：
+`/etc/caddy/Caddyfile`（setup 的 `render_caddyfile` 按同一骨架渲染——registry ∈ 集合才有 `/v2` handle；`PUBLIC_HOST` 非空才渲染 site B）：
 
 ```caddyfile
 # ————— 公共片段：两个站点共用 —————
@@ -181,97 +240,67 @@ http://showroom-public.your-host {
 }
 ```
 
-安装控制台静态资源（与仓库 `showroom-web/dist/` 同步，可选做预压缩）：
+控制台静态资源与预压缩：控制台 wasm 产物必须与 `showroom-common` 垫片源码同提交更新（贡献纪律，见 [CONTRIBUTING.md](../CONTRIBUTING.md)）；`_console/` 更新后重跑 `/usr/local/bin/showroom-precompress`（setup 已安装并首跑）。
 
-```sh
-sudo cp showroom-web/dist/index.html showroom-web/dist/showroom_bg.wasm /srv/showroom/_console/
-# 预压缩（Caddy file_server precompressed 直接下发 .zst，省 CPU）：
-sudo bash -c 'cd /srv/showroom/_console && for f in index.html showroom_bg.wasm; do zstd -19 -k -q "$f"; done'
-```
+## 附录 B：调优参数表
 
-> 注意：控制台 wasm 产物必须与 `showroom-common` 垫片源码同提交更新（贡献纪律，见 [CONTRIBUTING.md](../CONTRIBUTING.md)）。更新 `_console/` 后重跑预压缩。
+### B.1 PostgreSQL（12 个 `-c` 参数；前三个随首跑硬件推导，其余固定）
 
-## 6. 验证
+| 参数 | 首跑推导 / 固定值 | 说明 |
+|---|---|---|
+| `shared_buffers` | clamp(总内存×12%, 64MB, 1GB) | 约为专供内存的 1/4 封顶 1G |
+| `effective_cache_size` | 总内存×35% | 优化器成本估计 |
+| `work_mem` | 16MB（固定） | 每连接每算子；展项多且并发高时勿调太大 |
+| `max_connections` | clamp(30+核数×10, 40, 120) | 展项数 × 各自连接池上限，留余量 |
+| `autovacuum_naptime` | 30s（固定） | Demo 库写多读少，收紧自动清理间隔 |
+| `max_wal_size` / `min_wal_size` | 2GB / 256MB（固定） | WAL 检查点平滑 |
+| `checkpoint_completion_target` | 0.9（固定） | 检查点摊平 |
+| `random_page_cost` | 1.1（固定） | SSD 友好 |
+| `effective_io_concurrency` | 200（固定） | SSD 并发读 |
+| `wal_compression` | on（固定） | WAL 压缩 |
+| `maintenance_work_mem` | 128MB（固定） | vacuum/建索引内存 |
 
-```sh
-systemctl is-active showroom-api          # 期望 active（本机健康检查用进程级，不用 HTTP）
-# 零信息暴露自检：未签名请求 /_api/health 必须得 404（得 200/403 说明鉴权没接上）
-curl -s -o /dev/null -w '%{http_code}\n' http://127.0.0.1:8090/_api/health   # → 404
-```
-
-发布者机器上走一遍 `keygen → config → doctor → deploy`（见 [README](../README.md) 快速开始），成功后开全部 timers：
-
-```sh
-sudo systemctl enable --now showroom-reconcile.timer showroom-autoheal.timer \
-  showroom-gc-images.timer showroom-gc-registry.timer showroom-registry-gc.timer \
-  showroom-snapshot-hourly.timer showroom-snapshot-daily.timer
-```
-
-## 7. frp 隧道接入（主机无公网 IP 时）
-
-在公网服务器跑 frps（占位配置），在 Showroom 主机跑 frpc 把 Caddy 暴露出去：
-
-```toml
-# /etc/frp/frpc.toml（Showroom 主机）
-serverAddr = "<FRP-SERVER>"
-serverPort = 7000
-auth.token = "<FRP-TOKEN>"
-
-[[proxies]]
-name = "showroom-http"
-type = "tcp"
-remotePort = 28080         # 公网访问端口
-# frp 自身隧道加密（与应用层加密叠加，可选）
-transport.useEncryption = true
-```
-
-frpc 以 systemd 常驻后，公网面即 `http://<FRP-SERVER>:28080`。发布者 CLI 配置双通道：
-
-```sh
-showroom config --server-lan http://showroom-lan.your-host \
-    --server-public http://<FRP-SERVER>:28080
-```
-
-Caddy 侧按第 5 步把公网流量对应到 site B（frps 转发到本机 80，`Host` 匹配公网域名）。**注意**：frp 仅转发 TCP；管理流量的认证与机密性由 SR-SIG1/信封在应用层保证，不依赖 frp 的加密。
-
-## 8. 性能调优清单
-
-### 8.1 内核（BBR + 连接队列，`/etc/sysctl.d/99-showroom.conf`）
+### B.2 内核（`/etc/sysctl.d/99-showroom.conf`，setup 渲染；`sysctl --system` 生效）
 
 ```ini
 net.core.default_qdisc = fq
 net.ipv4.tcp_congestion_control = bbr
 net.core.somaxconn = 4096
-net.ipv4.tcp_max_syn_backlog = 8192
+net.ipv4.tcp_max_syn_backlog = 4096
+net.core.rmem_max = 16777216
+net.core.wmem_max = 16777216
+net.ipv4.tcp_rmem = 4096 87380 16777216
+net.ipv4.tcp_wmem = 4096 65536 16777216
 net.ipv4.ip_local_port_range = 10240 65535
+net.ipv4.tcp_tw_reuse = 1
+net.ipv4.tcp_fastopen = 3
+net.ipv4.tcp_mtu_probing = 1
+net.ipv4.tcp_slow_start_after_idle = 0
+vm.swappiness = 10
+vm.vfs_cache_pressure = 50
 fs.file-max = 131072
+fs.inotify.max_user_instances = 512
+fs.inotify.max_user_watches = 1048576
 ```
 
-```sh
-sudo sysctl --system
-```
+journald drop-in（`/etc/systemd/journald.conf.d/showroom.conf`）：`SystemMaxUse=400M`、`MaxRetentionSec=30d`；system.conf.d watchdog：`RuntimeWatchdogSec=10s`。
 
-### 8.2 PostgreSQL（第 2 步命令中已内联，按内存调）
+### B.3 policy.env 键表（业务限额；与 host.env 分层，不合并）
 
-```ini
-shared_buffers = 256MB        # 约为专供内存的 1/4
-effective_cache_size = 768MB  # 约为专供内存的 3/4
-work_mem = 16MB               # 每连接每算子；展项多且并发高时勿调太大
-max_connections = 200         # 展项数 × 各自连接池上限，留余量
-autovacuum_naptime = 30s      # Demo 库写多读少，收紧自动清理间隔
-```
+**分层**：host.env=基础设施形状（装什么、开什么开关，setup 幂等收敛项）；policy.env=业务限额（管理员日常调节项）。两类键的变更主体与风险等级不同——限额已由 §13.3/§14.4 落 policy，合并会造成双写漂移；分层让 setup diff 不混入限额噪声。
 
-### 8.3 平台策略（`state/policy.env`）
+| 键 | 默认 | 说明 |
+|---|---|---|
+| `MAX_SLOTS` | 30 | 项目数上限（端口池 8100–8199 共 100 个，两者取小为实际容量） |
+| `DEFAULT_MEM` / `MAX_MEM` | 256m / 1g | 容器内存缺省与上限 |
+| `IMPORT_MAX_GB` | 8 | import 加密通道单包上限（GB） |
+| `ALLOW_LAN_PORT` | 0 | 展项端口是否绑 LAN |
+| `RESERVE_MEM_MB` | 1536（首跑 clamp(总内存×15%, 1024, 6144)） | 内存准入预留 |
+| `REDIS_DBS` | 256 | Redis 逻辑库池（扩容走 §5 一条命令） |
+| `DISK_RESERVE_GB` | 20（首跑 clamp(总磁盘×3%, 10, 60)） | 磁盘准入预留 |
+| `UPLOAD_SPACE_FACTOR` | 4 | 上传空间估算膨胀因子 |
 
-- 小内存主机：调低 `DEFAULT_MEM`（如 `128m`）并保留 `RESERVE_MEM_MB`（默认 1536）防过卖；
-- 展项规模：`MAX_SLOTS` 是全平台项目数上限；端口池固定 8100–8199（100 个），两者取小者为实际容量；
-- 大镜像团队：`IMPORT_MAX_GB` 按需上调（同时确认 `_tmp` 所在子卷容量）。
-
-### 8.4 控制台静态资源预压缩
-
-见第 5 步：`file_server { precompressed zstd }` + 定期对 `_console/` 重跑 zstd 预压缩脚本，避免每次请求现场压缩。
-
-### 8.5 磁盘
+### B.4 磁盘
 
 - `_middleware/postgres` 与 `_middleware/registry` 是增长大头；registry 有 tag 保留策略（每 repo 字典序降序保留前 5）+ 周期 `registry-gc`，见 [operations.md](operations.md)；
 - 快照保留策略固定为 hourly×24 / daily×7，子卷为 CoW，增量占用通常远小于全量。
@@ -287,3 +316,5 @@ autovacuum_naptime = 30s      # Demo 库写多读少，收紧自动清理间隔
 | 展项容器起不来、`DB_HOST` 解析失败 | 中间件容器没接 `showroom-net`；网络名是常量不可改 |
 | `snapshot` 报错 | `/srv/showroom` 不是 btrfs 子卷，或父卷无空间创建 `@showroom-snaps` |
 | CLI 公网通道 `E_AUTH` 但内网正常 | 公网面 Caddy 站点未反代 `/_api/*`，或中间代理改写了路径/方法（签名覆盖 path_with_query） |
+| setup 黄条「redis 实例 databases=16 < policy」 | 手工部署遗留实例：`showroomctl middleware set redis databases=256 --confirm` 收编（§5 扩容流） |
+| frpc 下载报「非 ELF」 | ChmlFrp 下载源回了 HTML 壳：手工放置 linux/amd64 frpc 到 `/usr/local/frpc/frpc` 后重跑 `setup --apply` |

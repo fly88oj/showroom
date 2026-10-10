@@ -5,8 +5,8 @@ Wants=network-online.target docker.service
 
 [Service]
 Type=simple
-# 站点对外地址经可选 env 文件提供（缺省回落代码内置 http://127.0.0.1）：
-# 部署时写入 /etc/showroom/showroom.env 一行：SHOWROOM_BASE_URL=http://<your-host>
+# 模板锚点：setup 的 render_unit_api 会把下面这行替换为
+# Environment=SHOWROOM_BASE_URL=http://<host.env LAN_HOST>（host.env 首跑探测/覆写）。
 EnvironmentFile=-/etc/showroom/showroom.env
 ExecStart=/usr/local/bin/showroomctl serve
 Restart=always

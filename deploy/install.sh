@@ -1,5 +1,7 @@
 #!/usr/bin/env bash
 # Showroom 主机部署脚本（在仓库根目录跑）
+# 【已被 `showroomctl setup --apply` 取代（plan-15/SPEC §15.1）】——保留作单元分发参考；
+# 新部署走 docs/deployment.md 三步自举（取二进制 → setup --apply → user-add）。
 # 目标机经环境变量指定：SHOWROOM_DEPLOY_HOST=<user>@<host>（如 export SHOWROOM_DEPLOY_HOST=ops@192.168.0.10）
 # 可选 SHOWROOM_BASE_URL=<站点对外地址>：写入目标机 /etc/showroom/showroom.env（showroom-api.service 读取）
 # 前置：本机对该主机已配公钥免密（ssh "$SHOWROOM_DEPLOY_HOST" 直接可登）。
