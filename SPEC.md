@@ -98,3 +98,23 @@ POST /_api/import-end?upload=<id>             → 拼接后走单发 import 同�
 - 密码学层：showroom-common 增加 `crate-type=cdylib` + `#[no_mangle] extern "C"` 的 wasm32 垫片（keygen/sign_header/seal 会话式 push/finish，指针+长度进出），**不用 wasm-bindgen/wasm-pack**（零新工具链，rustup target 即可）；JS 侧直接 instantiate 调用。
 - 登录=密钥即身份（P1 档）：首访生成/导入 Ed25519（存 localStorage，页面明确告知属试验性存储），公钥串展示给管理员登记；OPAQUE 属后续。
 - 功能对齐 CLI 只读+发布：列表/发布/停止/启动/删除/回滚/env/logs；镜像上传走 8.1 分片（File.slice 流式 seal，8MB/片，进度条+断点续传）。
+
+## 9. 数据库维护（v1.2）：发布者自助管理 Schema 与数据
+**原则**：owner 只能碰自己 project×slot 的库 `sr_<p>_<s>`；全端点签名；下行数据（dump）端到端加密（客户端一次性 RSA 公钥上行，信封同 §2 布局）；publish 改为**首建不重建**（数据保留），显式重置走 db-reset。
+| 端点 | 请求 | 行为 |
+|---|---|---|
+| POST /_api/db-sql | `{project,slot,sql,confirm}` | `docker exec -i sr-postgres psql -d sr_<p>_<s> -v ON_ERROR_STOP=1` 执行（stdin 传 sql，禁 argv）；confirm!=true 且语句含 DROP/TRUNCATE/DELETE 时拒（E_STATE 提示确认）；返回 `{out}`（psql 文本输出）|
+| GET /_api/db-tables | `?project=&slot=` | 列表查询（\dt 等价 SQL）→ `{"tables":[...]}`（控制台 ComboBox 数据源）|
+| POST /_api/db-preview | `{project,slot,table,limit≤200}` | `SELECT * LIMIT n` → `{columns,rows}` |
+| POST /_api/db-dump | `{project,slot,client_pub_pem}` | pg_dump -Fc → 用 client_pub 按 §2 信封加密 → `{payload_b64}` |
+| POST /_api/db-restore | query `?project=&slot=&confirm=` body=信封（客户端用平台公钥 seal 的 -Fc dump） | 验签→解密到 _tmp→`pg_restore --clean --if-exists`→删临时；走 import 同管道与大帽 |
+| POST /_api/db-reset | `{project,slot,confirm}` | DROP DATABASE WITH (FORCE)+重建+重发凭据（env 文件密码不变） |
+CLI 对应：`showroom db sql|tables|preview|dump|restore|reset`。公网全可用（签名+加密），无需内网。
+### 9.1 控制台（登录后四区，全中文，免装 CLI）
+- **展项**：列表（不含槽位端口等内部细节）+ 发布（项目=ComboBox(已有)+可新建、槽位=ComboBox(stable/next/pr42/自定义)、tag=Input(必填)、内存=ComboBox(128m/256m/512m/1g)、Demo 监听端口=数字 Input 默认 8080、镜像 tar 上传=文件选择）。
+- **数据库**：表清单 ComboBox→预览表格；SQL 编辑器（唯一自由文本，多行）；备份下载（自动生成一次性密钥对）；恢复上传（confirm 二次确认）；重置（confirm）。
+- **状态**：展项健康列表 + 日志查看（自动刷新开关）。
+- **帮助**：镜像规范/环境变量清单（§6）/CLI 对照/常见错误表。登录前仅登录界面（零管理信息）。
+### 9.2 行为修订（对 §7）
+- 根路径 `/` 与未匹配路径：一律 404，不再 302（零信息暴露）。
+- publish 供给 DB：库不存在才建（CREATE DATABASE 不存在时）；不再幂等重建。
