@@ -1,6 +1,7 @@
 <!doctype html>
 <html lang="zh-CN">
 <head>
+<link rel="icon" href="data:,">
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Showroom 控制台</title>
@@ -86,7 +87,7 @@
   <h1>Showroom 控制台</h1>
   <p class="note">服务器（同源代理，经 <span class="mono">/_api/*</span> 签名调用）：<span class="mono" id="lg-srv"></span></p>
   <div class="grid" style="display:flex;flex-wrap:wrap;gap:.8rem;align-items:flex-end;margin-top:.6rem">
-    <label class="field"><span>账号（owner）</span><input type="text" id="lg-owner" placeholder="发布者账号" size="12" pattern="[a-z0-9][a-z0-9-]{0,30}"></label>
+    <label class="field"><span>账号</span><input type="text" id="lg-owner" placeholder="发布者账号" size="12" pattern="[a-z0-9][a-z0-9-]{0,30}"></label>
     <label class="field"><span>密钥状态：<span id="lg-keystate" class="status-bad">未生成</span></span>
       <span class="row" style="gap:.4rem">
         <button id="lg-keygen">生成密钥</button>
@@ -468,7 +469,7 @@ $('lg-keygen').addEventListener('click', () => {
   showMsg('已生成新密钥并存入 localStorage（试验性存储）。请把公钥串交管理员登记后再登录。', 'ok');
 });
 $('lg-importkey').addEventListener('click', () => {
-  const hex = prompt('粘贴 64 位十六进制 seed（showroom keygen 产物 / 其他设备导出）：');
+  const hex = prompt('粘贴 64 位十六进制密钥种子（showroom keygen 产物 / 其他设备导出）：');
   if (hex === null) return;
   if (!/^[0-9a-fA-F]{64}$/.test(hex.trim())) return showMsg('seed 必须是 64 位十六进制（32 字节）');
   localStorage.setItem('sr.seed', hex.trim().toLowerCase());
@@ -508,10 +509,6 @@ function signHeaderPtr(method, pathQ, bodyPtr, bodyLen) {
   return auth;
 }
 /** 统一 API 调用：json 传对象 → JSON body；Uint8Array → 原始 body；null → 空 body。 */
-async function apiRaw(method, pathQ, body) {
-  const r = await apiFetch(method, pathQ, body);
-  return r.text();
-}
 async function apiDo(method, pathQ, body) {
   if (!state.seed || !state.owner) throw { error: 'E_STATE', msg: '未配置密钥或账号' };
   let bodyBytes = new Uint8Array(0), isJson = false;
