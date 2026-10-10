@@ -177,21 +177,22 @@
     <div class="tbl-wrap">
       <table id="proj-tbl">
         <thead><tr>
-          <th>名称</th><th>槽位</th><th>镜像标签</th><th>状态</th><th>访问地址</th><th>更新时间</th><th>操作</th>
+          <th>名称</th><th>镜像标签</th><th>状态</th><th>访问地址</th><th>更新时间</th><th>操作</th>
         </tr></thead>
-        <tbody><tr><td colspan="7" class="note">未加载</td></tr></tbody>
+        <tbody><tr><td colspan="6" class="note">未加载</td></tr></tbody>
       </table>
     </div>
-    <p class="note">仅展示对外可见信息；槽位端口等内部细节不在此显示。删除会一并移除容器/路由/数据库与凭据。</p>
+    <p class="note">仅展示对外可见信息；主机端口等内部细节不在此显示。删除会一并移除容器/路由/数据库与凭据。</p>
 
     <div class="sep"></div>
     <h2>发布新版本</h2>
     <form id="pub-form">
       <div class="grid">
-        <label class="field"><span>项目（可从已有项目选择或输入新建）</span>
-          <input type="text" id="pub-project" list="dl-projects" required size="12" pattern="[a-z0-9][a-z0-9-]{0,30}"></label>
-        <label class="field"><span>槽位</span>
-          <input type="text" id="pub-slot" value="stable" list="dl-slots" required size="8" pattern="[a-z0-9][a-z0-9-]{0,30}"></label>
+        <label class="field"><span>项目（已预填随机名，可清空手输或点「换一个」；也可从已有项目选择）</span>
+          <span class="row" style="flex-wrap:nowrap">
+            <input type="text" id="pub-project" list="dl-projects" required size="12" pattern="[a-zA-Z0-9][a-zA-Z0-9-]{0,30}">
+            <button type="button" id="pub-shuffle" title="重新生成随机项目名">换一个</button>
+          </span></label>
         <label class="field"><span>镜像标签（必填）</span>
           <input type="text" id="pub-tag" required size="10"></label>
         <label class="field"><span>内存需求</span>
@@ -205,7 +206,8 @@
     </form>
     <p class="fb" id="pub-fb"></p>
     <p class="note">
-      命名规则：<span class="mono">^[a-z0-9][a-z0-9-]{0,30}$</span>，保留名 <span class="mono">v2 _api _bootstrap _console</span>；项目归属首个创建者。
+      发布后访问地址恒为 <span class="mono" id="pub-url">/&lt;project&gt;/</span>。
+      命名规则：<span class="mono">^[a-zA-Z0-9][a-zA-Z0-9-]{0,30}$</span>（随机名 8 位字母数字，降低被字典遍历发现的门槛），保留名 <span class="mono">v2 _api _bootstrap _console</span>；项目归属首个创建者。
       未选择文件时直接发布（要求镜像已在 registry 中）；镜像文件应为 <span class="mono">docker save … | zstd &gt; x.tar.zst</span> 产物。
     </p>
 
@@ -224,7 +226,6 @@
       <p class="note">每片失败自动重试 3 次；中断后凭上传编号 + 本地会话记录续传（需重新选择同一文件）。陈旧会话由服务端清理。</p>
     </fieldset>
     <datalist id="dl-projects"></datalist>
-    <datalist id="dl-slots"><option value="stable"></option><option value="next"></option><option value="pr42"></option></datalist>
     <datalist id="dl-mem"><option value="128m"></option><option value="256m"></option><option value="512m"></option><option value="1g"></option></datalist>
   </section>
 
@@ -233,12 +234,10 @@
     <h2>目标库</h2>
     <div class="grid">
       <label class="field"><span>项目</span>
-        <input type="text" id="db-project" list="dl-projects" required size="12"></label>
-      <label class="field"><span>槽位</span>
-        <input type="text" id="db-slot" value="stable" list="dl-slots" required size="8"></label>
+        <input type="text" id="db-project" list="dl-projects" required size="12" pattern="[a-zA-Z0-9][a-zA-Z0-9-]{0,30}"></label>
       <button id="btn-db-fill">载入项目清单</button>
     </div>
-    <p class="note">只能操作本人名下项目槽位对应的数据库；全部操作有签名与审计。</p>
+    <p class="note">只能操作本人名下项目对应的数据库；全部操作有签名与审计。</p>
 
     <div class="sep"></div>
     <h2>表清单与预览</h2>
@@ -264,7 +263,7 @@
     <p class="note">含 <span class="mono">DROP / TRUNCATE / DELETE</span> 的语句会先弹出本地确认，确认后才携带确认标记提交。</p>
 
     <div class="sep"></div>
-    <h2>备份与恢复（端到端加密信封）</h2>
+    <h2>备份与恢复（端到端加密信封 · 三段式分片下载）</h2>
     <div class="grid">
       <button id="btn-db-dump">备份下载（自动生成一次性密钥）</button>
       <label class="field"><span>恢复用的 .dump 文件（备份下载的产物）</span>
@@ -272,8 +271,13 @@
       <button id="btn-db-restore" class="danger">恢复上传（覆盖当前数据）</button>
       <button id="btn-db-reset" class="danger">重置数据库</button>
     </div>
+    <div style="margin-top:.5rem">
+      <progress id="db-prog" max="1" value="0"></progress>
+      <div id="db-prog-txt" class="note">（备份进度：等待发起）</div>
+    </div>
     <p class="note">
-      备份：浏览器生成一次性 RSA-3072 密钥对，仅公钥上行；返回的加密信封在本地解密后下载，服务器无法解密内容。
+      备份：浏览器生成一次性 RSA-3072 密钥对，仅公钥上行；服务端后台导出加密信封后按 4MB 分片下发，
+      控制台边下载边流式解密（内存占用恒定），服务器无法解密内容。
       恢复：文件在本地用平台公钥加密后上传，服务端解密执行恢复——需要上方「平台公钥 PEM」已配置。
       重置：清空并重建数据库（凭据不变，数据不可恢复）。
     </p>
@@ -284,6 +288,14 @@
 
   <!-- ———— 标签页 3：状态监控 ———— -->
   <section id="tab-status" class="hidden">
+    <h2>实时事件（平台容器启停）</h2>
+    <div class="row" style="margin-bottom:.3rem">
+      <span class="note">连接状态：<span class="mono" id="ev-state">未连接</span></span>
+      <span class="note">仅显示 <span class="mono">sr-</span> 开头的展项容器（时间 / 动作 / 容器名，最近 20 条）；心跳行忽略；事件到达后自动刷新下方健康列表（2 秒去抖）。</span>
+    </div>
+    <pre class="out mono" id="st-events" style="min-height:3em;max-height:9em">（暂无事件）</pre>
+
+    <div class="sep"></div>
     <h2>展项健康</h2>
     <div class="row" style="margin-bottom:.4rem">
       <button id="st-refresh">立即刷新</button>
@@ -292,18 +304,19 @@
     </div>
     <div class="tbl-wrap">
       <table id="st-tbl">
-        <thead><tr><th>名称</th><th>槽位</th><th>状态</th><th>更新时间</th><th>操作</th></tr></thead>
-        <tbody><tr><td colspan="5" class="note">未加载</td></tr></tbody>
+        <thead><tr><th>名称</th><th>状态</th><th>更新时间</th><th>操作</th></tr></thead>
+        <tbody><tr><td colspan="4" class="note">未加载</td></tr></tbody>
       </table>
     </div>
 
     <div class="sep"></div>
-    <h2>日志（最近 200 行）</h2>
+    <h2>日志（实时跟随，保留最近 1000 行）</h2>
     <div class="row" style="margin-bottom:.4rem">
       <span class="note">当前：<span class="mono" id="st-logs-target">（未选择）</span></span>
-      <label class="row" style="gap:.35rem"><input type="checkbox" id="st-logs-auto">每 10 秒自动刷新</label>
+      <label class="row" style="gap:.35rem"><input type="checkbox" id="st-logs-live" checked>实时跟随（断线 5 秒自动重连）</label>
+      <span class="fb warn" id="st-logs-fb" style="margin:0"></span>
     </div>
-    <pre class="out mono" id="st-logs" style="min-height:8em">（未选择展项）</pre>
+    <pre class="out mono" id="st-logs" style="min-height:10em">（未选择展项）</pre>
 
     <div class="sep"></div>
     <h2>Redis 浏览（排障用，跨账号不隔离）</h2>
@@ -331,7 +344,7 @@
     <h2>镜像规范</h2>
     <ul class="note" style="margin:.2rem 0 0;padding-left:1.2rem">
       <li>Demo 服务须监听容器内 <span class="mono">8080</span> 端口（其他端口在发布表单「Demo 服务监听端口（容器内）」如实填写）。</li>
-      <li>展项经子路径对外发布：读 <span class="mono">SHOWROOM_BASE_PATH</span> 适配前缀，或页面内一律使用相对 URL。</li>
+      <li>展项经子路径对外发布：访问地址恒为 <span class="mono">/&lt;project&gt;/</span>，读 <span class="mono">SHOWROOM_BASE_PATH</span>（值即该前缀）适配，或页面内一律使用相对 URL。</li>
       <li>建议在 Dockerfile 里配置 <span class="mono">HEALTHCHECK</span>，平台据此判定健康并自愈。</li>
       <li>镜像内配置文件替换推荐 <span class="mono">envsubst &lt; config.tpl &gt; config</span> 模式（占位符由注入的环境变量填充）。</li>
     </ul>
@@ -363,9 +376,9 @@
       <thead><tr><th>提示</th><th>含义与处理</th></tr></thead>
       <tbody>
         <tr><td class="mono">E_AUTH</td><td>公钥未登记（或本机时间偏差过大 / 非本人项目）：把登录页公钥串交管理员登记；时钟问题可用 <span class="mono">showroom doctor</span> 排查。</td></tr>
-        <tr><td class="mono">E_NAME</td><td>命名不符合规则 <span class="mono">^[a-z0-9][a-z0-9-]{0,30}$</span> 或使用了保留名（v2/_api/_bootstrap/_console）。</td></tr>
-        <tr><td class="mono">E_QUOTA</td><td>超出限额：槽位数 / 内存需求 / 导入体积超过平台配额，或可用内存（扣除预留）小于内存需求；请调低内存需求或精简后重试。</td></tr>
-        <tr><td class="mono">E_NOTFOUND</td><td>展项、槽位或上传会话不存在。</td></tr>
+        <tr><td class="mono">E_NAME</td><td>命名不符合规则 <span class="mono">^[a-zA-Z0-9][a-zA-Z0-9-]{0,30}$</span> 或使用了保留名（v2/_api/_bootstrap/_console）。</td></tr>
+        <tr><td class="mono">E_QUOTA</td><td>超出限额：内存需求 / 导入体积超过平台配额，或可用内存（扣除预留）小于内存需求；请调低内存需求或精简后重试。</td></tr>
+        <tr><td class="mono">E_NOTFOUND</td><td>展项或上传/下载会话不存在。</td></tr>
         <tr><td class="mono">E_STATE</td><td>当前状态不允许该操作（如危险 SQL 未确认、容器状态冲突）。</td></tr>
         <tr><td class="mono">E_NET</td><td>网络或服务不可用，稍后重试。</td></tr>
         <tr><td class="mono">502</td><td>展项服务异常（容器未就绪或已崩溃），请联系管理员。</td></tr>
@@ -395,7 +408,9 @@ const SEG = 4 * 1024 * 1024;      // AES-GCM 段明文 4MiB
 const WRAP = 384;                  // RSA-3072 wrap 头
 const NONCE = 12, TAG = 16;
 const CHUNK = 8 * 1024 * 1024;    // 上传分片粒度（§8.1）
-const NAME_RE = /^[a-z0-9][a-z0-9-]{0,30}$/;
+const DUMP_CHUNK = 4 * 1024 * 1024; // 备份下载分片粒度（§10.4，服务端上限 4MB）
+const NAME_RE = /^[a-z0-9][a-z0-9-]{0,30}$/;        // 账号（owner）
+const PROJ_RE = /^[a-zA-Z0-9][a-zA-Z0-9-]{0,30}$/;  // 项目（§11 放宽：允许大写）
 const RESERVED = new Set(['v2', '_api', '_bootstrap', '_console']);
 
 // §6 环境变量 → 中文用途（帮助页与环境变量模态共用）
@@ -411,8 +426,7 @@ const ENV_DESC = {
   REDIS_DB: '分配的 Redis 逻辑库编号（0-15）',
   REDIS_URL: '完整 Redis 连接串',
   SHOWROOM_PROJECT: '展项名',
-  SHOWROOM_SLOT: '槽位名',
-  SHOWROOM_BASE_PATH: '对外子路径前缀（镜像内应据此适配或使用相对 URL）',
+  SHOWROOM_BASE_PATH: '对外子路径前缀（恒为 /<项目名>/；镜像内应据此适配或使用相对 URL）',
 };
 
 // —— wasm 加载 ——
@@ -456,8 +470,8 @@ function shimCStr(call, cap0) {
 const ERR_CN = {
   E_AUTH: '公钥未登记或验签未通过（非本人项目同样报此错）',
   E_NAME: '命名不符合规则或使用了保留名',
-  E_QUOTA: '超出平台限额（槽位/内存需求/导入体积，或可用内存不足）',
-  E_NOTFOUND: '对象不存在（展项/槽位/会话）',
+  E_QUOTA: '超出平台限额（内存需求/导入体积，或可用内存不足）',
+  E_NOTFOUND: '对象不存在（展项/会话）',
   E_STATE: '当前状态不允许该操作',
   E_NET: '网络或服务不可用',
 };
@@ -618,8 +632,8 @@ function signHeaderPtr(method, pathQ, bodyPtr, bodyLen) {
   for (const [p, l] of [[sp, spl], [op, ol], [mp, ml], [pp, pl], [np, nl]]) unput(p, l);
   return auth;
 }
-/** 统一 API 调用：json 传对象 → JSON body；Uint8Array → 原始 body；null → 空 body。 */
-async function apiDo(method, pathQ, body) {
+/** 统一 API 调用：json 传对象 → JSON body；Uint8Array → 原始 body；null → 空 body。signal 供流式 GET 中止。 */
+async function apiDo(method, pathQ, body, signal) {
   if (!state.seed || !state.owner) throw { error: 'E_STATE', msg: '未配置密钥或账号' };
   let bodyBytes = new Uint8Array(0), isJson = false;
   if (body && typeof body === 'object' && !(body instanceof Uint8Array)) {
@@ -632,14 +646,12 @@ async function apiDo(method, pathQ, body) {
     method,
     headers: { Authorization: auth, ...(isJson ? { 'Content-Type': 'application/json' } : {}) },
     body: method === 'GET' || method === 'HEAD' ? undefined : bodyBytes,
+    signal,
   });
   return resp;
 }
 async function api(method, pathQ, body) {
   return checkResp(await apiDo(method, pathQ, body));
-}
-async function apiRaw(method, pathQ, body) {
-  return (await apiDo(method, pathQ, body)).text();
 }
 async function checkResp(resp) {
   const text = await resp.text();
@@ -648,9 +660,39 @@ async function checkResp(resp) {
   if (resp.ok) return j ?? {};
   throw { error: j?.error || 'E_NET', msg: j?.msg || `HTTP ${resp.status}` };
 }
+const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+/** 非 JSON 响应（octet-stream 分片等）的错误解析：统一 {error,msg} 抛出。 */
+async function respErr(resp) {
+  let j = null;
+  try { j = JSON.parse(await resp.text()); } catch { /* 非 JSON */ }
+  return { error: j?.error || 'E_NET', msg: j?.msg || `HTTP ${resp.status}` };
+}
+/** §10.4 ndjson 流式消费：流式 GET（空 body 签名=空串哈希，与普通签名 GET 相同）；
+ *  行缓冲跨 chunk 拼行、逐行 JSON 回调（非法行静默丢弃）；reader 按消费节奏拉取（天然背压）；
+ *  signal 中止 → fetch/reader 随之中断并抛 AbortError。 */
+async function consumeNdjson(url, onLine, signal) {
+  const resp = await apiDo('GET', url, null, signal);
+  if (!resp.ok) throw await respErr(resp);
+  const reader = resp.body.getReader();
+  const td = new TextDecoder();
+  let buf = '';
+  for (;;) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    buf += td.decode(value, { stream: true });
+    let i;
+    while ((i = buf.indexOf('\n')) >= 0) {
+      const line = buf.slice(0, i);
+      buf = buf.slice(i + 1);
+      if (line.trim()) { try { onLine(JSON.parse(line)); } catch { /* 非法行丢弃 */ } }
+    }
+  }
+  buf += td.decode();
+  if (buf.trim()) { try { onLine(JSON.parse(buf)); } catch { /* 同上 */ } }
+}
 
 // —— 登录门 ⇄ 管理壳切换 ——
-let appBuilt = false, stTimer = null, logsTimer = null, logsTarget = null;
+let appBuilt = false, stTimer = null;
 function enterApp() {
   state.loggedIn = true;
   $('login').classList.add('hidden');
@@ -661,12 +703,30 @@ function enterApp() {
 function logout() {
   state.loggedIn = false;
   clearInterval(stTimer); stTimer = null; $('st-auto').checked = false;
-  clearInterval(logsTimer); logsTimer = null; logsTarget = null;
+  stopLogsStream('已退出登录');      // 日志实时流随登录态终止
+  logsLive.project = null; logsLive.lines = [];
+  $('st-logs-target').textContent = '（未选择）'; logsRender();
+  stopEventsStream();               // 平台事件流同上
   $('app').classList.add('hidden');
   $('login').classList.remove('hidden');
   enterStep3(false); // 密钥仍在：回到第 3 步等待手动重检（不自动重进）
   $('wz-v-fb').textContent = '已退出登录（密钥仍保留在本机）。点【重新检测】可重新进入。';
 }
+// —— §11 随机项目名：crypto.getRandomValues 拒绝采样生成 8 位 [a-zA-Z0-9]（降低字典遍历发现门槛） ——
+function randomProject() {
+  const A = 'abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789';
+  let s = '';
+  while (s.length < 8) {
+    const b = new Uint8Array(32);
+    crypto.getRandomValues(b);
+    for (const v of b) { if (v < 248 && s.length < 8) s += A[v % 62]; } // 248=62×4：截断去模偏
+  }
+  return s;
+}
+const updatePubUrl = () => {
+  const v = $('pub-project').value.trim();
+  $('pub-url').textContent = `/${v || '<project>'}/`; // §11：访问地址恒 /<project>/
+};
 function buildApp() {
   $('app').append($('app-tpl').content.cloneNode(true));
   $('hd-owner').textContent = state.owner;
@@ -677,27 +737,31 @@ function buildApp() {
   // 帮助页：环境变量清单表
   $('help-env-tbl').querySelector('tbody').innerHTML = Object.entries(ENV_DESC)
     .map(([k, d]) => `<tr><td class="mono">${esc(k)}</td><td class="wrap">${esc(d)}</td></tr>`).join('');
+  $('pub-project').value = randomProject(); // 页面加载（建壳）时预填一次随机名；「换一个」随时重随机
+  updatePubUrl();
   wireTabs(); wireProjTab(); wireDbTab(); wireStatusTab();
 }
 const platformPem = () => $('hd-pempub').value.trim();
 
 // —— 标签页导航 ——
+function activateTab(name) {
+  for (const b of $('tabs').querySelectorAll('button')) b.classList.toggle('on', b.dataset.tab === name);
+  for (const s of ['proj', 'db', 'status', 'help']) $(`tab-${s}`).classList.toggle('hidden', s !== name);
+  if (name === 'status') {
+    evLive.want = true;              // 进入状态页才订阅事件流（§10.4：连接常驻 docker events）
+    startEventsStream();
+    if (!$('st-auto').checked) refreshStatus();
+    ensureRedisDbs(); // Redis 浏览区：首次进入状态页时拉取库编号
+  } else stopEventsStream();         // 离开即断开（服务端随之收尸 docker events 子进程）
+  if (name === 'db') fillDbTargets();
+}
 function wireTabs() {
   $('tabs').addEventListener('click', (ev) => {
     const btn = ev.target.closest('button[data-tab]');
-    if (!btn) return;
-    for (const b of $('tabs').querySelectorAll('button')) b.classList.toggle('on', b === btn);
-    for (const s of ['proj', 'db', 'status', 'help']) $(`tab-${s}`).classList.toggle('hidden', s !== btn.dataset.tab);
-    if (btn.dataset.tab === 'status') {
-      if (!$('st-auto').checked) refreshStatus();
-      ensureRedisDbs(); // Redis 浏览区：首次进入状态页时拉取库编号
-    }
-    if (btn.dataset.tab === 'db') fillDbTargets();
+    if (btn) activateTab(btn.dataset.tab);
   });
 }
-function switchTab(name) {
-  $(`#tabs button[data-tab="${name}"]`).click();
-}
+const switchTab = activateTab;
 
 // ================ 标签页 1：展项管理 ================
 function wireProjTab() {
@@ -705,11 +769,13 @@ function wireProjTab() {
   $('proj-tbl').addEventListener('click', onProjAction);
   $('pub-form').addEventListener('submit', onPublish);
   $('btn-resume').addEventListener('click', onResumeUpload);
+  $('pub-shuffle').addEventListener('click', () => { $('pub-project').value = randomProject(); updatePubUrl(); });
+  $('pub-project').addEventListener('input', updatePubUrl);
   refreshUpIds();
 }
 async function refreshProjects() {
   const tb = $('proj-tbl').querySelector('tbody');
-  tb.innerHTML = '<tr><td colspan="7" class="note">加载中…</td></tr>';
+  tb.innerHTML = '<tr><td colspan="6" class="note">加载中…</td></tr>';
   try {
     const j = await api('GET', '/_api/projects');
     state.projects = j.projects || [];
@@ -723,20 +789,20 @@ async function refreshProjects() {
 }
 function renderProjects() {
   const tb = $('proj-tbl').querySelector('tbody');
-  if (!state.projects.length) { tb.innerHTML = '<tr><td colspan="7" class="note">暂无展项</td></tr>'; }
+  if (!state.projects.length) { tb.innerHTML = '<tr><td colspan="6" class="note">暂无展项</td></tr>'; }
   else tb.innerHTML = state.projects.map((p) => `<tr>
-      <td class="mono">${esc(p.project)}</td><td class="mono">${esc(p.slot)}</td>
+      <td class="mono">${esc(p.project)}</td>
       <td class="mono">${esc(p.tag)}</td>
       <td class="${statusCls(p.status)}">${esc(statusCn(p.status))}</td>
       <td class="wrap"><a href="${esc(p.url)}" target="_blank" rel="noopener">${esc(p.url)}</a></td>
       <td class="mono">${esc(p.updated)}</td>
       <td>
-        <button class="act" data-act="start" data-p="${esc(p.project)}" data-s="${esc(p.slot)}">启动</button>
-        <button class="act" data-act="stop" data-p="${esc(p.project)}" data-s="${esc(p.slot)}">停止</button>
-        <button class="act" data-act="rollback" data-p="${esc(p.project)}" data-s="${esc(p.slot)}">回滚</button>
-        <button class="act danger" data-act="rm" data-p="${esc(p.project)}" data-s="${esc(p.slot)}">删除</button>
-        <button class="act" data-act="logs" data-p="${esc(p.project)}" data-s="${esc(p.slot)}">日志</button>
-        <button class="act" data-act="env" data-p="${esc(p.project)}" data-s="${esc(p.slot)}">环境变量</button>
+        <button class="act" data-act="start" data-p="${esc(p.project)}">启动</button>
+        <button class="act" data-act="stop" data-p="${esc(p.project)}">停止</button>
+        <button class="act" data-act="rollback" data-p="${esc(p.project)}">回滚</button>
+        <button class="act danger" data-act="rm" data-p="${esc(p.project)}">删除</button>
+        <button class="act" data-act="logs" data-p="${esc(p.project)}">日志</button>
+        <button class="act" data-act="env" data-p="${esc(p.project)}">环境变量</button>
       </td></tr>`).join('');
   // 项目下拉候选 = 已有项目
   $('dl-projects').innerHTML = [...new Set(state.projects.map((p) => p.project))]
@@ -746,32 +812,35 @@ const ACT_CN = { start: '启动', stop: '停止', rollback: '回滚', rm: '删�
 async function onProjAction(ev) {
   const btn = ev.target.closest('button[data-act]');
   if (!btn || btn.disabled) return;
-  const { act, p: project, s: slot } = btn.dataset;
-  if (act === 'env') return showEnvDlg(project, slot);
-  if (act === 'logs') { switchTab('status'); return pickLogs(project, slot); }
-  if (act === 'rm' && !confirm(`确认删除展项 ${project}/${slot}？容器、路由、数据库与凭据将一并移除，不可恢复。`)) return;
+  const { act, p: project } = btn.dataset;
+  if (act === 'env') return showEnvDlg(project);
+  if (act === 'logs') { switchTab('status'); return pickLogs(project); }
+  if (act === 'rm' && !confirm(`确认删除展项 ${project}？容器、路由、数据库与凭据将一并移除，不可恢复。`)) return;
   btn.disabled = true;
   try {
-    const j = await api('POST', `/_api/${act}`, { project, slot });
-    $('proj-fb').textContent = `已${ACT_CN[act]} ${project}/${slot}${j.url ? `，访问地址 ${j.url}` : ''}`;
+    const j = await api('POST', `/_api/${act}`, { project });
+    $('proj-fb').textContent = `已${ACT_CN[act]} ${project}${j.url ? `，访问地址 ${j.url}` : ''}`;
     refreshProjects();
-  } catch (e) { apiFail(`${ACT_CN[act]} ${project}/${slot}`, e); }
+  } catch (e) { apiFail(`${ACT_CN[act]} ${project}`, e); }
   btn.disabled = false;
 }
 
 // —— 发布（可选先走 §8.1 分片上传）——
-function checkNames(project, slot, tag) {
-  for (const [w, v] of [['项目', project], ['槽位', slot]]) {
-    if (!NAME_RE.test(v) || RESERVED.has(v)) return `${w}「${v}」不合法（须匹配 ^[a-z0-9][a-z0-9-]{0,30}$，保留名：${[...RESERVED].join(' ')}）`;
-  }
+function checkProj(project) {
+  if (!PROJ_RE.test(project) || RESERVED.has(project)) return `项目「${project}」不合法（须匹配 ^[a-zA-Z0-9][a-zA-Z0-9-]{0,30}$，保留名：${[...RESERVED].join(' ')}）`;
+  return null;
+}
+function checkProjTag(project, tag) {
+  const bad = checkProj(project);
+  if (bad) return bad;
   if (!tag || /\s|\//.test(tag)) return `镜像标签「${tag}」不合法（非空、无空白/斜杠）`;
   return null;
 }
 async function onPublish(ev) {
   ev.preventDefault();
   if (upBusy) return showMsg('已有上传进行中，请等待完成');
-  const project = $('pub-project').value.trim(), slot = $('pub-slot').value.trim(), tag = $('pub-tag').value.trim();
-  const bad = checkNames(project, slot, tag);
+  const project = $('pub-project').value.trim(), tag = $('pub-tag').value.trim();
+  const bad = checkProjTag(project, tag);
   if (bad) return showMsg(bad);
   const memv = $('pub-mem').value.trim(), cport = parseInt($('pub-cport').value, 10);
   const file = $('pub-file').files[0];
@@ -779,10 +848,10 @@ async function onPublish(ev) {
   try {
     if (file) { // 先加密分片上传，再发布
       $('pub-fb').textContent = '正在上传镜像（分片加密）…';
-      await uploadImage(file, project, slot, tag);
+      await uploadImage(file, project, tag);
     }
     $('pub-fb').textContent = '正在发布…';
-    const body = { project, slot, tag, container_port: cport || 8080 };
+    const body = { project, tag, container_port: cport || 8080 };
     if (memv) body.mem = memv;
     const j = await api('POST', '/_api/publish', body);
     $('pub-fb').textContent = `发布成功：${j.url}`;
@@ -795,12 +864,12 @@ async function onPublish(ev) {
 }
 
 // —— 环境变量模态（§6 键 + 当前值 + 中文说明）——
-async function showEnvDlg(project, slot) {
+async function showEnvDlg(project) {
   const dlg = $('dlg-env');
   $('env-tbl').querySelector('tbody').innerHTML = '<tr><td colspan="3" class="note">加载中…</td></tr>';
   dlg.showModal();
   try {
-    const j = await api('GET', `/_api/env?project=${encodeURIComponent(project)}&slot=${encodeURIComponent(slot)}`);
+    const j = await api('GET', `/_api/env?project=${encodeURIComponent(project)}`);
     const env = j.env || {};
     const keys = Object.keys(env).sort();
     $('env-tbl').querySelector('tbody').innerHTML = keys.length
@@ -885,7 +954,7 @@ async function uploadRest(uploadId, sid, file, startSeq, sent0, total) {
   localStorage.removeItem('sr.up.' + uploadId);
   refreshUpIds();
 }
-async function uploadImage(file, project, slot, tag) {
+async function uploadImage(file, project, tag) {
   const pem = platformPem();
   if (!pem.startsWith('-----BEGIN PUBLIC KEY-----')) throw { error: 'E_STATE', msg: '请先在页首配置平台公钥 PEM（管理员分发的 platform_rsa.pub）' };
   { // zstd 魔数提示（服务端按 zstd 解压）
@@ -900,13 +969,13 @@ async function uploadImage(file, project, slot, tag) {
   const sessSeed = new Uint8Array(32); crypto.getRandomValues(sessSeed);
   let uploadId;
   try {
-    const j = await api('POST', '/_api/import-begin', { project, slot, tag, image_id: file.name, total_bytes: total });
+    const j = await api('POST', '/_api/import-begin', { project, tag, image_id: file.name, total_bytes: total });
     uploadId = j.upload_id;
   } catch (e) {
     if (e.error === 'E_QUOTA') e.msg += `（信封总长 ${total} 字节）`;
     throw e;
   }
-  localStorage.setItem('sr.up.' + uploadId, JSON.stringify({ seed: toHex(sessSeed), project, slot, tag, size: file.size, name: file.name }));
+  localStorage.setItem('sr.up.' + uploadId, JSON.stringify({ seed: toHex(sessSeed), project, tag, size: file.size, name: file.name }));
   refreshUpIds();
   $('up-id').value = uploadId;
   const sid = sealBegin(pem, sessSeed);
@@ -971,7 +1040,6 @@ async function onResumeUpload() {
 // ================ 标签页 2：数据库（SPEC §9） ================
 function wireDbTab() {
   $('btn-db-fill').addEventListener('click', fillDbTargets);
-  $('db-project').addEventListener('input', fillDbSlotDatalist);
   $('btn-db-tables').addEventListener('click', onDbTables);
   $('btn-db-preview').addEventListener('click', onDbPreview);
   $('btn-db-sql').addEventListener('click', onDbSql);
@@ -980,21 +1048,14 @@ function wireDbTab() {
   $('btn-db-reset').addEventListener('click', onDbReset);
 }
 function dbTarget() {
-  const project = $('db-project').value.trim(), slot = $('db-slot').value.trim();
-  const bad = checkNames(project, slot, 'x'); // tag 占位：只校验 project/slot
+  const project = $('db-project').value.trim();
+  const bad = checkProj(project);
   if (bad) { showMsg(bad); return null; }
-  return { project, slot };
+  return { project };
 }
 function fillDbTargets() {
   $('dl-projects').innerHTML = [...new Set(state.projects.map((p) => p.project))]
     .map((p) => `<option value="${esc(p)}">`).join('');
-  fillDbSlotDatalist();
-}
-function fillDbSlotDatalist() {
-  // 基础候选（stable/next/pr42）∪ 该项目实际存在的槽位（自定义槽位仍可手输）
-  const p = $('db-project').value.trim();
-  const slots = ['stable', 'next', 'pr42', ...state.projects.filter((x) => x.project === p).map((x) => x.slot)];
-  $('dl-slots').innerHTML = [...new Set(slots)].map((s) => `<option value="${esc(s)}">`).join('');
 }
 const dbOut = (text) => { $('db-out').textContent = text; };
 async function onDbTables() {
@@ -1002,7 +1063,7 @@ async function onDbTables() {
   if (!t) return;
   $('db-tbl-fb').textContent = '正在获取表清单…';
   try {
-    const j = await api('GET', `/_api/db-tables?project=${encodeURIComponent(t.project)}&slot=${encodeURIComponent(t.slot)}`);
+    const j = await api('GET', `/_api/db-tables?project=${encodeURIComponent(t.project)}`);
     const tables = j.tables || [];
     $('dl-tables').innerHTML = tables.map((n) => `<option value="${esc(n)}">`).join('');
     $('db-tbl-fb').textContent = `共 ${tables.length} 张表`;
@@ -1017,7 +1078,7 @@ async function onDbPreview() {
   const limit = Math.min(parseInt($('db-limit').value, 10) || 100, 200);
   $('db-tbl-fb').textContent = '正在预览…';
   try {
-    const j = await api('POST', '/_api/db-preview', { project: t.project, slot: t.slot, table, limit });
+    const j = await api('POST', '/_api/db-preview', { project: t.project, table, limit });
     const cols = j.columns || [], rows = j.rows || [];
     $('db-preview-wrap').classList.remove('hidden');
     $('db-preview-tbl').innerHTML =
@@ -1040,7 +1101,7 @@ async function onDbSql() {
   }
   dbOut('正在执行…');
   try {
-    const j = await api('POST', '/_api/db-sql', { project: t.project, slot: t.slot, sql, confirm: confirmFlag });
+    const j = await api('POST', '/_api/db-sql', { project: t.project, sql, confirm: confirmFlag });
     dbOut(j.out ?? '（无输出）');
     $('db-fb').textContent = '执行完成';
   } catch (e) { $('db-fb').textContent = ''; apiFail('执行 SQL', e); }
@@ -1066,12 +1127,6 @@ async function oneTimeRsaPemPair() {
     priv: shimCStr((p, c) => ex.sr_rsa_priv_pem(sid, p, c), 4096),  // PKCS#8
   };
 }
-function b64ToBytes(b64) {
-  const bin = atob(b64.replace(/\s+/g, ''));
-  const out = new Uint8Array(bin.length);
-  for (let i = 0; i < bin.length; i++) out[i] = bin.charCodeAt(i);
-  return out;
-}
 function bytesToB64(bytes) {
   let bin = '';
   for (const b of bytes) bin += String.fromCharCode(b);
@@ -1082,53 +1137,93 @@ function derToPem(der, label) {
   const b64 = bytesToB64(der).replace(/(.{64})/g, '$1\n').trim();
   return `-----BEGIN ${label}-----\n${b64}\n-----END ${label}-----\n`;
 }
-/** 信封流式解封（§2）：open 会话 + 分块推送 + flush，返回明文分段数组。 */
-function openEnvelope(privPem, envelope, chunk = 4 * 1024 * 1024 + 123) {
+/** 信封流式解封会话（§2）：sr_open_begin + push（分片可任意边界，内部按段缓冲）+ flush + end。
+ *  返回 {push(bytes)→明文分段|null, end()}；每段输出立即拷贝脱离 wasm 内存。 */
+function openSession(privPem) {
   const [pp, pl] = put(enc.encode(privPem));
   const sid = ex.sr_open_begin(pp, pl);
   unput(pp, pl);
   if (sid <= 0) throw { error: 'E_NET', msg: `解封会话创建失败（${sid}）：私钥 PEM 无效` };
-  const push = (bytes) => {
-    const [ip, il] = bytes.length ? put(bytes) : [0, 0];
-    let cap = bytes.length + SEG + 64, ob = alloc(cap);
-    let w = ex.sr_open_push(sid, ip, il, ob, cap);
-    if (w < 0 && w <= -40) { unput(ob, cap); cap = -w; ob = alloc(cap); w = ex.sr_open_push(sid, ip, il, ob, cap); }
-    const out = w > 0 ? new Uint8Array(mem().subarray(ob, ob + w)) : null; // 立即拷贝脱离 wasm 内存
-    unput(ip, il); unput(ob, cap);
-    if (w < 0) throw { error: 'E_NET', msg: `解封失败（${w}）：数据损坏或私钥不匹配` };
-    return out;
+  return {
+    push(bytes) {
+      const [ip, il] = bytes.length ? put(bytes) : [0, 0];
+      let cap = bytes.length + SEG + 64, ob = alloc(cap);
+      let w = ex.sr_open_push(sid, ip, il, ob, cap);
+      if (w < 0 && w <= -40) { unput(ob, cap); cap = -w; ob = alloc(cap); w = ex.sr_open_push(sid, ip, il, ob, cap); }
+      const out = w > 0 ? new Uint8Array(mem().subarray(ob, ob + w)) : null; // 立即拷贝脱离 wasm 内存
+      unput(ip, il); unput(ob, cap);
+      if (w < 0) throw { error: 'E_NET', msg: `解封失败（${w}）：数据损坏或私钥不匹配` };
+      return out;
+    },
+    end() { ex.sr_open_end(sid); },
   };
-  const parts = [];
-  try {
-    for (let o = 0; o < envelope.length; o += chunk) {
-      const part = push(envelope.subarray(o, Math.min(o + chunk, envelope.length)));
-      if (part) parts.push(part);
-    }
-    const tail = push(new Uint8Array(0)); // len=0 = 流结束
-    if (tail) parts.push(tail);
-  } finally { ex.sr_open_end(sid); }
-  return parts;
+}
+// —— 备份下载（§10.4 三段式）：begin → status 轮询 → 4MB chunk 边下边解密 → Blob 下载 ——
+let dumpBusy = false;
+function dbDumpProgress(cur, total, txt) {
+  $('db-prog').max = total || 1;
+  $('db-prog').value = Math.min(cur, total || 1);
+  $('db-prog-txt').textContent = txt;
 }
 async function onDbDump() {
   const t = dbTarget();
   if (!t) return;
-  $('db-fb').textContent = '正在生成一次性密钥并请求备份…（首次可能需数秒）';
+  if (dumpBusy) return showMsg('已有备份任务进行中，请等待完成');
+  dumpBusy = true;
+  dbDumpProgress(0, 1, '正在生成一次性 RSA-3072 密钥…');
   try {
     const pair = await oneTimeRsaPemPair();
-    const b64text = (await apiRaw('POST', '/_api/db-dump', { project: t.project, slot: t.slot, client_pub_pem: pair.pub })).trim();
-    if (!b64text) throw { error: 'E_NET', msg: '服务端未返回备份数据' };
-    const envelope = b64ToBytes(b64text);
-    const parts = openEnvelope(pair.priv, envelope);
-    const total = parts.reduce((n, p) => n + p.length, 0);
+    dbDumpProgress(0, 1, '已发起备份（服务端后台 pg_dump 加密导出）…');
+    // ① begin：仅公钥上行，立即返回 dump_id
+    const j = await api('POST', '/_api/db-dump-begin', { project: t.project, client_pub_pem: pair.pub });
+    const dumpId = j.dump_id;
+    // ② 轮询 status：1s 间隔，5 分钟上限（failed 即时报错）
+    const t0 = Date.now();
+    let total = 0;
+    for (;;) {
+      const st = await api('GET', `/_api/db-dump-status?dump=${encodeURIComponent(dumpId)}`);
+      if (st.error) throw { error: 'E_STATE', msg: `服务端备份失败：${st.error}` };
+      if (st.ready) { total = Number(st.total) || 0; break; }
+      if (Date.now() - t0 > 5 * 60 * 1000) throw { error: 'E_STATE', msg: '备份超时（5 分钟未就绪），请稍后重试' };
+      dbDumpProgress(0, 1, `服务端正在导出（已等待 ${Math.round((Date.now() - t0) / 1000)} 秒）…`);
+      await sleep(1000);
+    }
+    // ③ chunk 循环：分片字节一到即推入解封会话（内存占用与分片大小成正比，明文分段累积为 Blob 源）
+    const opener = openSession(pair.priv);
+    const parts = [];
+    let offset = 0;
+    try {
+      while (offset < total) {
+        const len = Math.min(DUMP_CHUNK, total - offset);
+        const resp = await apiDo('GET', `/_api/db-dump-chunk?dump=${encodeURIComponent(dumpId)}&offset=${offset}&len=${len}`, null);
+        if (!resp.ok) throw await respErr(resp);
+        const hTotal = Number(resp.headers?.get?.('X-Sr-Total'));
+        if (Number.isFinite(hTotal) && hTotal !== total) throw { error: 'E_STATE', msg: `分片总长不一致（响应头 ${hTotal} ≠ 状态 ${total}）` };
+        const buf = new Uint8Array(await resp.arrayBuffer());
+        if (!buf.length || offset + buf.length > total) throw { error: 'E_STATE', msg: `分片长度异常（offset=${offset}，收到 ${buf.length} / 总 ${total}）` };
+        const out = opener.push(buf);
+        if (out) parts.push(out);
+        offset += buf.length;
+        dbDumpProgress(offset, total, `分片下载中：${offset} / ${total} 字节（第 ${parts.length ? Math.ceil(offset / DUMP_CHUNK) : 0} 片）`);
+      }
+      const tail = opener.push(new Uint8Array(0)); // len=0 = 流结束：解出尾段
+      if (tail) parts.push(tail);
+    } finally { opener.end(); }
+    const plain = parts.reduce((n, p) => n + p.length, 0);
     const blob = new Blob(parts, { type: 'application/octet-stream' });
     const a = document.createElement('a');
     a.href = URL.createObjectURL(blob);
-    a.download = `${t.project}_${t.slot}.dump`;
+    a.download = `${t.project}.dump`;
     a.click();
     setTimeout(() => URL.revokeObjectURL(a.href), 60000);
-    $('db-fb').textContent = `备份已下载：${t.project}_${t.slot}.dump（${total} 字节）`;
-    dbOut(`pg_dump -Fc 完成：信封 ${envelope.length} 字节 → 解密 ${total} 字节。`);
-  } catch (e) { $('db-fb').textContent = ''; apiFail('备份下载', e); }
+    $('db-fb').textContent = `备份已下载：${t.project}.dump（解密后 ${plain} 字节）`;
+    dbDumpProgress(total, total, `完成：信封 ${total} 字节（${Math.max(1, Math.ceil(total / DUMP_CHUNK))} 片）→ 解密 ${plain} 字节。`);
+    dbOut(`pg_dump -Fc 三段式下载完成：信封 ${total} 字节（${Math.max(1, Math.ceil(total / DUMP_CHUNK))} 片 × ≤4MB）→ 本地解密 ${plain} 字节。`);
+  } catch (e) {
+    $('db-fb').textContent = '';
+    dbDumpProgress(0, 1, '备份失败或中断（可重新发起）');
+    apiFail('备份下载', e);
+  } finally { dumpBusy = false; }
 }
 async function onDbRestore() {
   const t = dbTarget();
@@ -1137,7 +1232,7 @@ async function onDbRestore() {
   if (!file) return showMsg('请先选择要恢复的 .dump 文件（「备份下载」的产物）');
   const pem = platformPem();
   if (!pem.startsWith('-----BEGIN PUBLIC KEY-----')) return showMsg('恢复需先在页首配置平台公钥 PEM（管理员分发的 platform_rsa.pub）');
-  if (!confirm(`确认将 ${file.name}（${file.size} 字节）恢复到 ${t.project}/${t.slot}？当前数据将被替换。`)) return;
+  if (!confirm(`确认将 ${file.name}（${file.size} 字节）恢复到 ${t.project}？当前数据将被替换。`)) return;
   $('db-fb').textContent = '正在读取并加密文件…';
   try {
     const bytes = new Uint8Array(await file.arrayBuffer());
@@ -1155,7 +1250,7 @@ async function onDbRestore() {
     { let off = 0; for (const p of parts) { envelope.set(p, off); off += p.length; } }
     $('db-fb').textContent = '正在上传恢复（服务端解密并 pg_restore）…';
     const j = await api('POST',
-      `/_api/db-restore?project=${encodeURIComponent(t.project)}&slot=${encodeURIComponent(t.slot)}&confirm=true`, envelope);
+      `/_api/db-restore?project=${encodeURIComponent(t.project)}&confirm=true`, envelope);
     $('db-fb').textContent = '恢复完成';
     dbOut(j.out || `pg_restore --clean --if-exists 完成：信封 ${envelope.length} 字节（原文件 ${bytes.length} 字节）。`);
   } catch (e) { $('db-fb').textContent = ''; apiFail('恢复上传', e); }
@@ -1163,30 +1258,126 @@ async function onDbRestore() {
 async function onDbReset() {
   const t = dbTarget();
   if (!t) return;
-  if (!confirm(`确认重置 ${t.project}/${t.slot} 的数据库？全部表与数据将被删除并重建（连接凭据不变），不可恢复。`)) return;
+  if (!confirm(`确认重置 ${t.project} 的数据库？全部表与数据将被删除并重建（连接凭据不变），不可恢复。`)) return;
   dbOut('正在重置…');
   try {
-    const j = await api('POST', '/_api/db-reset', { project: t.project, slot: t.slot, confirm: true });
+    const j = await api('POST', '/_api/db-reset', { project: t.project, confirm: true });
     $('db-fb').textContent = '重置完成';
     dbOut(j.out || '数据库已删除并重建，凭据保持不变。');
   } catch (e) { $('db-fb').textContent = ''; apiFail('重置数据库', e); }
 }
 
 // ================ 标签页 3：状态监控 ================
+// —— §10.4 日志实时流：ndjson 追加渲染 + 1000 行环形 + 断开 5 秒重连 ——
+const LOGS_MAX = 1000;
+const logsLive = { ac: null, timer: null, project: null, lines: [], want: true }; // want 与 HTML 默认 checked 一致
+const tsCn = (t) => Number.isFinite(t)
+  ? new Date(t).toLocaleTimeString('zh-CN', { hour12: false }) : '--:--:--';
+function logsRender() {
+  $('st-logs').textContent = logsLive.lines.length ? logsLive.lines.join('\n') : '（暂无日志）';
+}
+function logsAppend(t, l) {
+  logsLive.lines.push(`${tsCn(t)} ${l}`); // 每行带服务端时间戳（unix ms → 本地 HH:MM:SS）
+  if (logsLive.lines.length > LOGS_MAX) logsLive.lines.splice(0, logsLive.lines.length - LOGS_MAX); // 超帽丢头部
+  logsRender();
+}
+function stopLogsStream(fbText) {
+  clearTimeout(logsLive.timer); logsLive.timer = null;
+  if (logsLive.ac) { logsLive.ac.abort(); logsLive.ac = null; } // 开关关闭 → AbortController 停流
+  if (fbText) $('st-logs-fb').textContent = fbText;
+}
+async function startLogsStream() {
+  if (!logsLive.want || !logsLive.project || logsLive.ac) return;
+  const project = logsLive.project;
+  logsLive.ac = new AbortController();
+  const ac = logsLive.ac;
+  $('st-logs-fb').textContent = '已连接（实时跟随中）';
+  try {
+    await consumeNdjson(`/_api/logs-stream?project=${encodeURIComponent(project)}&tail=100`, (j) => {
+      if (j && typeof j.l === 'string') logsAppend(j.t, j.l);
+    }, ac.signal);
+    if (ac.signal.aborted) return;
+    logsLive.ac = null;
+    $('st-logs-fb').textContent = '流已结束（容器可能已被删除）'; // 容器 EOF 正常收尾：不再重连
+  } catch (e) {
+    if (ac.signal.aborted) return; // 主动停止不算断线
+    logsLive.ac = null;
+    $('st-logs-fb').textContent = `连接断开（${errText(e)}），5 秒后自动重连…`;
+    clearTimeout(logsLive.timer);
+    logsLive.timer = setTimeout(() => { if (logsLive.want && logsLive.project === project) startLogsStream(); }, 5000);
+  }
+}
+function pickLogs(project) {
+  logsLive.project = project;
+  logsLive.lines = [];
+  logsRender();
+  $('st-logs-target').textContent = project;
+  stopLogsStream();
+  if (logsLive.want) startLogsStream();
+  else $('st-logs-fb').textContent = '实时跟随已关闭（勾选后重连）';
+}
+
+// —— §10.4 平台事件流：sr- 前缀过滤 + 最近 20 条滚动 + 心跳忽略 + 健康列表去抖刷新 ——
+const EV_MAX = 20;
+const EV_CN = { start: '启动', stop: '停止', die: '退出', destroy: '销毁',
+  'health_status: healthy': '转为健康', 'health_status: unhealthy': '转为不健康', 'health_status: starting': '健康检查中' };
+const evLive = { ac: null, timer: null, want: false, rows: [], debounce: null };
+function evRender() {
+  $('st-events').textContent = evLive.rows.length ? evLive.rows.join('\n') : '（暂无事件）';
+}
+function evPush(t, e, actor) {
+  evLive.rows.push(`${tsCn(t)}  ${EV_CN[e] || e}  ${actor}`); // 时间 + 动作 + 容器名
+  if (evLive.rows.length > EV_MAX) evLive.rows.splice(0, evLive.rows.length - EV_MAX);
+  evRender();
+  if (evLive.debounce) clearTimeout(evLive.debounce); // 事件到达 → 2 秒去抖自动刷新健康列表
+  evLive.debounce = setTimeout(() => { evLive.debounce = null; if (state.loggedIn) refreshStatus(); }, 2000);
+}
+function stopEventsStream() {
+  evLive.want = false;
+  clearTimeout(evLive.timer); evLive.timer = null;
+  if (evLive.debounce) { clearTimeout(evLive.debounce); evLive.debounce = null; }
+  if (evLive.ac) { evLive.ac.abort(); evLive.ac = null; }
+  $('ev-state').textContent = '未连接（进入本页自动订阅）';
+}
+async function startEventsStream() {
+  if (!evLive.want || evLive.ac || !state.loggedIn) return;
+  evLive.ac = new AbortController();
+  const ac = evLive.ac;
+  $('ev-state').textContent = '已连接';
+  try {
+    await consumeNdjson('/_api/events', (j) => {
+      // 仅展示 sr- 开头的展项容器；心跳（{"hb":true}）与缺字段行静默忽略
+      if (j && typeof j.actor === 'string' && j.actor.startsWith('sr-')) evPush(j.t, j.e, j.actor);
+    }, ac.signal);
+    if (ac.signal.aborted) return;
+    reconnectEvents(`流结束`);
+  } catch (e) {
+    if (ac.signal.aborted) return;
+    reconnectEvents(`断开（${errText(e)}）`);
+  }
+}
+function reconnectEvents(why) {
+  evLive.ac = null;
+  $('ev-state').textContent = `${why}，5 秒后自动重连…`;
+  clearTimeout(evLive.timer);
+  evLive.timer = setTimeout(() => { if (evLive.want && state.loggedIn) startEventsStream(); }, 5000);
+}
+
 function wireStatusTab() {
   $('st-refresh').addEventListener('click', refreshStatus);
   $('st-auto').addEventListener('change', () => {
     clearInterval(stTimer); stTimer = null;
     if ($('st-auto').checked) { refreshStatus(); stTimer = setInterval(refreshStatus, 10000); }
   });
-  $('st-logs-auto').addEventListener('change', () => {
-    clearInterval(logsTimer); logsTimer = null;
-    if ($('st-logs-auto').checked && logsTarget) { fetchLogs(); logsTimer = setInterval(fetchLogs, 10000); }
+  logsLive.want = $('st-logs-live').checked; // 与勾选框初始状态同步
+  $('st-logs-live').addEventListener('change', () => {
+    logsLive.want = $('st-logs-live').checked;
+    if (logsLive.want && logsLive.project) startLogsStream();
+    else if (!logsLive.want) stopLogsStream('已停止实时跟随（勾选后重连）');
   });
   $('st-tbl').addEventListener('click', (ev) => {
     const btn = ev.target.closest('button[data-logs]');
-    if (!btn) return;
-    pickLogs(btn.dataset.p, btn.dataset.s);
+    if (btn) pickLogs(btn.dataset.p);
   });
   // Redis 浏览（§10.3）
   $('rd-refresh').addEventListener('click', refreshRedisKeys);
@@ -1195,33 +1386,18 @@ function wireStatusTab() {
 }
 async function refreshStatus() {
   const tb = $('st-tbl').querySelector('tbody');
-  tb.innerHTML = '<tr><td colspan="5" class="note">加载中…</td></tr>';
+  tb.innerHTML = '<tr><td colspan="4" class="note">加载中…</td></tr>';
   try {
     const j = await api('GET', '/_api/projects');
     state.projects = j.projects || [];
     tb.innerHTML = state.projects.length ? state.projects.map((p) => `<tr>
-      <td class="mono">${esc(p.project)}</td><td class="mono">${esc(p.slot)}</td>
+      <td class="mono">${esc(p.project)}</td>
       <td class="${statusCls(p.status)}">${esc(statusCn(p.status))}</td>
       <td class="mono">${esc(p.updated)}</td>
-      <td><button class="act" data-logs data-p="${esc(p.project)}" data-s="${esc(p.slot)}">查看日志</button></td>
-    </tr>`).join('') : '<tr><td colspan="5" class="note">暂无展项</td></tr>';
+      <td><button class="act" data-logs data-p="${esc(p.project)}">查看日志</button></td>
+    </tr>`).join('') : '<tr><td colspan="4" class="note">暂无展项</td></tr>';
     $('st-fb').textContent = `已刷新（${new Date().toLocaleTimeString()}）`;
   } catch (e) { tb.innerHTML = ''; apiFail('健康列表刷新', e); }
-}
-function pickLogs(project, slot) {
-  logsTarget = { p: project, s: slot };
-  $('st-logs-target').textContent = `${project}/${slot}`;
-  $('st-logs').textContent = '加载中…';
-  fetchLogs();
-  clearInterval(logsTimer); logsTimer = null;
-  if ($('st-logs-auto').checked) logsTimer = setInterval(fetchLogs, 10000);
-}
-async function fetchLogs() {
-  if (!logsTarget) return;
-  try {
-    const j = await api('GET', `/_api/logs?project=${encodeURIComponent(logsTarget.p)}&slot=${encodeURIComponent(logsTarget.s)}&tail=200`);
-    $('st-logs').textContent = j.logs || '（空）';
-  } catch (e) { $('st-logs').textContent = errText(e); }
 }
 
 // —— Redis 浏览（SPEC §10.3：排障用，跨 owner 不隔离；错误一律走顶部条）——
