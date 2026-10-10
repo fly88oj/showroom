@@ -86,9 +86,9 @@ impl HostEnv {
     }
 
     /// 纯解析（规则 plan-15 §1）：坏值 → E_NAME 且指名键；未知键 → warning 不失败（前向兼容）。
-    /// 缺键取默认（LAN_HOST 缺省 127.0.0.1；load 的缺文件路径另以探测值生成）。
+    /// 缺键取默认（LAN_HOST 缺省空=绑全部接口；127.0.0.1 曾致 Caddy 只听回环）。
     pub fn parse(text: &str) -> R<Self> {
-        let mut out = Self::default_for("127.0.0.1");
+        let mut out = Self::default_for("");
         for (k, v) in state::parse_kv(text) {
             match k.as_str() {
                 "MIDDLEWARE" => {
@@ -733,10 +733,10 @@ mod tests {
     #[test]
     fn hostenv_parse_defaults() {
         let d = HostEnv::parse("").unwrap();
-        assert_eq!(d, HostEnv::default_for("127.0.0.1"));
+        assert_eq!(d, HostEnv::default_for(""));
         assert_eq!(d.middleware, mwset(&["postgres", "redis", "registry"]));
         assert!(d.caddy && d.tuning && d.dedup);
-        assert_eq!((d.lan_host.as_str(), d.public_host.as_str()), ("127.0.0.1", ""));
+        assert_eq!((d.lan_host.as_str(), d.public_host.as_str()), ("", ""));
         assert_eq!(d.frp, FrpMode::None);
         assert_eq!((d.frp_token.as_str(), d.frp_tunnel.as_str()), ("", ""));
     }
