@@ -1,0 +1,6 @@
+[Unit]
+Description=Showroom btrfs snapshot (daily, keep 7)
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/bin/showroomctl snapshot daily

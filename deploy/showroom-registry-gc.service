@@ -1,0 +1,7 @@
+[Unit]
+Description=Showroom registry garbage collect (offline pass)
+After=docker.service
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/bin/showroomctl registry-gc

@@ -257,7 +257,13 @@ fn push(
     match via {
         Via::Registry => push_registry(cfg, project, tag, t0),
         Via::Import => push_import(cfg, base, project, tag, slot, t0),
-        Via::Auto if which == Which::Lan => push_registry(cfg, project, tag, t0),
+        Via::Auto if which == Which::Lan => match push_registry(cfg, project, tag, t0) {
+            Ok(()) => Ok(()),
+            Err(e) => {
+                eprintln!("showroom: registry 快通道失败（{e}），自动切换加密 import 通道");
+                push_import(cfg, base, project, tag, slot, t0)
+            }
+        },
         Via::Auto => push_import(cfg, base, project, tag, slot, t0),
     }
 }
@@ -679,7 +685,7 @@ fn doctor(cfg: &Config) -> Result<(), String> {
             }
             Err(msg) if msg.starts_with("E_AUTH") => {
                 all_ok = false;
-                println!("✗ 签名自测：{msg}（本地时间偏差？）");
+                println!("✗ 签名自测：{msg}（最常见：公钥未登记——把 doctor 顶部的公钥串交给管理员；其次才是本地时钟偏差）");
             }
             Err(msg) => {
                 all_ok = false;
@@ -688,7 +694,24 @@ fn doctor(cfg: &Config) -> Result<(), String> {
         }
     }
 
-    // 6. docker（仅 push 需要，失败不算关键项）
+    // 6. registry 快通道探测（非关键：失败时 push 自动回落 import）
+    let reg_user = cfg.registry.user.as_deref().filter(|s| !s.is_empty());
+    let reg_pass = cfg.registry.password.as_deref().filter(|s| !s.is_empty());
+    if let (Some(lan), Some(u), Some(pw)) = (&cfg.server_lan, reg_user, reg_pass) {
+        let url = format!("{}/v2/", lan.trim_end_matches('/'));
+        match reqwest::blocking::Client::builder().timeout(Duration::from_secs(5)).build()
+            .and_then(|c| Ok(c.get(&url).basic_auth(u, Some(pw)).send()))
+        {
+            Ok(Ok(resp)) if resp.status().as_u16() == 200 => println!("✓ registry 快通道可用（凭据有效）"),
+            Ok(Ok(resp)) if resp.status().as_u16() == 401 => println!("✗ registry 凭据无效（push 将回落加密通道；用 showroom config --registry-password 更新）"),
+            Ok(Ok(resp)) => println!("~ registry 返回 {}（push 将回落加密通道）", resp.status()),
+            _ => println!("~ registry 不可达（push 将回落加密通道）"),
+        }
+    } else if cfg.server_lan.is_some() {
+        println!("~ registry 凭据未配置（push 将走加密通道；如需快通道：showroom config --registry-user/--registry-password）");
+    }
+
+    // 7. docker（仅 push 需要，失败不算关键项）
     match Command::new("docker").arg("version").stdout(Stdio::null()).stderr(Stdio::null()).status()
     {
         Ok(st) if st.success() => println!("✓ docker 可用"),

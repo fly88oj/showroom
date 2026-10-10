@@ -1,0 +1,7 @@
+[Unit]
+Description=Showroom registry tag retention (keep 5)
+After=docker.service
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/bin/showroomctl gc-registry
