@@ -181,3 +181,9 @@ CLI 对应：`showroom db sql|tables|preview|dump|restore|reset`。公网全可�
 ### 13.2 Redis 浏览按用户隔离（低成本实现，不动 Redis 本体）
 - 隔离单位=Redis 逻辑库：`state` 已按项目分配 redisdb（0-15）。`/_api/redis-dbs|keys|get` 增加校验：请求 db ∈ 当前用户名下项目的 redisdb 集合；admin 钥匙放开全量。控制台 DB 下拉仅列自己的（admin 全量，标注「管理员视图」）。
 - 诚实边界（文档注明）：容器内应用持有原始连接仍可 SELECT 任意库——这是**界面级/协作级隔离**（防误看防误操作），非安全边界；应用级强隔离需独实例或 Redis ACL+rewrite，成本过高不做。
+
+### 13.3 Redis 逻辑库容量（修订 §13.2 的隐含 16 上限）
+- 逻辑库数量=实例配置：sr-redis 启动参数加 `--databases 256`（自管容器，逻辑库仅命名空间无内存代价）。
+- 分配池：state 的 redisdb 分配从硬编码 0-15 改为 policy `REDIS_DBS`（默认 256）；池耗尽返回 E_QUOTA（消息含 已用/总量）；policy 与 MAX_SLOTS 一致性由文档说明（默认 30≤256）。
+- 分配单位维持**每项目一库**（客户端 URL 零配合、项目间不串键）；用户级隔离只作用于浏览视图（§13.2）。
+- 存量兼容：已分配的 0..N 库号不变；容器重建保数据卷。
