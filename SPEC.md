@@ -144,3 +144,13 @@ CLI 对应：`showroom db sql|tables|preview|dump|restore|reset`。公网全可�
   3. `GET /_api/db-dump-status ?dump=` `[签名；meta 校验 owner]` → `{"ready":bool,"total":n,"error":...}`（轮询用）。
 - CLI `showroom db dump` 同步三段式：begin → 1s 轮询 status 至 ready（1h 上限，failed 即时报错）→ 4MB chunk 循环落本地临时信封（每片≤4MB，内存恒定）→ 一次性私钥解密流式写目标文件/stdout。
 - 陈旧清理：`_tmp` 下 `.status` 并入 gc-images 的 24h 清理（原有 .bin/.meta 不变）。
+
+## 11. v1.4 修订：移除槽位（slot）模型
+**动机**：简化概念（Demo 定向展示）；多版本并存=发布者自建多个相近名称项目；项目名默认随机提升被字典遍历发现的门槛。
+- 项目名规则放宽：`^[a-zA-Z0-9][a-zA-Z0-9-]{0,30}$`（保留名不变）；**发布入口默认预填随机 `[a-zA-Z0-9]{8}`**，发布者不改直接用。
+- 全链路去 slot：API 请求体/查询参数不再含 slot；URL 恒 `/<project>/`；容器名 `sr-<project>`；DB 名 `sr_<project 的 - → _>`（legacy 双名兼容沿用 §9 归一化思路：老 `sr_<p>_<slot>` 检测沿用/迁移）；Redis 逻辑库按项目分配；env 注入去掉 SHOWROOM_SLOT，SHOWROOM_BASE_PATH=/<project>/。
+- 状态布局：`state/projects/<project>.conf|.env|.last2`（原 `<project>/<slot>.conf` 迁移：取该目录下唯一 conf 上提为项目级；容器 docker rename sr-<p>-<s> → sr-<p>；routes 文件 <project>.caddy 覆盖写）。端口注册表行去 slot 列。
+- 回滚/滚动/首建保留：全部挂在项目级。
+- CLI：publish <project> <tag>；ps/logs/env/db*/rollback/stop/start/rm 全部去 slot 实参（旧调用直接报错提示新用法）。
+- 控制台：发布表单去槽位字段；项目输入预填随机 8 位（带「换一个」按钮）；URL 提示恒 /<project>/。
+- 兼容：`/-api` 无外部存量消费者，不做参数兼容层；主机存量数据（hello/skill-demo）按上述规则现场迁移。
