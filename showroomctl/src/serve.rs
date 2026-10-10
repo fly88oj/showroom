@@ -1372,7 +1372,13 @@ mod tests {
     }
 
     fn troot(name: &str) -> PathBuf {
-        let d = std::env::temp_dir().join(format!("srctl-serve-test-{}-{name}", std::process::id()));
+        // 隔离纪律（TESTING.md 规则 1）：每次调用独立目录（pid+原子计数），固定名复用会互相 remove_dir_all
+        static N: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+        let n = N.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let d = std::env::temp_dir().join(format!(
+            "srctl-serve-test-{name}-{}-{n}",
+            std::process::id()
+        ));
         let _ = std::fs::remove_dir_all(&d);
         std::fs::create_dir_all(&d).unwrap();
         d
@@ -1419,9 +1425,7 @@ mod tests {
     // admin_guard 判定：管理员钥匙放行；普通钥匙 / 他人 user / 未登记 → E_AUTH
     #[test]
     fn admin_guard_allows_admin_key_only() {
-        let root = std::env::temp_dir().join(format!("srctl-guard-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&root);
-        std::fs::create_dir_all(&root).unwrap();
+        let root = troot("guard");
         let s: S = Arc::new(test_state(root.clone()));
 
         let k = showroom_common::UserKey::generate();
@@ -1440,9 +1444,7 @@ mod tests {
     // admin 钥匙放开全量；形状非法（非数字/超池）→ E_NAME
     #[test]
     fn redis_db_guard_boundaries() {
-        let root = std::env::temp_dir().join(format!("srctl-redis-guard-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&root);
-        std::fs::create_dir_all(&root).unwrap();
+        let root = troot("redis-guard");
         let s: S = Arc::new(test_state(root.clone()));
 
         // alice 名下项目占 db 3/7；bob 占 db 2
@@ -1489,9 +1491,7 @@ mod tests {
     // 他人 repo/无命名空间 → E_AUTH（404 同体）；admin 钥匙放行他人；形状非法 → E_NAME
     #[test]
     fn image_guard_boundaries() {
-        let root = std::env::temp_dir().join(format!("srctl-image-guard-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&root);
-        std::fs::create_dir_all(&root).unwrap();
+        let root = troot("image-guard");
         let s: S = Arc::new(test_state(root.clone()));
 
         // 本人命名空间：拆分出 (repo, tag) 放行
@@ -1552,8 +1552,7 @@ mod tests {
     // schema 坏值 E_NAME；host/redis 两形态分发
     #[tokio::test]
     async fn admin_host_post_two_phase_without_confirm() {
-        let root = std::env::temp_dir().join(format!("srctl-host-post-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&root);
+        let root = troot("host-post");
         std::fs::create_dir_all(root.join("state/projects")).unwrap();
         // 现状：全集中间件 + 两个项目（redis 依赖演示）
         crate::middleware::HostEnv::default_for("10.0.0.1").save(&root).unwrap();

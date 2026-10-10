@@ -1108,7 +1108,11 @@ mod tests {
     use super::*;
 
     fn troot(name: &str) -> PathBuf {
-        let d = std::env::temp_dir().join(format!("srctl-test-{}-{name}", std::process::id()));
+        // 隔离纪律（TESTING.md 规则 1）：每次调用独立目录——pid 隔离并发进程、原子计数隔离
+        // 同进程并行测试；固定名复用会互相 remove_dir_all（config.rs 存量教训）。
+        static N: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+        let n = N.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let d = std::env::temp_dir().join(format!("srctl-test-{name}-{}-{n}", std::process::id()));
         let _ = fs::remove_dir_all(&d);
         fs::create_dir_all(&d).unwrap();
         d

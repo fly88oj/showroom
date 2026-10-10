@@ -483,7 +483,15 @@ mod tests {
     }
 
     fn tmp(name: &str) -> PathBuf {
-        let d = std::env::temp_dir().join(format!("showroom-common-test-{}", std::process::id()));
+        // 隔离纪律（TESTING.md 规则 1）：每次调用独立目录——pid 隔离并发进程、原子计数隔离
+        // 同进程并行测试；共享父目录 + 固定文件名会让两个测试读写/清理同一批路径（config.rs 存量教训）。
+        static N: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+        let n = N.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let d = std::env::temp_dir().join(format!(
+            "showroom-common-test-{name}-{}-{n}",
+            std::process::id()
+        ));
+        let _ = fs::remove_dir_all(&d);
         fs::create_dir_all(&d).unwrap();
         d.join(name)
     }

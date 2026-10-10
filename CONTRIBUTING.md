@@ -40,12 +40,13 @@
 ## 提交前检查单（缺一不可）
 
 ```bash
-cargo test --workspace          # 全绿
+cargo test --workspace          # 全绿（并行纪律与提速配置见 TESTING.md）
+cargo clippy --workspace --all-targets -- -D warnings   # 零告警
 cargo build --release           # 零 warning
 git diff --cached | grep -inE 'password|secret|token|BEGIN .*PRIVATE' && echo "⛔ 敏感内容" || echo OK
 ```
 
-Shell 脚本改动另跑 `bash -n`。
+Shell 脚本改动另跑 `bash -n`。新增/修改测试须遵守 [TESTING.md](TESTING.md) §1 五规则（独立临时目录、禁全局状态、禁固定端口、显式入参、超时预算）。
 
 ## 历史重塑政策
 

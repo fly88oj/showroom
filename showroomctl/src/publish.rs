@@ -504,7 +504,13 @@ mod tests {
     use super::*;
 
     fn troot(name: &str) -> PathBuf {
-        let d = std::env::temp_dir().join(format!("srctl-pub-test-{}-{name}", std::process::id()));
+        // 隔离纪律（TESTING.md 规则 1）：每次调用独立目录（pid+原子计数），固定名复用会互相 remove_dir_all
+        static N: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+        let n = N.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let d = std::env::temp_dir().join(format!(
+            "srctl-pub-test-{name}-{}-{n}",
+            std::process::id()
+        ));
         let _ = fs::remove_dir_all(&d);
         fs::create_dir_all(&d).unwrap();
         d

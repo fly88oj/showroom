@@ -5,3 +5,57 @@ members = ["showroom-common", "showroomctl", "showroom"]
 [profile.release]
 lto = "thin"
 strip = true
+
+# —— 测试提速（纪律与数字见 TESTING.md §3）——
+# 两层结构，各治一半慢：
+# 1) [profile.test] opt-level=1：AEAD/CTR/GHASH 这类泛型加密代码在调用方 crate 单态化，
+#    测试目标 -O0 时热循环随单态化落进 -O0 编译单元，package 级覆盖救不了（实测
+#    8MiB aes-gcm：-O0 0.61s vs -O1 0.013s，46×）。-O1 保留行级调试体验；仅影响测试
+#    目标，cargo run/build 调试仍走 -O0。
+# 2) 密码学依赖钉 -O3：非泛型热函数（素性检测/argon2 填充循环/群运算）在依赖自身
+#    编译单元内，-O0 下慢 1~2 个数量级。CI 同样受益（profile 随构建走）。
+# 逐包依据（nextest 实测归因）：
+#   rsa + num-bigint-dig     —— RSA-3072 keygen（素性检测热循环在 num-bigint-dig）
+#   curve25519-dalek/opaque-ke —— OPAQUE ristretto255 群运算
+#   argon2                   —— rwd 硬化（m=19456 t=2）
+#   aes/aes-gcm/ctr/ghash/polyval —— 信封 seal/open 流式对称加密原语
+#   sha2                     —— 预哈希签名 / dump 分块校验和
+#   zstd                     —— 解压/压缩热循环（wasm 垫片与 ctl 解包路径）
+[profile.test]
+opt-level = 1
+
+[profile.dev.package.rsa]
+opt-level = 3
+
+[profile.dev.package.num-bigint-dig]
+opt-level = 3
+
+[profile.dev.package.curve25519-dalek]
+opt-level = 3
+
+[profile.dev.package.opaque-ke]
+opt-level = 3
+
+[profile.dev.package.argon2]
+opt-level = 3
+
+[profile.dev.package.aes]
+opt-level = 3
+
+[profile.dev.package.aes-gcm]
+opt-level = 3
+
+[profile.dev.package.ctr]
+opt-level = 3
+
+[profile.dev.package.ghash]
+opt-level = 3
+
+[profile.dev.package.polyval]
+opt-level = 3
+
+[profile.dev.package.sha2]
+opt-level = 3
+
+[profile.dev.package.zstd]
+opt-level = 3
