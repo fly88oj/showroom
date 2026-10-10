@@ -240,6 +240,22 @@ async fn dispatch(
             Ok(Json(json!({"images": images})))
         }
 
+        // —— 磁盘空间与镜像删除（SPEC §14）：space 无归属校验（验签即可，全员可看全局磁盘）——
+
+        ("GET", "/_api/space", _) => {
+            let root = s.root.clone();
+            let v = blk(move || ops::space_snapshot(&root)).await?;
+            Ok(Json(v))
+        }
+
+        ("POST", "/_api/image-rm", Collected::Mem(b)) => {
+            let req: ImageRmReq = jbody(b)?;
+            let (repo, tag) = image_guard(s, &req.image, &user, &kid)?; // 先守卫后进内核
+            let root = s.root.clone();
+            let freed = blk(move || ops::image_rm(&root, &repo, &tag)).await?;
+            Ok(Json(json!({"freed_est_mb": freed})))
+        }
+
         ("POST", "/_api/publish", Collected::Mem(b)) => {
             let req: PubReq = jbody(b)?;
             let root = s.root.clone();
@@ -631,6 +647,23 @@ fn redis_db_guard(s: &S, q: &HashMap<String, String>, user: &str, kid: &str) -> 
     }
 }
 
+/// image-rm 归属校验（SPEC §14.1，仿 redis_db_guard）：`<repo>:<tag>` 形状拆分（无冒号 E_NAME）、
+/// repo 白名单与 tag 校验；repo 属签名用户命名空间（`<user>/` 前缀，split 精确比对）或
+/// admin 钥匙 → 放行，否则 E_AUTH（404 同体，与未登记钥匙不可区分）。
+fn image_guard(s: &S, image: &str, user: &str, kid: &str) -> R<(String, String)> {
+    let (repo, tag) = state::split_image_ref(image)
+        .ok_or_else(|| ApiError::new("E_NAME", format!("image '{image}' 须形如 <user>/<project>:<tag>")))?;
+    if !state::valid_image_repo(&repo) {
+        return Err(ApiError::new("E_NAME", format!("bad image repo '{repo}'")));
+    }
+    publish::check_tag(&tag)?;
+    if state::repo_owned_by(&repo, user) || ops::key_is_admin(&s.root, user, kid) {
+        Ok((repo, tag))
+    } else {
+        Err(ApiError::new("E_AUTH", format!("image '{image}' not in '{user}' namespace")))
+    }
+}
+
 // —— 小工具 ——
 
 async fn blk<T, F>(f: F) -> R<T>
@@ -693,6 +726,12 @@ struct ProjectReq {
 #[derive(Deserialize)]
 struct IdReq {
     image_id: String,
+}
+
+/// POST /_api/image-rm body：`{"image":"<repo>:<tag>"}`（如 "alice/demo:v1"，SPEC §14.1）。
+#[derive(Deserialize)]
+struct ImageRmReq {
+    image: String,
 }
 
 #[derive(Deserialize)]
@@ -861,6 +900,45 @@ mod tests {
         std::fs::write(root.join("state/policy.env"), "REDIS_DBS=8\n").unwrap();
         assert_eq!(redis_db_guard(&s, &qq("7"), "alice", "ab12cd34").unwrap(), 7);
         assert_eq!(redis_db_guard(&s, &qq("15"), "root", &added.kid).unwrap_err().code, "E_NAME");
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    // image_guard 边界（§14.1，仿 redis_db_guard_boundaries）：本人 repo 放行；
+    // 他人 repo/无命名空间 → E_AUTH（404 同体）；admin 钥匙放行他人；形状非法 → E_NAME
+    #[test]
+    fn image_guard_boundaries() {
+        let root = std::env::temp_dir().join(format!("srctl-image-guard-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).unwrap();
+        let s: S = Arc::new(AppState { root: root.clone(), nonces: Mutex::new(HashMap::new()) });
+
+        // 本人命名空间：拆分出 (repo, tag) 放行
+        assert_eq!(
+            image_guard(&s, "alice/demo:v1", "alice", "ab12cd34").unwrap(),
+            ("alice/demo".into(), "v1".into())
+        );
+        // 他人 repo / 无命名空间 repo → E_AUTH（404 同体）
+        assert_eq!(image_guard(&s, "bob/demo:v1", "alice", "ab12cd34").unwrap_err().code, "E_AUTH");
+        assert_eq!(image_guard(&s, "bare:v1", "alice", "ab12cd34").unwrap_err().code, "E_AUTH");
+        // 前缀不误吞："alice-x/…" 不属于 alice
+        assert_eq!(image_guard(&s, "alice-x/demo:v1", "alice", "ab12cd34").unwrap_err().code, "E_AUTH");
+        // 无 user 档案的签名者同样 E_AUTH
+        assert_eq!(image_guard(&s, "alice/demo:v1", "nobody", "ab12cd34").unwrap_err().code, "E_AUTH");
+
+        // admin 钥匙放行他人命名空间
+        let k = showroom_common::UserKey::generate();
+        let added = crate::ops::user_add(&s.root, "root", &k.pub_string(), true, false).unwrap();
+        assert_eq!(
+            image_guard(&s, "bob/demo:v1", "root", &added.kid).unwrap(),
+            ("bob/demo".into(), "v1".into())
+        );
+
+        // 形状非法 → E_NAME：无冒号 / repo 白名单外（空格、..、大写、三段）/ tag 非法
+        for bad in [
+            "alice/demo", "a b/x:v", "../x:v", "A/b:v", "a/b/c:v", "alice/demo:a b", "alice/demo:",
+        ] {
+            assert_eq!(image_guard(&s, bad, "alice", "ab12cd34").unwrap_err().code, "E_NAME", "{bad}");
+        }
         let _ = std::fs::remove_dir_all(&root);
     }
 

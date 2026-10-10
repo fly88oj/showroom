@@ -491,6 +491,56 @@ pub fn images(root: &Path, user: Option<&str>) -> R<Vec<String>> {
     Ok(state::flatten_images(&catalog, user))
 }
 
+// —— 磁盘空间与镜像删除（SPEC §14；serve /_api/space 与 /_api/image-rm 内核，CLI 共用）——
+
+/// 根分区 df 一次调用 → (size, avail)（§14.2 口径：镜像/docker 层/registry 同属一个 btrfs
+/// 文件系统，`df /` 即三者并集真值）。失败/畸形 → E_STATE（fail-closed，msg 带 "df /"）。
+fn df_root_size_avail() -> R<(u64, u64)> {
+    let out = dockerops::run("df", &["-B1", "--output=size,avail", "/"])
+        .map_err(|e| ApiError::state(format!("df /: {e}")))?;
+    state::parse_df_bytes(&out).ok_or_else(|| ApiError::state("df /: malformed output"))
+}
+
+/// GET /_api/space 数据源：`{"available_mb","reserve_mb","total_mb"}` 三元组。
+/// available_mb＝根 df avail**未扣预留**（MB 向下取整）；reserve_mb＝DISK_RESERVE_GB×1024；
+/// total_mb＝根 df size。控制台显示 available_mb − reserve_mb。
+pub fn space_snapshot(root: &Path) -> R<Value> {
+    let (size, avail) = df_root_size_avail()?;
+    let policy = state::Policy::load(root);
+    Ok(json!({
+        "available_mb": avail >> 20,
+        "reserve_mb": policy.disk_reserve_gb * 1024,
+        "total_mb": size >> 20,
+    }))
+}
+
+/// 根分区当前 avail 字节（image-rm 前后差用；与 space_snapshot 各自独立调用，不缓存）。
+pub fn disk_avail_bytes() -> R<u64> {
+    df_root_size_avail().map(|(_, a)| a)
+}
+
+/// image-rm 内核（§14.3 内联 GC 流程）：manifest digest → DELETE manifest → registry-gc → df 前后差。
+/// 返回 freed_est_mb（i64≥0；btrfs 偶发回吐为负时钳 0，如实不虚报）。
+/// 失败路径语义：DELETE 已成而 registry-gc 失败 → E_STATE 如实报部分成功（每周 timer 会补收）；
+/// manifest GET 404 → E_NOTFOUND（镜像不存在），其余非 200 → E_STATE（dockerops::manifest_digest 分档）。
+pub fn image_rm(root: &Path, repo: &str, tag: &str) -> R<i64> {
+    let avail0 = disk_avail_bytes()?;
+    let digest = dockerops::manifest_digest(root, repo, tag)?;
+    if !state::valid_digest(&digest) {
+        return Err(ApiError::state(format!("registry 返回非法 digest '{digest}'（拒拼接进 DELETE URL）")));
+    }
+    dockerops::delete_manifest(root, repo, &digest)?;
+    // 复用 Cmd::RegistryGc 实现体（停 sr-registry → garbage-collect --delete-untagged → 重启；
+    // 秒级，live-restore 保运行中容器；--delete-untagged 只清无引用 blob，多 tag 共享层保留）
+    if let Err(e) = registry_gc(root) {
+        return Err(ApiError::state(format!(
+            "manifest 已删但 registry-gc 失败：{e}；空间暂未回收，每周 registry-gc timer 会补收，或稍后重试"
+        )));
+    }
+    let freed = (disk_avail_bytes()? as i64).saturating_sub(avail0 as i64) >> 20;
+    Ok(freed.max(0))
+}
+
 // —— user 管理（CLI 与 /_api/admin/* 端点共用；user/kid 均过名字校验防路径拼接）——
 
 /// user_add 产物：kid + registry 明文密码（密码只此一次返回给远程发卡方；本机 reg.cred 常驻）。

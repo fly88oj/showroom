@@ -102,6 +102,9 @@ deploy: 第 1 步(push) 失败：docker push 失败
 | 命令 | 说明 |
 |---|---|
 | `showroom ps [--json]` | 全平台展项列表（PROJECT/STATUS/TAG/USER）；`--json` 机读 |
+| `showroom images [--json]` | 列出自己的镜像 `<USER>/<PROJECT>:<TAG>`（admin 钥匙全量）；`--json` 机读 |
+| `showroom space [--json]` | 服务端磁盘空间三数（可用/预留/总量；可用行含已扣预留值，MB）；`--json` 机读 |
+| `showroom rm-image <USER/PROJECT:TAG>` | 删除自己的镜像并内联 registry-gc 立即回收空间，打印「已删除 …，回收约 N MB」 |
 | `showroom url <PROJECT>` | 打印展项 URL（`http://<server>/<PROJECT>/`），不开浏览器 |
 | `showroom logs <PROJECT> [--tail 100] [-f]` | 查看容器日志；`-f` 跟随（2s 轮询追加式打印） |
 | `showroom env <PROJECT>` | 打印注入容器的环境变量（DB/Redis 连接信息一目了然） |

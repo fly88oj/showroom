@@ -309,6 +309,12 @@ pub struct Policy {
     /// Redis 逻辑库池大小（§13.3；policy.env `REDIS_DBS=` 可调，默认 256）。
     /// 分配单位维持每项目一库（§13.3）；与 MAX_SLOTS 的一致性由文档说明（默认 30≤256）。
     pub redis_dbs: u16,
+    /// 磁盘准入预留 GB（§14.4；policy.env `DISK_RESERVE_GB=` 可调，默认 20）：
+    /// 根分区 df avail 减去它之后须仍满足本次上传的估算需求。
+    pub disk_reserve_gb: u64,
+    /// 上传空间估算膨胀因子（§14.4；policy.env `UPLOAD_SPACE_FACTOR=` 可调，默认 4）：
+    /// sealed 尺寸 × 因子 ≈ docker load 未压缩层 + registry blob 的落盘需求。
+    pub upload_space_factor: u64,
 }
 
 impl Default for Policy {
@@ -321,6 +327,8 @@ impl Default for Policy {
             allow_lan_port: false,
             reserve_mem_mb: 1536,
             redis_dbs: 256,
+            disk_reserve_gb: 20,
+            upload_space_factor: 4,
         }
     }
 }
@@ -337,11 +345,18 @@ impl Policy {
             allow_lan_port: m.get("ALLOW_LAN_PORT").map(|v| v != "0").unwrap_or(false),
             reserve_mem_mb: m.get("RESERVE_MEM_MB").and_then(|v| v.parse().ok()).unwrap_or(1536),
             redis_dbs: m.get("REDIS_DBS").and_then(|v| v.parse().ok()).unwrap_or(256),
+            disk_reserve_gb: m.get("DISK_RESERVE_GB").and_then(|v| v.parse().ok()).unwrap_or(20),
+            upload_space_factor: m.get("UPLOAD_SPACE_FACTOR").and_then(|v| v.parse().ok()).unwrap_or(4),
         }
     }
 
     pub fn import_cap_bytes(&self) -> u64 {
         self.import_max_gb << 30
+    }
+
+    /// 磁盘准入预留字节数（§14.4）：`DISK_RESERVE_GB << 30`。
+    pub fn reserve_bytes(&self) -> u64 {
+        self.disk_reserve_gb << 30
     }
 
     /// redisdb 分配池有效上界（§13.3）：Conf.redisdb 为 u8，库号至多 0-255（256 个）。
@@ -397,6 +412,30 @@ pub fn mem_admission(need_mb: u64, mem_available_kb: u64, reserve_mb: u64) -> Re
 pub fn parse_meminfo_available_kb(text: &str) -> Option<u64> {
     let line = text.lines().find(|l| l.starts_with("MemAvailable:"))?;
     line.split_whitespace().nth(1)?.parse().ok()
+}
+
+// —— 磁盘准入（SPEC §14.2，上传导入/快通道复核共用）——
+
+/// 磁盘准入判断（纯函数）：`sealed × UPLOAD_SPACE_FACTOR ≤ avail − DISK_RESERVE_GB` 不满足 → Err
+///（§14.4 msg 模板：可用/预留/估算需求/膨胀因子四数 + 删除引导；import-begin/end 与 publish 复核共用）。
+/// 差额有符号算（avail < reserve 免无符号下溢，仿 mem_admission）；字节→MB 一律向下取整（保守侧），
+/// `need_mb` 向上取整（判定侧保守）。avail 为**未扣预留**的根分区 df avail。
+pub fn disk_admission(
+    sealed_bytes: u64,
+    avail_bytes: u64,
+    reserve_bytes: u64,
+    factor: u64,
+) -> Result<(), String> {
+    let avail_mb = avail_bytes >> 20;
+    let reserve_mb = reserve_bytes >> 20;
+    let sealed_mb = sealed_bytes >> 20;
+    let need_mb = sealed_bytes.saturating_mul(factor).saturating_add((1 << 20) - 1) >> 20;
+    if (avail_mb as i64).saturating_sub(reserve_mb as i64) < need_mb as i64 {
+        return Err(format!(
+            "磁盘空间不足：可用 {avail_mb} MB（已预留 {reserve_mb} MB）＜ 估算需求 {need_mb} MB（{sealed_mb} MB × 膨胀因子 {factor}）；请先删除旧镜像后重试"
+        ));
+    }
+    Ok(())
 }
 
 // —— ports.reg：每行 <port> <project>（§11 去 slot 列），端口 8100–8199 ——
@@ -565,6 +604,50 @@ pub fn flatten_images(catalog: &[(String, Vec<String>)], user: Option<&str>) -> 
         }
     }
     out
+}
+
+// —— 镜像删除纯函数（SPEC §14.1，/_api/image-rm 守卫与内核共用）——
+
+/// `<repo>:<tag>` 一次性 `split_once(':')` → (repo, tag)；无冒号 → None
+///（tag 合法性交 check_tag，repo 合法性交 valid_image_repo）。
+pub fn split_image_ref(image: &str) -> Option<(String, String)> {
+    let (repo, tag) = image.split_once(':')?;
+    Some((repo.to_string(), tag.to_string()))
+}
+
+/// repo 白名单（进 registry URL 拼接前收口）：`'/'` 分段、每段 `[a-z0-9][a-z0-9._-]*`、
+/// 非空、≤2 段、段内无 `..`（防穿越）。大写/空格/三段一律拒。
+pub fn valid_image_repo(repo: &str) -> bool {
+    let segs: Vec<&str> = repo.split('/').collect();
+    if segs.is_empty() || segs.len() > 2 {
+        return false;
+    }
+    segs.iter().all(|s| {
+        !s.is_empty()
+            && !s.contains("..")
+            && s.starts_with(|c: char| c.is_ascii_lowercase() || c.is_ascii_digit())
+            && s[1..]
+                .bytes()
+                .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || matches!(b, b'.' | b'_' | b'-'))
+    })
+}
+
+/// digest 形状：`sha256:` + 64 位 hex（DELETE 路径 URL 拼接前收口，防注入/穿越）。
+pub fn valid_digest(d: &str) -> bool {
+    let Some(hex) = d.strip_prefix("sha256:") else { return false };
+    hex.len() == 64 && hex.bytes().all(|b| b.is_ascii_hexdigit())
+}
+
+/// manifest JSON：`layers[].size` 求和 + `config.size`；无 layers（index/manifest list）→ None
+///（调用方据此再取 manifests[0] 的子 manifest）；畸形 JSON → None。
+pub fn sum_manifest_layers(body: &[u8]) -> Option<u64> {
+    let v: Value = serde_json::from_slice(body).ok()?;
+    let layers = v.get("layers")?.as_array()?;
+    let mut sum = v.get("config").and_then(|c| c.get("size")).and_then(|s| s.as_u64()).unwrap_or(0);
+    for l in layers {
+        sum = sum.checked_add(l.get("size")?.as_u64()?)?;
+    }
+    Some(sum)
 }
 
 // —— 发布者公钥 / registry 凭据文件 ——
@@ -873,6 +956,8 @@ pub fn prune_snapshots(names: &[String], keep: usize) -> Vec<String> {
 /// `df -B1 --output=size,used <path>` 输出 → (总字节, 已用字节)。
 /// 注意：coreutils 9.4 无 `total` 字段，用 `size`（同为 1B 块总量）；取最后一个非空行，
 /// 两列空白分隔的 u64——多路径调用时与传入路径一一对应，单路径取末行即本路径。
+/// 解析为两列白名单、与列名无关：`--output=size,avail`（§14 space/磁盘准入口径）时
+/// 第二列即 avail，返回 (size, avail)，同一函数复用。
 pub fn parse_df_bytes(text: &str) -> Option<(u64, u64)> {
     let last = text.lines().rfind(|l| !l.trim().is_empty())?;
     let mut it = last.split_whitespace();
@@ -1082,7 +1167,7 @@ mod tests {
         fs::create_dir_all(root.join("state")).unwrap();
         fs::write(
             root.join("state/policy.env"),
-            "MAX_SLOTS=5\nDEFAULT_MEM=128m\nMAX_MEM=512m\nIMPORT_MAX_GB=2\nALLOW_LAN_PORT=1\nRESERVE_MEM_MB=512\nREDIS_DBS=8\n",
+            "MAX_SLOTS=5\nDEFAULT_MEM=128m\nMAX_MEM=512m\nIMPORT_MAX_GB=2\nALLOW_LAN_PORT=1\nRESERVE_MEM_MB=512\nREDIS_DBS=8\nDISK_RESERVE_GB=5\nUPLOAD_SPACE_FACTOR=2\n",
         )
         .unwrap();
         let p = Policy::load(&root);
@@ -1095,11 +1180,14 @@ mod tests {
                 p.allow_lan_port,
                 p.reserve_mem_mb,
                 p.redis_dbs,
+                p.disk_reserve_gb,
+                p.upload_space_factor,
             ),
-            (5, "128m", "512m", 2, true, 512, 8)
+            (5, "128m", "512m", 2, true, 512, 8, 5, 2)
         );
         assert_eq!(p.import_cap_bytes(), 2 << 30);
         assert_eq!(p.redis_pool_cap(), 8, "§13.3 REDIS_DBS 可调");
+        assert_eq!(p.reserve_bytes(), 5 << 30, "§14.4 DISK_RESERVE_GB→字节");
 
         let d = Policy::load(&troot("policy-default"));
         assert_eq!(
@@ -1111,15 +1199,23 @@ mod tests {
                 d.allow_lan_port,
                 d.reserve_mem_mb,
                 d.redis_dbs,
+                d.disk_reserve_gb,
+                d.upload_space_factor,
             ),
-            (30, "256m", "1g", 8, false, 1536, 256)
+            (30, "256m", "1g", 8, false, 1536, 256, 20, 4)
         );
         assert_eq!(d.redis_pool_cap(), 256, "§13.3 默认池 256");
+        assert_eq!(d.reserve_bytes(), 20 << 30, "§14.4 缺省预留 20GB");
         // 非法值回默认；超 u8 承载（>256）的池 cap 收在 256（Conf.redisdb 为 u8）
         let root2 = troot("policy-redis");
         fs::create_dir_all(root2.join("state")).unwrap();
-        fs::write(root2.join("state/policy.env"), "REDIS_DBS=abc\n").unwrap();
+        fs::write(
+            root2.join("state/policy.env"),
+            "REDIS_DBS=abc\nDISK_RESERVE_GB=x\nUPLOAD_SPACE_FACTOR=-1\n",
+        )
+        .unwrap();
         assert_eq!(Policy::load(&root2).redis_dbs, 256);
+        assert_eq!((Policy::load(&root2).disk_reserve_gb, Policy::load(&root2).upload_space_factor), (20, 4));
         fs::write(root2.join("state/policy.env"), "REDIS_DBS=1000\n").unwrap();
         assert_eq!(Policy::load(&root2).redis_pool_cap(), 256);
 
@@ -1407,6 +1503,97 @@ mod tests {
         assert_eq!(mem_admission(1792, kb(1792), 0), Ok(()));
     }
 
+    // 8b. 磁盘准入边界（§14.2）：恰满足 / 差 1MB / factor=0 / avail<reserve / 需求向上取整
+    #[test]
+    fn disk_admission_boundaries() {
+        let mb = |n: u64| n << 20;
+
+        // 刚好满足：avail−reserve == need（4MB × 3 = 12MB）→ 放行
+        assert_eq!(disk_admission(mb(4), mb(12), 0, 3), Ok(()));
+        // 差 1MB → 拒，msg 含 可用/预留/需求/因子 四数与删除引导
+        let e = disk_admission(mb(4), mb(11), 0, 3).unwrap_err();
+        for n in ["11", "0", "12", "3"] {
+            assert!(e.contains(n), "msg 缺数字 {n}: {e}");
+        }
+        assert!(e.contains("请先删除旧镜像"), "msg 须含删除引导: {e}");
+        assert!(e.starts_with("磁盘空间不足"), "msg 模板前缀: {e}");
+
+        // factor=0：需求 0 恒过（avail ≥ reserve 时）
+        assert_eq!(disk_admission(mb(999), mb(10), mb(5), 0), Ok(()));
+        // avail < reserve：差额为负（有符号算免下溢），need=0 也按公式拒
+        assert!(disk_admission(0, mb(1), mb(100), 0).is_err());
+        assert!(disk_admission(mb(1), mb(1), mb(100), 4).is_err());
+
+        // 需求向上取整（判定侧保守）：sealed=1B × 1 → need=1MB；avail−reserve 差 1B（floor 成 0MB）不够
+        assert!(disk_admission(1, mb(1) - 1, 0, 1).is_err());
+        assert_eq!(disk_admission(1, mb(1), 0, 1), Ok(()));
+
+        // 超大 factor（saturating 不 panic）：一律拒
+        assert!(disk_admission(1, u64::MAX / 2, 0, u64::MAX).is_err());
+    }
+
+    // 11a. 镜像删除纯函数（§14.1）：split_image_ref / valid_image_repo / valid_digest
+    #[test]
+    fn image_ref_and_digest_validation() {
+        // split：一次性 split_once(':')
+        assert_eq!(
+            split_image_ref("alice/demo:v1"),
+            Some(("alice/demo".into(), "v1".into()))
+        );
+        assert_eq!(split_image_ref("demo:v1"), Some(("demo".into(), "v1".into())));
+        assert_eq!(split_image_ref("bare"), None, "无冒号");
+        assert_eq!(split_image_ref("alice-x/y"), None, "无冒号（斜杠不冒充分隔）");
+
+        // repo 白名单
+        for good in ["alice/demo", "alice", "a-b/c.d_e", "user1/proj-2.0", "0/9"] {
+            assert!(valid_image_repo(good), "{good} 应合法");
+        }
+        for bad in [
+            "a b/x", "../x", "A/b", "a/B", "", "/", "alice/", "/x", "a/b/c", "a..b", ".x/y", "-a/b",
+        ] {
+            assert!(!valid_image_repo(bad), "{bad:?} 应拒绝");
+        }
+        // 前缀不误吞（沿用 §13 测试法）："alice-x/y" 不属于 "alice"
+        assert!(!repo_owned_by("alice-x/y", "alice"));
+
+        // digest：sha256: + 64 hex
+        let hex64 = "a".repeat(64);
+        assert!(valid_digest(&format!("sha256:{hex64}")));
+        assert!(!valid_digest(&format!("sha256:{}", "a".repeat(63))), "短");
+        assert!(!valid_digest(&format!("sha256:{}", "a".repeat(65))), "长");
+        assert!(!valid_digest(&format!("sha256:{}", "g".repeat(64))), "非 hex");
+        assert!(!valid_digest(&format!("sha512:{}", "a".repeat(128))), "别的算法头");
+        assert!(!valid_digest("sha256:"));
+        assert!(!valid_digest(&hex64), "无算法头");
+    }
+
+    // 11b. manifest 层求和（§14.1）：v2 求和 / index→None / 畸形→None
+    #[test]
+    fn manifest_layers_sum() {
+        let m = json!({
+            "schemaVersion": 2,
+            "config": {"mediaType": "application/vnd.docker.container.image.v1+json", "size": 1784, "digest": "sha256:aaa"},
+            "layers": [
+                {"mediaType": "application/vnd.docker.image.rootfs.diff.tar.gzip", "size": 8192, "digest": "sha256:b1"},
+                {"mediaType": "application/vnd.docker.image.rootfs.diff.tar.gzip", "size": 16384, "digest": "sha256:b2"},
+                {"mediaType": "application/vnd.docker.image.rootfs.diff.tar.gzip", "size": 4096, "digest": "sha256:b3"},
+            ],
+        });
+        assert_eq!(
+            sum_manifest_layers(m.to_string().as_bytes()),
+            Some(1784 + 8192 + 16384 + 4096)
+        );
+        // index（manifest list，无 layers）→ None
+        let idx = json!({"schemaVersion": 2, "mediaType": "application/vnd.oci.image.index.v1+json",
+            "manifests": [{"digest": "sha256:ccc", "size": 528}]});
+        assert_eq!(sum_manifest_layers(idx.to_string().as_bytes()), None);
+        // 畸形 JSON / 空 / 层缺 size → None
+        assert_eq!(sum_manifest_layers(b"not json"), None);
+        assert_eq!(sum_manifest_layers(b""), None);
+        let bad = json!({"config": {"size": 1}, "layers": [{"digest": "sha256:x"}]});
+        assert_eq!(sum_manifest_layers(bad.to_string().as_bytes()), None);
+    }
+
     // 9. /proc/meminfo MemAvailable 行解析样例
     #[test]
     fn meminfo_parse() {
@@ -1540,6 +1727,9 @@ Cached:         13121516 kB
         let df = "    1B-blocks          Used\n3935730991104 3102217924608\n";
         assert_eq!(parse_df_bytes(df), Some((3_935_730_991_104, 3_102_217_924_608)));
         assert_eq!(parse_df_bytes("1B-blocks  Used\n1024 512\n2048 1536\n"), Some((2048, 1536)));
+        // §14 size,avail 口径：两列白名单与列名无关，第二列即 avail → (size, avail)
+        let dfa = "     1B-blocks         Avail\n3935730991104 643125334016\n";
+        assert_eq!(parse_df_bytes(dfa), Some((3_935_730_991_104, 643_125_334_016)));
         assert_eq!(parse_df_bytes(""), None);
         assert_eq!(parse_df_bytes("only header\n"), None, "无数据行 → None");
         assert_eq!(parse_df_bytes("abc def\n"), None, "非数字 → None");

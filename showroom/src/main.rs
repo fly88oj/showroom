@@ -99,6 +99,20 @@ enum Cmd {
         #[arg(long)]
         json: bool,
     },
+    /// 列出自己的镜像 <user>/<project>:<tag>（admin 钥匙列出全部）
+    Images {
+        #[arg(long)]
+        json: bool,
+    },
+    /// 查看服务端磁盘空间（可用/预留/总量，可用行含已扣预留值）
+    Space {
+        #[arg(long)]
+        json: bool,
+    },
+    /// 删除自己的镜像 <user/project:tag>（服务端内联 GC，空间立即回收）
+    RmImage {
+        image: String,
+    },
     /// 打印展项 URL（不开浏览器）
     Url {
         project: String,
@@ -193,6 +207,9 @@ fn run(cli: &Cli) -> Result<(), String> {
             Ok(())
         }
         Cmd::Ps { json } => ps(&cfg, cli.server, *json),
+        Cmd::Images { json } => images_cmd(&cfg, cli.server, *json),
+        Cmd::Space { json } => space_cmd(&cfg, cli.server, *json),
+        Cmd::RmImage { image } => rm_image(&cfg, cli.server, image),
         Cmd::Url { project } => url_cmd(&cfg, cli.server, project),
         Cmd::Logs { project, tail, follow } => {
             logs_cmd(&cfg, cli.server, project, *tail, *follow)
@@ -587,6 +604,51 @@ fn trunc(s: &str, n: usize) -> String {
     } else {
         s.to_string()
     }
+}
+
+// ———— 镜像与磁盘（SPEC §14：images/space/rm-image，走既有签名 GET/POST）————
+
+fn images_cmd(cfg: &Config, force: Option<Which>, json_out: bool) -> Result<(), String> {
+    let api = Api::connect(cfg, force)?;
+    let v = api.signed_get("/_api/images")?;
+    if json_out {
+        println!("{v}");
+        return Ok(());
+    }
+    let arr = v["images"].as_array().cloned().unwrap_or_default();
+    if arr.is_empty() {
+        println!("（无镜像；先 showroom push <PROJECT> <TAG>）");
+        return Ok(());
+    }
+    for e in &arr {
+        println!("{}", e.as_str().unwrap_or_default());
+    }
+    Ok(())
+}
+
+fn space_cmd(cfg: &Config, force: Option<Which>, json_out: bool) -> Result<(), String> {
+    let api = Api::connect(cfg, force)?;
+    let v = api.signed_get("/_api/space")?;
+    if json_out {
+        println!("{v}");
+        return Ok(());
+    }
+    let g = |k: &str| v[k].as_u64().unwrap_or(0);
+    let (avail, reserve, total) = (g("available_mb"), g("reserve_mb"), g("total_mb"));
+    println!("可用空间：{avail} MB（已扣预留 {} MB）", avail.saturating_sub(reserve));
+    println!("预留：{reserve} MB");
+    println!("总量：{total} MB");
+    Ok(())
+}
+
+fn rm_image(cfg: &Config, force: Option<Which>, image: &str) -> Result<(), String> {
+    let api = Api::connect(cfg, force)?;
+    // CLI 显式操作：打印待删镜像名，无交互 confirm（服务端另有归属守卫）
+    println!("待删镜像：{image}");
+    let v = api.signed_post_json("/_api/image-rm", &json!({ "image": image }))?;
+    let freed = v["freed_est_mb"].as_i64().unwrap_or(0);
+    println!("已删除 {image}，回收约 {freed} MB");
+    Ok(())
 }
 
 fn url_cmd(cfg: &Config, force: Option<Which>, project: &str) -> Result<(), String> {

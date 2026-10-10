@@ -54,6 +54,9 @@ showroomctl gc-images         # docker 侧：镜像/构建缓存/悬空卷 + _tm
 docker system df              # 观察回收效果
 ```
 
+用户侧闭环（§14）：`showroom space` 查看服务端磁盘三数（可用/预留/总量，可用已扣预留）；
+`showroom rm-image <user/project:tag>` 删除自己的镜像并内联 registry-gc，空间**立即**回收（不等每周 GC），上传被 E_QUOTA 拒时先删旧镜像即可重传。
+
 ## 3. 容量调整
 
 ### 扩内存（改准入预留 / 上限）

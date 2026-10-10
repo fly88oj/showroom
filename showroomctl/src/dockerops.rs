@@ -348,19 +348,56 @@ pub fn header<'a>(hdrs: &'a [(String, String)], k: &str) -> Option<&'a str> {
     hdrs.iter().find(|(a, _)| a == k).map(|(_, v)| v.as_str())
 }
 
-/// GET manifest 判断镜像是否已在 registry（200 / 非 200）。
-pub fn image_exists(root: &Path, repo: &str, tag: &str) -> R<bool> {
-    let (code, _, _) = http_registry(root, "GET", &format!("/v2/{repo}/manifests/{tag}"), Some(MANIFEST_ACCEPT))?;
-    Ok(code == 200)
-}
-
-/// push 后取 manifest digest（Docker-Content-Digest 头）。
+/// push 后取 manifest digest（Docker-Content-Digest 头）。§14 分档：404 → E_NOTFOUND
+///（镜像不在 registry，image-rm 据此如实报「镜像不存在」）；其余非 200 → E_STATE。
+///（原 image_exists 已退役：快通道复核改用 manifest_size，一次 HTTP 兼得存在性与体积。）
 pub fn manifest_digest(root: &Path, repo: &str, tag: &str) -> R<String> {
     let (code, hdrs, _) = http_registry(root, "GET", &format!("/v2/{repo}/manifests/{tag}"), Some(MANIFEST_ACCEPT))?;
+    if code == 404 {
+        return Err(ApiError::new("E_NOTFOUND", format!("registry manifest {repo}:{tag}: HTTP 404")));
+    }
     if code != 200 {
         return Err(ApiError::state(format!("registry manifest {repo}:{tag}: HTTP {code}")));
     }
     header(&hdrs, "docker-content-digest")
         .map(str::to_string)
         .ok_or_else(|| ApiError::state("registry response missing Docker-Content-Digest"))
+}
+
+/// GET manifest 求镜像体积（§14 磁盘准入快通道复核 + image-rm 侧）：
+/// 404 → Ok(None)（镜像不在 registry）；200 → `state::sum_manifest_layers`（layers[].size 求和+config.size）；
+/// index（无 layers）落 None → 再 GET manifests[0] 的 digest 取子 manifest 求和。
+pub fn manifest_size(root: &Path, repo: &str, tag: &str) -> R<Option<u64>> {
+    let (code, _, body) = http_registry(root, "GET", &format!("/v2/{repo}/manifests/{tag}"), Some(MANIFEST_ACCEPT))?;
+    if code == 404 {
+        return Ok(None);
+    }
+    if code != 200 {
+        return Err(ApiError::state(format!("registry manifest {repo}:{tag}: HTTP {code}")));
+    }
+    if let Some(sz) = state::sum_manifest_layers(&body) {
+        return Ok(Some(sz));
+    }
+    // index（manifest list）：取 manifests[0] 的 digest 再求子 manifest 的层和
+    let idx: serde_json::Value = serde_json::from_slice(&body)
+        .map_err(|e| ApiError::state(format!("manifest {repo}:{tag} json: {e}")))?;
+    let digest = idx["manifests"][0]["digest"]
+        .as_str()
+        .ok_or_else(|| ApiError::state(format!("manifest {repo}:{tag}: index 无 manifests[0].digest")))?;
+    let (code, _, body) = http_registry(root, "GET", &format!("/v2/{repo}/manifests/{digest}"), Some(MANIFEST_ACCEPT))?;
+    if code != 200 {
+        return Err(ApiError::state(format!("registry manifest {repo}@{digest}: HTTP {code}")));
+    }
+    Ok(state::sum_manifest_layers(&body))
+}
+
+/// DELETE /v2/{repo}/manifests/{digest}（§14 image-rm）：202/204/200 收，否则 E_STATE 带 HTTP 码。
+/// digest 须先经 state::valid_digest 收口（调用方负责）。
+pub fn delete_manifest(root: &Path, repo: &str, digest: &str) -> R<()> {
+    let (code, _, _) = http_registry(root, "DELETE", &format!("/v2/{repo}/manifests/{digest}"), None)?;
+    if code == 202 || code == 204 || code == 200 {
+        Ok(())
+    } else {
+        Err(ApiError::state(format!("registry delete {repo}@{digest}: HTTP {code}")))
+    }
 }

@@ -79,6 +79,16 @@ fn mem_available_kb() -> R<u64> {
         .ok_or_else(|| ApiError::state("/proc/meminfo missing MemAvailable"))
 }
 
+/// 磁盘准入（SPEC §14.2）：根 df avail − DISK_RESERVE_GB 须满足 sealed × UPLOAD_SPACE_FACTOR，
+/// 否则 E_QUOTA（msg 由 state::disk_admission 统一产出，import-begin/end 与 publish 复核共用）。
+/// sealed 即密文信封尺寸（import 通道）或 registry manifest 层和（快通道复核）。
+fn disk_admit(root: &Path, sealed_bytes: u64) -> R<()> {
+    let policy = state::Policy::load(root);
+    let avail = crate::ops::disk_avail_bytes()?;
+    state::disk_admission(sealed_bytes, avail, policy.reserve_bytes(), policy.upload_space_factor)
+        .map_err(|m| ApiError::new("E_QUOTA", m))
+}
+
 pub fn publish(
     root: &Path,
     user: &str,
@@ -115,11 +125,16 @@ pub fn publish(
     };
 
     let repo = format!("{user}/{}", project.to_ascii_lowercase());
-    if !dockerops::image_exists(root, &repo, tag)? {
-        return Err(ApiError::new(
-            "E_NOTFOUND",
-            format!("image {} not in registry", image_ref(user, project, tag)),
-        ));
+    // §14 快通道复核：manifest_size 一次 HTTP 兼得存在性与体积——
+    // None → E_NOTFOUND（文案不变）；Some(sz) → 磁盘准入（容器创建/DB 供给之前，失败零副作用）
+    match dockerops::manifest_size(root, &repo, tag)? {
+        None => {
+            return Err(ApiError::new(
+                "E_NOTFOUND",
+                format!("image {} not in registry", image_ref(user, project, tag)),
+            ));
+        }
+        Some(sz) => disk_admit(root, sz)?,
     }
 
     // DB 供给（SPEC §9.2 首建不重建，数据保留）：存量库（归一化新名或 §11 迁移沿用旧名）存在则
@@ -410,6 +425,8 @@ pub fn import_begin(
     if image_id.is_empty() {
         return Err(ApiError::new("E_NAME", "empty image_id"));
     }
+    // 磁盘准入（§14.2）：sealed(total) × UPLOAD_SPACE_FACTOR ≤ avail − DISK_RESERVE_GB
+    disk_admit(root, total_bytes)?;
     check_tag(tag)?;
     fs::create_dir_all(root.join("_tmp"))?;
     let id = state::rand_hex(16);
@@ -468,6 +485,8 @@ pub fn import_end(root: &Path, user: &str, id: &str) -> R<String> {
     if have != m.total {
         return Err(ApiError::new("E_QUOTA", format!("upload incomplete: {have}/{} bytes", m.total)));
     }
+    // 磁盘准入二次判定（§14.2）：收 begin→end 期间空间被并发上传挤占的窗口
+    disk_admit(root, m.total)?;
     let d = match import_from_file(root, user, &m.project, &m.tag, &bin) {
         Ok(d) => d,
         Err(e) => {
@@ -496,10 +515,18 @@ mod tests {
         p
     }
 
+    /// 中性磁盘准入（单测用）：DISK_RESERVE_GB=0 + UPLOAD_SPACE_FACTOR=0 → 需求恒 0，
+    /// 免测试机磁盘余量影响既有断言（df 本身仍真实执行；准入分支另见 disk_quota_gate 测试）。
+    fn neutral_disk_policy(root: &Path) {
+        fs::create_dir_all(root.join("state")).unwrap();
+        fs::write(root.join("state/policy.env"), "DISK_RESERVE_GB=0\nUPLOAD_SPACE_FACTOR=0\n").unwrap();
+    }
+
     // 分片会话：meta 往返 / id 防穿越 / seq 顺序 / 超帽 / 归属 / end 字节校验（不碰网络与 docker）
     #[test]
     fn import_session_flow() {
         let root = troot("session");
+        neutral_disk_policy(&root);
         let id = import_begin(&root, "alice", "demo", "v1", "sha256:abcd", 10).unwrap();
         assert_eq!(id.len(), 32);
 
@@ -547,6 +574,7 @@ mod tests {
     #[test]
     fn import_begin_limits() {
         let root = troot("begin");
+        neutral_disk_policy(&root);
         assert_eq!(import_begin(&root, "alice", "demo", "v1", "sha256:x", 9 << 30).unwrap_err().code, "E_QUOTA");
         assert_eq!(import_begin(&root, "alice", "demo", "v1", "", 10).unwrap_err().code, "E_NAME");
         assert_eq!(import_begin(&root, "alice", "demo", "a b", "i", 10).unwrap_err().code, "E_NAME");
@@ -555,10 +583,29 @@ mod tests {
         assert!(import_begin(&root, "alice", "demo", "v1", "i", 8 << 30).is_ok());
     }
 
+    // §14.2 准入接线：DISK_RESERVE_GB 调大（远超任何真机 avail）→ total×factor 超限 →
+    // E_QUOTA 且 msg 含膨胀因子（df 真实执行；「差 1MB」等纯判定边界在 state::disk_admission 单测）
+    #[test]
+    fn import_begin_disk_quota_gate() {
+        let root = troot("disk-quota");
+        fs::create_dir_all(root.join("state")).unwrap();
+        fs::write(root.join("state/policy.env"), "DISK_RESERVE_GB=999999\n").unwrap();
+        let e = import_begin(&root, "alice", "demo", "v1", "sha256:x", 10 << 20).unwrap_err();
+        assert_eq!(e.code, "E_QUOTA", "{}", e.msg);
+        assert!(e.msg.contains("膨胀因子"), "msg 含膨胀因子: {}", e.msg);
+        assert!(e.msg.contains("磁盘空间不足"), "msg 前缀: {}", e.msg);
+        assert!(e.msg.contains("请先删除旧镜像"), "msg 含删除引导: {}", e.msg);
+        // 通过侧：factor=0（需求 0）在同 policy 下也过不了（reserve 巨大 → avail−reserve<0），
+        // 恢复中性 policy 后同一上传立即可过——闭环「调整 policy → 可传」
+        fs::write(root.join("state/policy.env"), "DISK_RESERVE_GB=0\nUPLOAD_SPACE_FACTOR=0\n").unwrap();
+        assert!(import_begin(&root, "alice", "demo", "v1", "sha256:x", 10 << 20).is_ok());
+    }
+
     // A6 回归：end 进入 import 管道后失败（root 无 platform_rsa，解密前即败）→ .bin/.meta 双清
     #[test]
     fn import_end_failure_cleans_bin_and_meta() {
         let root = troot("end-clean");
+        neutral_disk_policy(&root);
         let id = import_begin(&root, "alice", "demo", "v1", "sha256:x", 4).unwrap();
         import_chunk(&root, "alice", &id, 0, &chunk_file(&root, b"abcd")).unwrap();
         let (bin, meta) = (upload_bin(&root, &id), upload_meta(&root, &id));
