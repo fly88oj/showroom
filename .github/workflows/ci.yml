@@ -28,6 +28,9 @@ jobs:
       - name: cargo build --release
         run: cargo build --release
 
+      - name: 安装 wasm32 目标（setup action 的 targets 输入不稳定，显式装）
+        run: rustup target add wasm32-unknown-unknown
+
       - name: 构建 WASM 控制台垫片（wasm32-unknown-unknown）
         run: cargo build -p showroom-common --target wasm32-unknown-unknown --release
 
