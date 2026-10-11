@@ -1012,6 +1012,7 @@ async function onLoginSubmit(ev) {
       fieldErr('lg-pass', '登录被服务端拒绝（可能为限流或服务暂不可用），请稍后重试；忘记密码请联系管理员重置');
     } else {
       apiFail('登录', e);
+      fieldErr('lg-pass', `登录失败（${e && e.msg ? e.msg : '网络异常或服务不可用'}），请稍后重试`);
     }
   } finally { busy($('lg-submit'), false); }
 }
@@ -1610,7 +1611,7 @@ async function refreshAdminStatus() { // 平台状态面板：服务状态灯 / 
     const svcs = Object.entries(j.services || {});
     const disks = Object.entries(j.disks || {}).map(([p, d]) =>
       `<tr><td class="mono">${esc(p)}</td><td class="mono">${esc(typeof d === 'object' && d ? `${d.avail ?? '?'} 可用 / 共 ${d.total ?? '?'}` : String(d))}</td></tr>`).join('');
-    const mem = j.mem_available_mb ?? j.mem_available ?? j.mem;
+    const mem = j.mem?.available_mb ?? j.mem_available_mb;
     const ctrs = (j.containers || []).map((c) => (typeof c === 'string' ? { name: c, status: '' } : c));
     const timers = (j.timers || []).map((t) => (typeof t === 'string' ? { timer: t } : t));
     el.innerHTML = `
@@ -1944,7 +1945,7 @@ function renderProjects() {
       <td class="mono">${esc(p.tag)}</td>
       <td class="${statusCls(p.status)}">${esc(statusCn(p.status))}</td>
       <td class="wrap"><a href="${esc(p.url)}" target="_blank" rel="noopener">${esc(p.url)}</a></td>
-      <td class="mono">${esc(p.updated)}</td>
+      <td class="mono">${esc(fmtTime(p.updated))}</td>
       <td>
         <button class="act" data-act="start" data-p="${esc(p.project)}">启动</button>
         <button class="act" data-act="stop" data-p="${esc(p.project)}">停止</button>
@@ -2726,7 +2727,7 @@ async function refreshStatus() {
     tb.innerHTML = state.projects.length ? state.projects.map((p) => `<tr>
       <td class="mono">${esc(p.project)}</td>
       <td class="${statusCls(p.status)}">${esc(statusCn(p.status))}</td>
-      <td class="mono">${esc(p.updated)}</td>
+      <td class="mono">${esc(fmtTime(p.updated))}</td>
       <td><button class="act" data-logs data-p="${esc(p.project)}">查看日志</button></td>
     </tr>`).join('') : '<tr><td colspan="4" class="note">暂无展项</td></tr>';
     $('st-fb').textContent = `已刷新（${new Date().toLocaleTimeString()}）`;
