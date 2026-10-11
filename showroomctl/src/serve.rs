@@ -126,6 +126,11 @@ pub async fn run(root: PathBuf) -> R<()> {
     for l in ops::migrate_legacy(&root) {
         eprintln!("showroomctl: migrate: {l}");
     }
+    // 工具分发源刷新（/_api/tool/*）：平台公钥 + Agent Skill 落 _bootstrap/public/
+    //（幂等拷贝；首跑生成的 platform_rsa 此刻同步，Skill 宿主缺源时静默跳过待部署侧补）
+    for l in setup::refresh_bootstrap_public(&root) {
+        eprintln!("showroomctl: bootstrap-public: {l}");
+    }
     let st: S = Arc::new(AppState {
         root,
         nonces: Mutex::new(HashMap::new()),
@@ -203,6 +208,15 @@ async fn dispatch(
         return Err(ApiError::new("E_QUOTA", "body exceeds limit (json 1MB / import IMPORT_MAX_GB)"));
     }
     let q = qmap(uri);
+    // —— 工具分发（控制台内下载）：GET /_api/tool/<filename> ——
+    // 白名单三件（CLI 二进制 / Agent Skill / 平台公钥），文件在 _bootstrap/public/
+    //（setup 升级与服务启动时刷新）。白名单=精确字符串匹配：名单外（含 ../ 穿越形状、
+    // 空名字）一律 E_NOTFOUND，与未知端点同形；统一走上方 SR-SIG1 验签（无额外豁免）。
+    if method == "GET" {
+        if let Some(name) = path.strip_prefix("/_api/tool/") {
+            return tool_get(s, name).await;
+        }
+    }
     // 流式下行早返回（SPEC §10.4）：ndjson 流 / octet-stream 切片不走统一 JSON 响应体
     if method == "GET" && path == "/_api/logs-stream" {
         let project = qget(&q, "project")?;
@@ -702,6 +716,39 @@ async fn dispatch(
         _ => Err(ApiError::new("E_NOTFOUND", "no such endpoint")),
     };
     r.map(|j| j.into_response())
+}
+
+// —— 工具分发（GET /_api/tool/<filename>）：控制台内下载 CLI / Skill / 平台公钥 ——
+
+/// /_api/tool 白名单（精确字符串匹配；路径 = _bootstrap/public/<filename>）。
+pub const TOOL_WHITELIST: [&str; 3] = ["showroom", "showroom-publisher.md", "platform_rsa.pub"];
+
+/// 白名单内文件全量读取返回（showroom 二进制 ~5MB 内可接受，免流式分片）；
+/// Content-Type 按扩展名：无扩展名（二进制）→ octet-stream、.md → text/markdown、.pub → text/plain。
+/// 缺文件 → E_NOTFOUND（验签后的如实报错：提示部署侧未刷新 _bootstrap/public）。
+async fn tool_get(s: &S, name: &str) -> Result<Response, ApiError> {
+    let name = name.to_string(); // blk 闭包需 'static：先收所有权
+    if !TOOL_WHITELIST.contains(&name.as_str()) {
+        return Err(ApiError::new("E_NOTFOUND", format!("no such tool: {name}")));
+    }
+    let ct = if name.ends_with(".md") {
+        "text/markdown; charset=utf-8"
+    } else if name.ends_with(".pub") {
+        "text/plain; charset=utf-8"
+    } else {
+        "application/octet-stream"
+    };
+    let p = s.root.join("_bootstrap/public").join(&name);
+    let bytes = blk(move || {
+        std::fs::read(&p).map_err(|e| ApiError::new("E_NOTFOUND", format!("tool '{name}' 读取失败（_bootstrap/public 未刷新？）: {e}")))
+    })
+    .await?;
+    let resp = axum::response::Response::builder()
+        .header(axum::http::header::CONTENT_TYPE, ct)
+        .header(axum::http::header::CONTENT_LENGTH, bytes.len().to_string())
+        .body(Body::from(bytes))
+        .map_err(|e| ApiError::state(e.to_string()))?;
+    Ok(resp)
 }
 
 // —— body 收集：哈希始终可算完，验签失败者只见统一 404 ——
@@ -2006,6 +2053,92 @@ mod tests {
             &[("Authorization", authz("root", &admin_key, "POST", "/_api/admin/user-add", b3).as_str())]).await;
         assert_eq!(c, 400);
         assert!(b.starts_with(br#"{"error":"E_NAME""#));
+        let _ = std::fs::remove_dir_all(&s.root);
+    }
+
+    // ———— /_api/tool/*（控制台内下载）：白名单 / 验签 / 缺文件 / CT ————
+
+    /// 直调 api_inner 带响应头（call 只回 body；CT 断言用）。
+    async fn call_hdrs(s: &S, method: &str, path: &str, body: &[u8], headers: &[(&str, &str)])
+        -> (u16, axum::http::HeaderMap, Vec<u8>) {
+        let uri: axum::http::Uri = path.parse().unwrap();
+        let mut hm = HeaderMap::new();
+        for (k, v) in headers {
+            hm.insert(
+                axum::http::HeaderName::from_bytes(k.as_bytes()).unwrap(),
+                axum::http::HeaderValue::from_str(v).unwrap(),
+            );
+        }
+        let r = api_inner(
+            s,
+            &Method::from_bytes(method.as_bytes()).unwrap(),
+            &OriginalUri(uri),
+            &hm,
+            Body::from(body.to_vec()),
+        )
+        .await
+        .into_response();
+        let (parts, b) = r.into_parts();
+        let bytes = axum::body::to_bytes(b, 1 << 20).await.unwrap().to_vec();
+        (parts.status.as_u16(), parts.headers, bytes)
+    }
+
+    // 白名单三件可取（字节一致 + CT 按扩展名）；未签名/错签名 → 404 E_AUTH 零信息；
+    // 白名单外（含 ../ 穿越形状、空名）与缺文件 → E_NOTFOUND；POST 方法 → E_NOTFOUND。
+    #[tokio::test]
+    async fn tool_endpoint_whitelist_auth_and_missing() {
+        let root = troot("tool");
+        let k = showroom_common::UserKey::generate();
+        crate::ops::user_add(&root, "alice", Some(&k.pub_string()), false, false, crate::ops::InitPw::None).unwrap();
+        let s: S = Arc::new(test_state(root.clone()));
+
+        // 未签名 → 404 E_AUTH（与一切未签名请求同体，零信息）
+        let (c, b) = call(&s, "GET", "/_api/tool/showroom", b"", &[]).await;
+        assert_eq!((c, b.as_slice()), (404, E_AUTH_BODY));
+
+        // 部署态：_bootstrap/public 三件齐（内容可区分）
+        let dir = root.join("_bootstrap/public");
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("showroom"), b"\x7fELF-fake-bin").unwrap();
+        std::fs::write(dir.join("showroom-publisher.md"), "# Showroom 发布 skill").unwrap();
+        std::fs::write(dir.join("platform_rsa.pub"), "-----BEGIN PUBLIC KEY-----\n").unwrap();
+
+        // 签名 + 白名单三件：200 + 字节一致 + CT 按扩展名
+        let files = [
+            ("showroom", &b"\x7fELF-fake-bin"[..], "application/octet-stream"),
+            ("showroom-publisher.md", "# Showroom 发布 skill".as_bytes(), "text/markdown; charset=utf-8"),
+            ("platform_rsa.pub", "-----BEGIN PUBLIC KEY-----\n".as_bytes(), "text/plain; charset=utf-8"),
+        ];
+        for (name, want, ct) in files {
+            let path = format!("/_api/tool/{name}");
+            let (c, h, b) = call_hdrs(&s, "GET", &path, b"",
+                &[("Authorization", authz("alice", &k, "GET", &path, b"").as_str())]).await;
+            assert_eq!(c, 200, "{name}: {}", String::from_utf8_lossy(&b));
+            assert_eq!(b, want, "{name} 字节一致");
+            assert_eq!(h.get(axum::http::header::CONTENT_TYPE).unwrap(), ct, "{name} CT 按扩展名");
+        }
+
+        // 白名单外：未知名 / ../ 穿越形状（路径未解码也须拒）/ 空名 → E_NOTFOUND（404 + msg）
+        for bad in ["/_api/tool/showroomctl", "/_api/tool/../../../etc/passwd", "/_api/tool/", "/_api/tool/.hidden"] {
+            let (c, b) = call(&s, "GET", bad, b"",
+                &[("Authorization", authz("alice", &k, "GET", bad, b"").as_str())]).await;
+            assert_eq!(c, 404, "{bad}");
+            assert!(b.starts_with(br#"{"error":"E_NOTFOUND""#), "{bad}: {}", String::from_utf8_lossy(&b));
+        }
+
+        // 缺文件（白名单内但部署侧未刷新）：E_NOTFOUND 如实报（验签后，非零信息面）
+        std::fs::remove_file(dir.join("showroom-publisher.md")).unwrap();
+        let p2 = "/_api/tool/showroom-publisher.md";
+        let (c, b) = call(&s, "GET", p2, b"",
+            &[("Authorization", authz("alice", &k, "GET", p2, b"").as_str())]).await;
+        assert_eq!(c, 404);
+        assert!(b.starts_with(br#"{"error":"E_NOTFOUND""#));
+
+        // POST 方法 → 落主 match 未知端点 → E_NOTFOUND（只允许 GET）
+        let (c, b) = call(&s, "POST", "/_api/tool/showroom", b"",
+            &[("Authorization", authz("alice", &k, "POST", "/_api/tool/showroom", b"").as_str())]).await;
+        assert_eq!(c, 404);
+        assert!(b.starts_with(br#"{"error":"E_NOTFOUND""#));
         let _ = std::fs::remove_dir_all(&s.root);
     }
 }

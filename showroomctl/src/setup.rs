@@ -523,6 +523,7 @@ pub fn expected_dirs(root: &Path, host: &HostEnv) -> Vec<(PathBuf, u32)> {
     v.push((root.join("_console"), 0o755));
     v.push((root.join("_tmp"), 0o755));
     v.push((root.join("_bootstrap"), 0o755));
+    v.push((root.join("_bootstrap/public"), 0o755)); // /_api/tool/* 下发源（控制台内下载）
     if host.frp == FrpMode::Chmlfrp {
         v.push((PathBuf::from("/usr/local/frpc"), 0o755));
     }
@@ -1064,6 +1065,30 @@ fn is_active_api() -> bool {
     dockerops::run_tolerant("systemctl", &["is-active", "showroom-api"]) == "active"
 }
 
+/// _bootstrap/public 刷新（/_api/tool/* 下发源，控制台内下载）：幂等拷贝两件——
+/// - platform_rsa.pub：state/ → _bootstrap/public/（公钥本就公开，whoami 亦随发）
+/// - showroom-publisher.md：宿主 ~/.agents/skills/showroom-publisher/SKILL.md（Agent Skill；
+///   缺源静默跳过——部署脚本可直拷，serve 启动 / setup upgrade 时再收敛）
+/// 返回备注行（upgrade notes / serve 启动日志各取所需）。
+pub fn refresh_bootstrap_public(root: &Path) -> Vec<String> {
+    let dir = root.join("_bootstrap/public");
+    let mut notes = vec![];
+    if fs::create_dir_all(&dir).is_err() {
+        return notes; // 建目录失败（root 只读等）：留给调用方环境，静默不阻断启动/升级
+    }
+    if let Ok(n) = fs::copy(root.join("state/platform_rsa.pub"), dir.join("platform_rsa.pub")) {
+        notes.push(format!("platform_rsa.pub → _bootstrap/public（{n}B）"));
+    }
+    let home = std::env::var("HOME").unwrap_or_else(|_| "/root".to_string());
+    let skill = Path::new(&home).join(".agents/skills/showroom-publisher/SKILL.md");
+    if skill.is_file() {
+        if let Ok(n) = fs::copy(&skill, dir.join("showroom-publisher.md")) {
+            notes.push(format!("showroom-publisher.md → _bootstrap/public（{n}B）"));
+        }
+    }
+    notes
+}
+
 /// `showroomctl upgrade [--bin <path>]`（root；默认 /tmp/showroomctl，不存在 E_NOTFOUND）：
 /// 1 探针（--help 退出码 0，失败拒替）→ 2 落 .new（0755）→ 3 备份旧（保最近 3 份）→
 /// 4 同文件系统 rename 原子替换（禁 cp 覆盖式写入，不受运行中进程 ETXTBSY 影响）→
@@ -1146,6 +1171,10 @@ pub fn upgrade(bin: Option<&Path>) -> R<Value> {
     fs::copy(CTL_BIN, root.join("_bootstrap/showroomctl"))?;
     if Path::new("/usr/local/bin/showroom").exists() {
         fs::copy("/usr/local/bin/showroom", root.join("_bootstrap/showroom"))?;
+    }
+    // _bootstrap/public（/_api/tool/* 下发源）：平台公钥 + Agent Skill（幂等收敛）
+    for n in refresh_bootstrap_public(&root) {
+        notes.push(n);
     }
     notes.push("_bootstrap 已刷新（不碰 _console，wasm 随发布流程更新）".into());
 

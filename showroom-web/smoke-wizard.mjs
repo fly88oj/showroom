@@ -1476,6 +1476,14 @@ ok(html.includes('登录与账号') && html.includes('两把独立发放的密�
 ok(html.includes('专家路径：公钥与机器用户（CLI / CI）') && html.includes('showroom keygen') && html.includes('--pubkey')
   && html.includes('showroom login'),
   'plan-16 帮助页：保留 CLI/公钥专家节（keygen/user-add --pubkey/login）');
+// —— 工具下载（GET /_api/tool/*）：帮助页三行下载卡片 + 签名下载接线 ——
+ok(html.includes('工具下载') && html.includes('id="tool-tbl"') && (html.match(/data-tool-dl=/g) || []).length === 3,
+  '工具下载：帮助页三行下载卡片（CLI 二进制 / Agent Skill / 平台公钥）齐备');
+for (const t of ['showroom', 'showroom-publisher.md', 'platform_rsa.pub']) {
+  ok(html.includes(`data-tool-dl="${t}"`) && html.includes(`id="tool-size-${t}"`), `工具下载：${t} 行（按钮 + 大小列）存在`);
+}
+ok(html.includes('/_api/tool/') && html.includes('wireHelpTab') && html.includes('fmtToolSize'),
+  '工具下载：签名 GET /_api/tool/* → Blob 下载逻辑已接线（含大小回填）');
 // —— plan-16 收口：发卡初始密码 / 补发 / 改密入口 ——
 for (const ep of ['/_api/auth/pw-begin', '/_api/auth/pw-commit', '/_api/admin/passwd-set']) ok(html.includes(ep), `plan-16 §1.5/§2.2：${ep} 已接线`);
 ok(html.includes('id="btn-pwchange"') && html.includes('id="dlg-pw"') && html.includes('修改密码'), '改密入口：设置对话框聚合按钮 + 对话框容器');

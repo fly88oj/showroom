@@ -568,6 +568,32 @@
     </table></div>
     <p class="note">当前值可随时在展项列表「环境变量」里查看（<span class="mono">showroom env</span> 同）。</p>
 
+    <h2>工具下载</h2>
+    <div class="tbl-wrap"><table id="tool-tbl">
+      <thead><tr><th>文件</th><th>说明</th><th>大小</th><th></th></tr></thead>
+      <tbody>
+        <tr>
+          <td class="mono">showroom</td>
+          <td>CLI 二进制（Linux x86_64）：下载后 <span class="mono">chmod +x showroom</span> 放入 PATH（如 <span class="mono">~/.local/bin</span>）；建议校验完整性——<span class="mono">sha256sum showroom</span> 后与管理员核对校验值。</td>
+          <td class="mono" id="tool-size-showroom">—</td>
+          <td><button type="button" class="act" data-tool-dl="showroom">下载</button></td>
+        </tr>
+        <tr>
+          <td class="mono">showroom-publisher.md</td>
+          <td>Agent Skill（SKILL.md）：AI 助手的 Showroom 发布代理技能文件，存为 <span class="mono">~/.agents/skills/showroom-publisher/SKILL.md</span> 即可交给助手代为发布。</td>
+          <td class="mono" id="tool-size-showroom-publisher.md">—</td>
+          <td><button type="button" class="act" data-tool-dl="showroom-publisher.md">下载</button></td>
+        </tr>
+        <tr>
+          <td class="mono">platform_rsa.pub</td>
+          <td>平台公钥（PEM）：镜像上传与数据库恢复的加密信封公钥（登录后控制台已自动配置，此处供 CLI / 其他设备手工分发）。</td>
+          <td class="mono" id="tool-size-platform_rsa.pub">—</td>
+          <td><button type="button" class="act" data-tool-dl="platform_rsa.pub">下载</button></td>
+        </tr>
+      </tbody>
+    </table></div>
+    <p class="note">下载走与控制台其余操作相同的签名通道（<span class="mono">GET /_api/tool/&lt;文件名&gt;</span>）；文件大小在首次下载后显示。CLI 首次使用：<span class="mono">./showroom login &lt;账号&gt;</span> 输一次密码即自动配置本机。</p>
+
     <h2>CLI 命令对照</h2>
     <div class="tbl-wrap"><table>
       <thead><tr><th>控制台功能</th><th>CLI 等价命令</th></tr></thead>
@@ -1332,6 +1358,39 @@ async function respErr(resp) {
   try { j = JSON.parse(await resp.text()); } catch { /* 非 JSON */ }
   return { error: j?.error || 'E_NET', msg: j?.msg || `HTTP ${resp.status}` };
 }
+// —— 帮助页·工具下载（/_api/tool/*，签名 GET → Blob → a.download）——
+// 三件：CLI 二进制（Linux x86_64）/ Agent Skill（SKILL.md）/ 平台公钥（PEM）。
+// 大小不预取（简化）：首次下载从 Content-Length / blob.size 回填大小列。
+const fmtToolSize = (n) => {
+  if (!Number.isFinite(n) || n < 0) return '—';
+  if (n < 1024) return `${n} B`;
+  if (n < 1024 ** 2) return `${(n / 1024).toFixed(1)} KB`;
+  return `${(n / 1024 ** 2).toFixed(1)} MB`;
+};
+async function onToolDl(ev) {
+  const btn = ev.target.closest('button[data-tool-dl]');
+  if (!btn) return;
+  const name = btn.dataset.toolDl;
+  busy(btn, true, '下载中…');
+  try {
+    const resp = await apiDo('GET', `/_api/tool/${encodeURIComponent(name)}`, null);
+    if (!resp.ok) throw await respErr(resp);
+    const blob = await resp.blob();
+    const sizeCell = document.getElementById(`tool-size-${name}`);
+    if (sizeCell) sizeCell.textContent = fmtToolSize(blob.size); // 首次响应回填大小（不预取）
+    const a = document.createElement('a');
+    a.href = URL.createObjectURL(blob);
+    a.download = name;
+    a.click();
+    setTimeout(() => URL.revokeObjectURL(a.href), 60000);
+    showMsg(`已下载 ${name}（${fmtToolSize(blob.size)}）`, 'ok');
+  } catch (e) {
+    apiFail(`下载 ${name}`, e);
+  } finally { busy(btn, false); }
+}
+function wireHelpTab() {
+  document.getElementById('tool-tbl')?.addEventListener('click', onToolDl);
+}
 /** §10.4 ndjson 流式消费：流式 GET（空 body 签名=空串哈希，与普通签名 GET 相同）；
  *  行缓冲跨 chunk 拼行、逐行 JSON 回调（非法行静默丢弃）；reader 按消费节奏拉取（天然背压）；
  *  signal 中止 → fetch/reader 随之中断并抛 AbortError。 */
@@ -1489,9 +1548,10 @@ function buildApp() {
   $('pw-close').addEventListener('click', () => $('dlg-pw').close());
   $('pw-submit').addEventListener('click', onPwChange);
   for (const id of ['pw-cur', 'pw-new', 'pw-new2']) $(id).addEventListener('input', () => fieldErr(id, ''));
-  // 帮助页：环境变量清单表
+  // 帮助页：环境变量清单表 + 工具下载（/_api/tool/*）
   $('help-env-tbl').querySelector('tbody').innerHTML = Object.entries(ENV_DESC)
     .map(([k, d]) => `<tr><td class="mono">${esc(k)}</td><td class="wrap">${esc(d)}</td></tr>`).join('');
+  wireHelpTab();
   $('pub-project').value = randomProject(); // 页面加载（建壳）时预填一次随机名；「换一个」随时重随机
   updatePubUrl();
   wireTabs(); wireProjTab(); wireDbTab(); wireStatusTab();
