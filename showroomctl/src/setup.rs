@@ -273,7 +273,7 @@ WantedBy=multi-user.target
 // —— Caddyfile 渲染（plan-15 §2.2；快照测试覆盖三组合）——
 
 /// registry ∈ 集合才有 site A 的 /v2 handle；/_bootstrap、/_console、routes import 恒在；
-/// PUBLIC_HOST 空 → 不渲染 site B（纯内网主机）。非空 → site B 恒听 127.0.0.1:8080（frpc 转发目标）。
+/// PUBLIC_HOST 空 → 不渲染 site B（纯内网主机）。非空 → site B 用 :8080 纯端口匹配（frpc 转发流量 Host 是公网 IP，Host 匹配会漏）。
 pub fn render_caddyfile(mw: &BTreeSet<String>, lan: &str, public: &str) -> String {
     let mut s = String::from(
         "# ————— 公共片段：两个站点共用 —————\n\
@@ -317,7 +317,7 @@ pub fn render_caddyfile(mw: &BTreeSet<String>, lan: &str, public: &str) -> Strin
         s.push_str(&format!(
             "\n# ————— site B：公网面（frp 等公网隧道流量命中的站点）—————\n\
              # 公网发布走加密 import 通道，不放 /v2；/_bootstrap 返回 404。\n\
-             http://127.0.0.1:8080 {{\n\
+             http://:8080 {{\n\
              \timport showroom-app\n\
              }}\n"
         ));
@@ -1431,7 +1431,7 @@ mod tests {
         assert!(a.contains("http://lan.example {"));
         assert!(a.contains("handle /v2/* {"), "registry 在集合 → site A 有 /v2");
         assert!(a.contains("reverse_proxy 127.0.0.1:5000"));
-        assert!(a.contains("http://127.0.0.1:8080 {"), "PUBLIC_HOST 非空 → site B 听 8080");
+        assert!(a.contains("http://:8080 {"), "PUBLIC_HOST 非空 → site B 纯端口匹配");
         assert!(a.contains("precompressed zstd"), "file_server precompressed 恒渲染");
         assert!(a.contains("import /srv/showroom/state/routes/*.caddy"));
         assert!(a.contains("handle_path /_bootstrap/* {"));
@@ -1439,7 +1439,7 @@ mod tests {
         let b = render_caddyfile(&no_reg, "lan.example", "pub.example");
         assert!(!b.contains("handle /v2/*"), "registry 缺 → 无 /v2 块");
         assert!(!b.contains("127.0.0.1:5000"), "registry 缺 → 不反代 registry");
-        assert!(b.contains("http://127.0.0.1:8080 {"));
+        assert!(b.contains("http://:8080 {"));
 
         let c = render_caddyfile(&full, "lan.example", "");
         assert!(!c.contains("site B"), "PUBLIC_HOST 空 → 不渲染 site B");
@@ -1482,7 +1482,7 @@ mod tests {
              \n\
              # ————— site B：公网面（frp 等公网隧道流量命中的站点）—————\n\
              # 公网发布走加密 import 通道，不放 /v2；/_bootstrap 返回 404。\n\
-             http://127.0.0.1:8080 {\n\
+             http://:8080 {\n\
              \timport showroom-app\n\
              }\n"
         );
