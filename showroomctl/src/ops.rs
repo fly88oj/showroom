@@ -209,12 +209,13 @@ pub fn reconcile(root: &Path) -> Vec<String> {
         eprintln!("showroomctl: reconcile: state dirs migrated (owners -> users)");
     }
     let mut log = migrate_legacy(root);
+    let statuses = dockerops::all_container_status(); // 批量取（P2：N+1→1）
     for (p, c) in state::all_confs(root) {
         if c.stopped {
             continue;
         }
         let name = publish::container_name(&p);
-        match dockerops::container_status(&name) {
+        match statuses.get(&name).map(|s| s.as_str()).map(str::to_string) {
             None => match publish::publish(root, &c.user, &p, &c.tag, PublishOpts {
                 mem: Some(c.mem.clone()),
                 cpu: Some(c.cpu),
@@ -252,12 +253,13 @@ pub fn reconcile(root: &Path) -> Vec<String> {
 /// stopped=1 跳过；容器缺失→重建；退出→start；unhealthy→restart。
 pub fn autoheal(root: &Path) -> Vec<String> {
     let mut log = migrate_legacy(root);
+    let statuses = dockerops::all_container_status(); // 批量取（P2：N+1→1）
     for (p, c) in state::all_confs(root) {
         if c.stopped {
             continue;
         }
         let name = publish::container_name(&p);
-        match dockerops::container_status(&name) {
+        match statuses.get(&name).map(|s| s.as_str()).map(str::to_string) {
             None => match publish::publish(root, &c.user, &p, &c.tag, PublishOpts {
                 mem: Some(c.mem.clone()),
                 cpu: Some(c.cpu),
@@ -460,36 +462,44 @@ pub fn images(root: &Path, user: Option<&str>) -> R<Vec<String>> {
         .map(|a| a.iter().filter_map(|v| v.as_str().map(str::to_string)).collect())
         .unwrap_or_default();
 
-    let mut catalog: Vec<(String, Vec<String>)> = vec![];
-    for repo in repos {
-        if let Some(o) = user {
-            if !state::repo_owned_by(&repo, o) {
-                continue; // 别人的 repo 不取 tags（省 HTTP，也免 tag 计入上限）
-            }
-        }
-        if catalog.len() >= state::IMAGES_MAX_REPOS {
-            break;
-        }
-        let (code, _, body) = dockerops::http_registry(root, "GET", &format!("/v2/{repo}/tags/list"), None)?;
-        if code != 200 {
-            eprintln!("showroomctl: images: {repo}: tags/list HTTP {code}");
-            continue;
-        }
-        let tags: Vec<String> = match serde_json::from_slice::<Value>(&body) {
-            Ok(v) => v["tags"]
-                .as_array()
-                .map(|a| a.iter().filter_map(|t| t.as_str().map(str::to_string)).collect())
-                .unwrap_or_default(),
-            Err(e) => {
-                eprintln!("showroomctl: images: {repo}: tags json: {e}");
-                continue;
-            }
-        };
-        catalog.push((repo, tags));
-        if catalog.iter().map(|(_, t)| t.len()).sum::<usize>() >= state::IMAGES_MAX_TAGS {
-            break; // 已够上限，不再发起剩余 repo 的 tags/list
-        }
-    }
+    // 过滤到目标 repos，并行拉 tags（P1 并发修复：N repo 串行→并行）
+    let targets: Vec<String> = repos
+        .into_iter()
+        .filter(|repo| user.map(|o| state::repo_owned_by(repo, o)).unwrap_or(true))
+        .take(state::IMAGES_MAX_REPOS)
+        .collect();
+    let results: Vec<(String, Vec<String>)> = std::thread::scope(|scope| {
+        let handles: Vec<_> = targets
+            .iter()
+            .map(|repo| {
+                scope.spawn(move || {
+                    let (code, _, body) = match dockerops::http_registry(root, "GET", &format!("/v2/{repo}/tags/list"), None) {
+                        Ok(v) => v,
+                        Err(_) => return (repo.clone(), vec![]),
+                    };
+                    if code != 200 {
+                        eprintln!("showroomctl: images: {repo}: tags/list HTTP {code}");
+                        return (repo.clone(), vec![]);
+                    }
+                    let tags: Vec<String> = serde_json::from_slice::<Value>(&body)
+                        .ok()
+                        .and_then(|v| v["tags"].as_array().map(|a| a.iter().filter_map(|t| t.as_str().map(str::to_string)).collect()))
+                        .unwrap_or_default();
+                    (repo.clone(), tags)
+                })
+            })
+            .collect();
+        handles.into_iter().filter_map(|h| h.join().ok()).collect()
+    });
+    // 排序保持确定性（scope 并行完成顺序不确定）
+    let mut catalog: Vec<(String, Vec<String>)> = results;
+    catalog.sort_by(|a, b| a.0.cmp(&b.0));
+    // 上限裁剪（并行拉完后统一截）
+    let mut total = 0usize;
+    catalog.retain(|(_, tags)| {
+        total += tags.len();
+        total <= state::IMAGES_MAX_TAGS
+    });
     Ok(state::flatten_images(&catalog, user))
 }
 

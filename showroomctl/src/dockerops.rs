@@ -162,7 +162,7 @@ pub fn db_exists(db: &str) -> R<bool> {
 /// 容器状态（docker inspect .State.Status）；容器不存在 → None。
 /// 批量取全部容器名→状态（一次 docker ps 替代 N 次 docker inspect；P1 性能修复）
 pub fn all_container_status() -> HashMap<String, String> {
-    let out = docker(&["ps", "-a", "--format", "{{.Names}}\t{{.State.Status}}"])
+    let out = docker(&["ps", "-a", "--format", "{{.Names}}\t{{.State}}"])
         .unwrap_or_default();
     out.lines()
         .filter_map(|l| {

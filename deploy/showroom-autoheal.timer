@@ -2,8 +2,8 @@
 Description=Showroom autoheal every 5 min
 
 [Timer]
-OnBootSec=3min
-OnUnitActiveSec=5min
+OnBootSec=1min
+OnUnitActiveSec=2min
 
 [Install]
 WantedBy=timers.target

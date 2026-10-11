@@ -6,6 +6,7 @@ members = ["showroom-common", "showroomctl", "showroom"]
 lto = "thin"
 strip = true
 
+
 # —— 测试提速（纪律与数字见 TESTING.md §3）——
 # 两层结构，各治一半慢：
 # 1) [profile.test] opt-level=1：AEAD/CTR/GHASH 这类泛型加密代码在调用方 crate 单态化，

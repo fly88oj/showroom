@@ -10,7 +10,7 @@ Type=simple
 EnvironmentFile=-/etc/showroom/showroom.env
 ExecStart=/usr/local/bin/showroomctl serve
 Restart=always
-RestartSec=3
+RestartSec=1
 # 状态与配置都在 /srv/showroom
 WorkingDirectory=/srv/showroom
 
