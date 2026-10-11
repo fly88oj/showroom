@@ -174,6 +174,9 @@
   #st-logs { min-height: 10em; }
   /* plan-17 S2：行抽屉（日志跟随）——插在展项行后，data-drawer 标注所属项目 */
   .drawer-row > td { background: var(--bg-input); }
+  /* plan-17 S6：卡片副题「已加载 N 项 · HH:MM:SS」——整段可点重取（无手动刷新按钮） */
+  .sub { background: none; border: none; color: var(--fg-dim); font-size: 12px; font-weight: 400; padding: 2px 6px; cursor: pointer; }
+  .sub:hover { color: var(--fg); background: var(--bg-input); }
   /* plan-17 S4：行内「更多 ▾」菜单（回滚/环境变量/数据/删除） */
   .more-wrap { position: relative; display: inline-block; }
   .more-wrap .menu {
@@ -311,8 +314,7 @@
     <h2>展项列表</h2>
     <div class="warnbar hidden" id="proj-base-note">正在用内网地址展示 URL：可在<button type="button" id="btn-base-note-settings" class="act">设置</button>中配置「对外访问域名」（公网域名）。</div>
     <div class="row">
-      <button id="btn-refresh">刷新列表</button>
-      <span class="fb" id="proj-fb" aria-live="polite"></span>
+      <button type="button" id="proj-fb" class="sub" title="点击重新加载展项列表（自动加载；事件到达亦自动刷新）" aria-label="刷新展项列表"></button>
     </div>
     <div class="tbl-wrap">
       <table id="proj-tbl">
@@ -405,7 +407,7 @@
 
   <!-- ———— 标签页 3：镜像库（plan-17 §1：镜像清单/删除/断点续传收纳） ———— -->
   <section id="tab-img" class="hidden" role="tabpanel" aria-labelledby="tabbtn-img">
-    <h2>镜像库</h2>
+    <h2>镜像库 <button type="button" id="img-sub" class="sub" title="点击重新加载镜像清单（自动加载）" aria-label="重新加载镜像清单"></button></h2>
     <p class="note">镜像清单来自 <span class="mono">/_api/images</span>（发布页选「镜像库」源时下拉同此数据，自动加载）；默认仅列出您名下的镜像，管理员钥匙可见全部账号的镜像并标注「管理员视图」。每行可删除不再使用的旧镜像：删除即触发回收（秒级释放磁盘），正在运行的展项不受影响，但其回滚/重建将失效。</p>
     <!-- §14.3 镜像清单：与发布表单「镜像库」下拉同源 /_api/images 数据；每行「删除」走 POST /_api/image-rm（内联 GC，秒级回收磁盘） -->
     <div class="tbl-wrap tbl-low">
@@ -427,7 +429,6 @@
       <!-- §14.1 空间条：常显「可用空间（已扣预留）」；进入本区 / import-end 成功 / 删除镜像后自动刷新，亦可手动刷新 -->
       <div class="row">
         <div id="space-note" class="note" aria-live="polite">可用空间（已扣预留）：…</div>
-        <button type="button" id="space-refresh" title="重新查询磁盘可用空间">刷新空间</button>
       </div>
       <div class="mt-3">
         <progress id="up-prog" max="1" value="0"></progress>
@@ -447,7 +448,6 @@
     <div class="grid">
       <label class="field" for="db-project"><span>项目</span>
         <input type="text" id="db-project" list="dl-projects" required size="12" pattern="[a-zA-Z0-9][a-zA-Z0-9-]{0,30}"></label>
-      <button id="btn-db-fill">载入项目清单</button>
     </div>
     <p class="note">只能操作本人名下项目对应的数据库；全部操作有签名与审计。</p>
 
@@ -1035,6 +1035,13 @@ const dataAt = { projects: 0, images: 0, space: 0 };
 const dataFresh = (k) => Date.now() - dataAt[k] < DATA_TTL[k];
 const dataMark = (k) => { dataAt[k] = Date.now(); };
 const dataInvalidate = (...ks) => ks.forEach((k) => { dataAt[k] = 0; });
+// plan-17 §3：失败 3 秒自动重试 1 次（每轮失败episode 一次；再败走副题/内联手点）
+const retriedAt = {};
+function retryOnce(key, fn, delay = 3000) {
+  if (Date.now() - (retriedAt[key] || 0) < 10000) return;
+  retriedAt[key] = Date.now();
+  setTimeout(() => { if (state.loggedIn) fn(); }, delay);
+}
 
 // —— 密钥状态（localStorage：sr.seed hex64 / sr.user / sr.pempub）——
 const state = { seed: null, pub: '', user: '', loggedIn: false, projects: [], kid: '', admin: false, boundAdmin: false };
@@ -1497,6 +1504,7 @@ document.addEventListener?.('visibilitychange', () => {
 });
 function logout() {
   state.loggedIn = false;
+  clearTimeout(whoamiTimer);
   if (adminBuilt) { // 管理页定时器与发卡/补发/扩容对话框随登录态收尾
     clearInterval(adTimer); adTimer = null; $('ad-st-auto').checked = false;
     if ($('dlg-user-add').open) $('dlg-user-add').close();
@@ -1682,7 +1690,7 @@ function activateTab(name) {
   for (const s of tabs) $(`tab-${s}`).classList.toggle('hidden', s !== name);
   if (name === 'proj') { refreshProjects(); refreshSpace(); } // TTL 内跳过（plan-17 §3）
   if (name === 'pub') ensureImages();                       // 发布页镜像下拉数据源（TTL 300s）
-  if (name === 'img') { ensureImages(); refreshSpace(); }   // 镜像库：清单 + 空间条
+  if (name === 'img') { ensureImages(); refreshSpace(true); } // 镜像库：清单（TTL）+ 空间条强制校准（上传准入关键信息，§14.1 进入本区即刷新）
   if (name === 'proj') { evLive.want = true; startEventsStream(); } // 展项页可见即订阅（§3）
   else stopEventsStream();                                  // 离页退订（服务端收尸 docker events 子进程）
   if (name === 'db') { ensureRedisDbs(); fillDbTargets(); } // Redis 区首次展开惰性拉库号；下拉消费已加载 projects
@@ -1711,6 +1719,7 @@ const switchTab = activateTab;
 // ================ §12.2 管理员标签（whoami admin=true 才渲染；否则 DOM 不存在） ================
 let adminBuilt = false, adTimer = null;
 let naGenPw = ''; // 发卡对话框已生成未发放的登录初始密码（发放成功即清空，防旧密码误发二次）
+let whoamiTimer = null;
 async function syncAdmin() {
   let isAdmin = false;
   try {
@@ -1722,7 +1731,13 @@ async function syncAdmin() {
       localStorage.setItem('sr.pempub', j.platform_pem);
     }
     isAdmin = !!j.admin;
-  } catch (e) { apiFail('身份查询（whoami）', e); }
+    clearTimeout(whoamiTimer);
+  } catch (e) {
+    apiFail('身份查询（whoami）', e);
+    const role = $('hd-role'); if (role) role.textContent = '?'; // 徽标回落 ?
+    clearTimeout(whoamiTimer);
+    whoamiTimer = setTimeout(() => { if (state.loggedIn) syncAdmin(); }, 60000); // §3：? 60s 周期重试
+  }
   state.admin = isAdmin; // §13.1/§13.2：镜像清单与 Redis 浏览据此标注「管理员视图」
   const role = $('hd-role'); if (role) role.textContent = isAdmin ? '管理员' : '发布者'; // plan-17 §1 角色徽标（whoami 未回=?）
   refreshAdminBadge(); // whoami 落定后同步顶栏角标（纯呈现）
@@ -2118,10 +2133,10 @@ async function onRedisXRun() { // confirm=true：停旧容器 → 新容器带 -
 
 // ================ 标签页 1：展项管理（§13.1 三入口并存） ================
 function wireProjTab() {
-  $('btn-refresh').addEventListener('click', refreshProjects);
+  $('proj-fb').addEventListener('click', () => refreshProjects(true)); // 副题手点重取（§3）
+  $('img-sub').addEventListener('click', () => ensureImages(true));
   $('proj-tbl').addEventListener('click', onProjAction);
   $('img-list').addEventListener('click', onImageRm);                       // §14.3：镜像清单行删除（事件委托）
-  $('space-refresh').addEventListener('click', () => refreshSpace(true));      // §14.1：空间条手动刷新（绕过 TTL）
   $('pub-form').addEventListener('submit', onDeploy); // 单表单提交：tar→压缩+上传+发布 / 镜像库→直接发布（plan-17 §5）
   $('btn-upload-only').addEventListener('click', onUploadOnly); // 次要按钮「仅上传」：同一 tar，只入库不部署
   for (const r of ['tar', 'registry']) $(`pub-src-${r}`).addEventListener('change', () => pickPubSource(r));
@@ -2159,12 +2174,12 @@ async function ensureImages(force = false) {
     imagesLoaded = true;
     dataMark('images');
     const adminView = j.admin_view ?? state.admin; // 服务端标注优先，回退 whoami 结论
-    $('dep-images-fb').textContent = adminView
-      ? `管理员视图：已列出全部账号镜像 ${images.length} 个`
-      : `已列出您名下的镜像 ${images.length} 个`;
-  } catch (e) {
+    $('img-sub').textContent = `${adminView ? '管理员视图 · ' : ''}已加载 ${images.length} 项 · ${new Date().toLocaleTimeString()}`; // 副题可点重取
     $('dep-images-fb').textContent = '';
-    apiFail('镜像清单加载', e); // 下一步动作在错误码文案中给出
+  } catch (e) {
+    $('dep-images-fb').textContent = '镜像清单加载失败，可切到镜像库页点副题重试';
+    $('img-sub').textContent = '加载失败';
+    retryOnce('images', () => ensureImages(true)); // §3：3s 自动重试 1 次
   }
 }
 /** §14.3 镜像清单渲染：部署 ComboBox 同源数据；每行尾「删除」按钮（POST /_api/image-rm，内联 GC 秒级回收）。 */
@@ -2249,18 +2264,20 @@ function pubPrefill(project, opts = {}) {
 async function refreshProjects(force = false) {
   if (!force && dataFresh('projects')) return; // plan-17 §3：TTL 内跳过（内存单源）
   const tb = $('proj-tbl').querySelector('tbody');
-  tb.innerHTML = '<tr><td colspan="6" class="note">加载中…</td></tr>';
+  if (tb) tb.innerHTML = '<tr><td colspan="7" class="note">加载中…</td></tr>';
   try {
     const j = await api('GET', '/_api/projects');
     state.projects = j.projects || [];
     renderProjects();
     dataMark('projects');
-    $('proj-fb').textContent = `已加载 ${state.projects.length} 个展项（${new Date().toLocaleTimeString()}）`;
+    $('proj-fb').textContent = `已加载 ${state.projects.length} 项 · ${new Date().toLocaleTimeString()}`; // 副题可点重取
     $('proj-base-note')?.classList.toggle('hidden', !usingLanOrigin()); // 兜底 origin 为内网时提示
     fillDbTargets();
   } catch (e) {
-    tb.innerHTML = '';
-    apiFail('展项列表加载', e);
+    // §3 失败表现：表格内联「加载失败 + 重试」（顶部条不打扰）+ 3s 自动重试 1 次
+    if (tb) tb.innerHTML = `<tr><td colspan="7" class="note">加载失败 · ${esc(errText(e))}　<button type="button" class="act" data-act="retry-projects">重试</button></td></tr>`;
+    $('proj-fb').textContent = `加载失败 · ${new Date().toLocaleTimeString()}`;
+    retryOnce('projects', () => refreshProjects(true));
   }
 }
 function renderProjects() {
@@ -2323,6 +2340,7 @@ async function onProjAction(ev) {
   if (act === 'env') return showEnvDlg(project);
   if (act === 'logs') { closeMoreMenu(); return openDrawer(project); } // plan-17 §1：日志随行抽屉展开（J3 ≤2 点击）
   if (act === 'more') return toggleMoreMenu(btn);
+  if (act === 'retry-projects') { btn.disabled = true; return refreshProjects(true); } // 内联重试（§3）
   closeMoreMenu();
   if (act === 'update' || act === 'deploy-row') { // 待部署行「部署」=发布页预填项目名（§4）
     const row = state.projects.find((x) => x.project === project);
@@ -2751,7 +2769,6 @@ async function onResumeUpload() {
 
 // ================ 标签页 2：数据库（SPEC §9） ================
 function wireDbTab() {
-  $('btn-db-fill').addEventListener('click', fillDbTargets);
   // Redis 浏览（§10.3；S2 自状态页迁入数据页）
   $('rd-refresh').addEventListener('click', refreshRedisKeys);
   $('rd-q').addEventListener('keydown', (ev) => { if (ev.key === 'Enter') { ev.preventDefault(); refreshRedisKeys(); } });

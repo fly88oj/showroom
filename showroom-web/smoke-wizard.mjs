@@ -638,7 +638,7 @@ ok(!wireTexts.some((t) => t.includes('alice-pw') || t.includes('wrong-pw')),
   'OPAQUE 断言：全部上线请求体（含 ke1/ke3 与签名体）均无密码明文（mock 垫片形状级验证）');
 ok(!($s('msg').textContent || '').includes('继承管理员'), '非管理员账号：无 admin 继承提示');
 await sleep(60); // 展项列表异步渲染
-ok(($s('proj-fb').textContent || '').includes('已加载 2 个展项'), '展项列表已请求并渲染');
+ok(($s('proj-fb').textContent || '').includes('已加载 2 项 · '), '展项列表已请求并渲染（副题「已加载 N 项 · HH:MM:SS」）');
 {
   const ptbl = $s('proj-tbl:q').innerHTML || '';
   ok(ptbl.includes('>●</span> 运行中') && ptbl.includes('>●</span> 待部署'), 'S5：●+文字双通道状态（运行中/待部署）');
@@ -674,7 +674,7 @@ ok(imagesN === 1, '进入管理壳（发布区）：/_api/images 惰性加载一
 ok(($s('dl-images').innerHTML || '').includes('alice/demo:v1') && ($s('dl-images').innerHTML || '').includes('alice/demo2:v2'),
   '镜像清单填充 ComboBox（datalist）');
 ok(!($s('dl-images').innerHTML || '').includes('bob/other'), '普通用户：清单不含他人镜像（服务端按 user 过滤）');
-ok(($s('dep-images-fb').textContent || '').includes('您名下的镜像 2 个'), '普通用户：清单计数提示「您名下」');
+ok(($s('img-sub').textContent || '').includes('已加载 2 项'), 'S6：镜像库副题「已加载 N 项 · HH:MM:SS」（普通用户无管理员前缀）');
 // S3：手动「刷新镜像清单」按钮随部署 fieldset 溶解而删除（plan-17 §0-5：显式刷新归零，TTL+写路径失效取代；
 // 强制重取路径由 whoami admin 后 ensureImages(true) 与镜像删除后重取覆盖）
 
@@ -682,15 +682,17 @@ ok(($s('dep-images-fb').textContent || '').includes('您名下的镜像 2 个'),
 ok(spaceN >= 1, '进入发布区：/_api/space 已拉取（空间条常显）');
 ok(($s('space-note').textContent || '') === '可用空间（已扣预留）：20.0 GB',
   '空间条：显示 available−reserve（40960−20480 MB → 20.0 GB，一位小数）');
+// S6：手动「刷新空间」按钮归零——镜像库页进入即强制校准（§14.1 进入本区自动刷新）
 let spBase = spaceN;
-click('space-refresh');
-await sleep(40);
-ok(spaceN > spBase, '「刷新空间」按钮手动重取');
 spaceFail = true;
-click('space-refresh');
+clickTab('img');
 await sleep(40);
 ok(($s('space-note').textContent || '') === '空间信息不可用', '空间拉取失败：静默显示「空间信息不可用」（不上顶部条、不阻断表单）');
 spaceFail = false;
+clickTab('img');
+await sleep(40);
+ok(spaceN > spBase && ($s('space-note').textContent || '').includes('20.0 GB'), '切镜像库页强制校准空间条（原「刷新空间」职责）');
+clickTab('proj');
 let ilist = $s('img-list:q').innerHTML || '';
 ok(ilist.includes('alice/demo:v1') && ilist.includes('alice/demo2:v2') && ilist.includes('删除'),
   '镜像清单（img-list）：与部署 ComboBox 同源渲染 + 每行「删除」按钮');
@@ -1066,8 +1068,8 @@ ok(els.has('ad-users-tbl') && els.has('ad-st-auto') && els.has('ad-refresh'),
   'whoami admin=true：管理区 DOM 渲染（第五「管理」标签随 whoami 构建）');
 
 // —— §13.1/§13.2 管理员视图：镜像清单（whoami 回退标注）+ Redis 浏览（admin_view 标注） ——
-ok(await waitFor(() => ($s('dep-images-fb').textContent || '').includes('管理员视图'), 5000),
-  'admin 钥匙：镜像清单标注「管理员视图」（whoami 落定后按需重取）');
+ok(await waitFor(() => ($s('img-sub').textContent || '').includes('管理员视图'), 5000),
+  'admin 钥匙：镜像清单副题标注「管理员视图」（whoami 落定后按需重取）');
 ok(($s('dl-images').innerHTML || '').includes('bob/other'), 'admin 钥匙：镜像清单含他人镜像（全量）');
 
 // —— 管理页：账号与钥匙表 + 平台状态面板（§12.2） ——
@@ -1645,8 +1647,8 @@ ok(html.includes('onImagePick'), '§5：镜像库源选中即带出项目/标签
 ok(html.includes('仅显示您名下项目的库') && html.includes('管理员视图'), '§13.2/13.3：Redis 浏览隔离文案 + 管理员视图标注');
 ok(html.includes('界面级/协作级隔离') || html.includes('界面级'), '§13.2：诚实边界文案（非安全边界）');
 // —— §14 磁盘空间显示 + 镜像删除 ——
-ok(html.includes('/_api/space') && html.includes('id="space-note"') && html.includes('id="space-refresh"'),
-  '§14.1：/_api/space 接线 + 空间条容器 + 手动刷新按钮');
+ok(html.includes('/_api/space') && html.includes('id="space-note"'),
+  '§14.1：/_api/space 接线 + 空间条容器（手动刷新按钮按 plan-17 §0-5 归零）');
 ok(html.includes('可用空间（已扣预留）') && html.includes('空间信息不可用'), '§14.1：空间条文案（常显口径 + 失败静默降级）');
 ok(html.includes('id="img-list"') && html.includes('/_api/image-rm'), '§14.3：镜像清单渲染容器 img-list + image-rm 接线');
 ok(html.includes('回滚/重建将失效') && html.includes('已回收约'), '§14.3：删除 confirm 影响文案 + alert 回收量文案');
@@ -1667,6 +1669,14 @@ for (const id of ['hs-mw-postgres', 'hs-mw-redis', 'hs-mw-registry', 'hs-p-redis
   ok(html.includes(`for="${id}"`), `§15 规范：控件 label for="${id}"`);
 }
 ok(html.includes('warnbar') && html.includes('.warnbar.err'), '§15：黄条/红条样式（漂移、池余量、受影响项目警示）');
+ok(!html.includes('id="btn-refresh"') && !html.includes('id="btn-db-fill"') && !html.includes('id="space-refresh"')
+  && !html.includes('id="dep-images-refresh"'),
+  'S6/验收 3：手动加载按钮 DOM 归零（刷新列表/载入项目清单/刷新空间/刷新镜像清单）');
+ok(!html.includes('载入项目清单') && !html.includes('刷新镜像清单') && !html.includes('刷新列表'),
+  'S6/验收 3：「载入项目清单」「刷新镜像清单」文案零残留');
+ok(html.includes('class="sub"') && html.includes('retryOnce') && html.includes('retry-projects'),
+  'S6/§3：卡片副题可点重取 + 失败内联「重试」+ 3s 自动重试一次');
+ok(html.includes('60s 周期重试') || html.includes('60000'), 'S6/§3：whoami 失败 ? 徽标 60s 周期重试');
 ok(html.includes('redis_databases') && html.includes('confirm_required'), '§15.3：扩容第二形态提交体 redis_databases 与 confirm_required 语义已接线');
 // —— 界面规范静态断言（B 部分逐条） ——
 ok(!/<div[^>]+onclick|onclick=/.test(html), '规范：无内联事件（含 div onclick）');
