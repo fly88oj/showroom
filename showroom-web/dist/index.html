@@ -183,6 +183,7 @@
     background: var(--bg-card); border: 1px solid var(--accent-bd); border-radius: var(--r);
     padding: var(--sp-2); box-shadow: 0 4px 16px rgba(0,0,0,.4);
   }
+  .more-wrap .menu.hidden { display: none; } /* 双类优先级：显式压过 .more-wrap .menu 的 flex（否则菜单常开遮挡下方行） */
   /* Redis 浏览：左右两栏滚动容器统一高度 */
   .rd-panes { align-items: flex-start; gap: var(--sp-4); }
   .rd-keys-pane { flex: 0 0 300px; }
@@ -323,6 +324,7 @@
       </table>
     </div>
     <p class="note">仅展示对外可见信息；主机端口等内部细节不在此显示。删除会一并移除容器/路由/数据库与凭据。</p>
+  </section>
 
   <!-- ———— 标签页 2：发布（plan-17 §5：全站唯一参数输入处） ———— -->
   <section id="tab-pub" class="hidden" role="tabpanel" aria-labelledby="tabbtn-pub">
@@ -434,10 +436,6 @@
       </div>
       <p class="note">上传前先在本地压缩（zstd-19，已是压缩格式则跳过），再按 8MB 分片逐片加密上传——压缩后上传更省流量；每片失败自动重试 3 次；中断后凭上传编号 + 本地会话记录续传（需重新选择同一文件，恢复时会先重新压缩以重建产物）；发布/仅上传失败后的「重试」也走同一续传通道。陈旧会话由服务端清理。</p>
     </div>
-    <datalist id="dl-projects"></datalist>
-    <datalist id="dl-mem"><option value="128m"></option><option value="256m"></option><option value="512m"></option><option value="1g"></option></datalist>
-  </section>
-
   </section>
 
   <!-- ———— 标签页 2：数据库（SPEC §9） ———— -->
@@ -1494,6 +1492,12 @@ function enterApp() {
   });
   evLive.want = true; startEventsStream(); // 进页即订阅事件流（展项页为默认落地页；验收 11 ≤5s 行状态收敛）
 }
+// 断网恢复钩子（§3/验收 8）：连网恢复即重订阅事件流 + 强制重取展项列表（免刷新自动补齐）
+if (typeof window !== 'undefined') window.addEventListener('online', () => {
+  if (!state.loggedIn) return;
+  evLive.want = true; startEventsStream();
+  refreshProjects(true); refreshSpace(true);
+});
 // 事件流可见性钩子（§3）：页签隐藏退订（服务端收尸子进程）、回开展项页自动重订
 document.addEventListener?.('visibilitychange', () => {
   if (!state.loggedIn) return;
@@ -2270,7 +2274,6 @@ async function refreshProjects(force = false) {
     renderProjects();
     dataMark('projects');
     $('proj-fb').textContent = `已加载 ${state.projects.length} 项 · ${new Date().toLocaleTimeString()}`; // 副题可点重取
-    $('proj-base-note')?.classList.toggle('hidden', !usingLanOrigin()); // 兜底 origin 为内网时提示
     fillDbTargets();
   } catch (e) {
     // §3 失败表现：表格内联「加载失败 + 重试」（顶部条不打扰）+ 3s 自动重试 1 次
@@ -2297,6 +2300,7 @@ function renderProjects() {
     }).join('');
     tb.innerHTML = acts;
   }
+  $('proj-base-note')?.classList.toggle('hidden', !usingLanOrigin()); // 兜底 origin 为内网才提示（配置 base 即收敛）
   // 行抽屉常驻：重渲后重新挂回（hidden 状态保持；展开时移到原项目行后不丢抽屉）
   const tbEl = $('proj-tbl')?.querySelector?.('tbody');
   if (tbEl && !tbEl.contains?.(drawerRow)) tbEl.append?.(drawerRow);
