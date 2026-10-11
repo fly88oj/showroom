@@ -68,6 +68,12 @@ enum Cmd {
         #[arg(long, value_enum, default_value = "auto")]
         via: Via,
     },
+    /// 安装 Agent Skill 到 ~/.agents/skills/showroom-publisher/
+    Skill {
+        /// 子动作：install（默认）
+        #[arg(default_value = "install")]
+        action: String,
+    },
     /// 一键部署（SPEC §12.1）= push（--via auto 语义）+ publish --wait + 打印最终 URL；
     /// 任一步失败即停，报错标明已到第几步
     Deploy {
@@ -215,6 +221,91 @@ fn run(cli: &Cli) -> Result<(), String> {
             config_cmd(&cfg, user, server_lan, server_public, registry_user, registry_password)
         }
         Cmd::Push { project, tag, via } => push(&cfg, cli.server, project, tag, *via),
+        Cmd::Skill { action } => {
+            if action != "install" { return Err(format!("未知动作：{action}（当前仅支持 install）")); }
+            let skill_dir = std::env::var("HOME")
+                .map(|h| std::path::PathBuf::from(h).join(".agents/skills/showroom-publisher"))
+                .map_err(|_| "无法确定 HOME 目录")?;
+            std::fs::create_dir_all(&skill_dir).map_err(|e| format!("创建目录失败：{e}"))?;
+            // SKILL.md 从 /_bootstrap 下载或内嵌
+            const SKILL_MD: &str = r##"---
+name: showroom-publisher
+description: 把 Docker 镜像形式的 Demo/演示程序发布到 showroom 展示平台（dejoy-node，内网 192.168.4.55 / 公网 47.107.155.180:10100）。凡用户提到发布 demo、部署演示环境、showroom、发布展项、demo 上线、更新 demo 版本、看 demo 日志、回滚 demo、管理 demo 数据库——一律用本 skill 的 showroom CLI 完成，不要手写 curl 或 docker 命令。
+---
+
+# Showroom 发布
+
+所有操作通过 `showroom` CLI 完成（工具优先，不要自己拼 HTTP/签名）。CLI 未安装时先跑 `/home/jeffrey/.agents/skills/showroom-publisher/scripts/install-cli.sh`（需内网可达 192.168.4.55）。
+
+## 0. 前置检查（每次任务开始先跑）
+
+```bash
+showroom doctor
+```
+
+- 全绿 → 直接干活。
+- 提示缺密钥 → `showroom keygen`，把输出的 `ed25519:...` 公钥串给用户，让用户找平台管理员执行 `showroomctl user-add <用户名> --pubkey <公钥串>`，登记完重跑 doctor。
+- 提示缺 config → 让用户提供账号名和 registry 密码，然后：
+  `showroom config --user <名> --server-lan http://192.168.4.55 --server-public http://47.107.155.180:10100 --registry-user <名> --registry-password <密码>`
+  （`--server-public` 可选：只有需要从公网发布时才配。）
+- **中间态（重要）**：密钥/config 都齐、唯独「签名自测」一项 ✗ 且其余全 ✓ = 公钥还没被管理员登记——这不是故障，把 doctor 输出顶部的公钥串交给用户走登记流程，登记后重跑即绿。此时不要 push/publish（会 E_AUTH）。
+
+## 1. 镜像规范（构建前自检，不满足会发布失败或页面 404）
+
+- 单进程 HTTP 服务，默认监听容器内 **8080**（不同则发布时带 `--container-port`）。
+- 支持子路径部署：资源用相对路径引用；需要绝对路径的框架消费 `SHOWROOM_BASE_PATH` 环境变量（值恒为 `/<项目名>/`）。
+- 不要写死数据库配置——发布时自动注入（PostgreSQL/Redis）：`DB_HOST DB_PORT DB_NAME DB_USER DB_PASSWORD DATABASE_URL REDIS_HOST REDIS_PORT REDIS_DB REDIS_URL SHOWROOM_PROJECT SHOWROOM_BASE_PATH`。运行 `showroom env <项目>` 可随时查看。
+- 建议在 Dockerfile 里写 HEALTHCHECK。
+- 本地镜像名随意，tag 用不可变命名（版本号或 git sha，禁止 latest）。
+
+## 2. 发布（标准流）
+
+```bash
+showroom push   [项目] <tag>              # 项目名可省略=自动随机 8 位；上传走 zstd-19 压缩+加密
+showroom publish [项目] <tag> --wait      # 项目名可省略=自动随机并打印；起容器→健康→打印 URL
+```
+
+- URL 规则：`http://192.168.4.55/<项目名>/`（公网同路径换域名）。项目名规则 `^[a-zA-Z0-9][a-zA-Z0-9-]{0,30}$`。
+- **多版本并存 = 多个项目**（自命名区分，如 `demo` / `demo-pr42`）；要替换就同名重发（数据库数据保留）。
+- 内存为「内存需求」语义：系统按 可用内存−预留(1536MB) 是否满足需求做准入，不足报 E_QUOTA（消息含三个数字）。
+
+## 3. 日常操作
+
+```bash
+showroom ps                          # 全部展项（--json 可解析）
+showroom logs <项目>                 # 日志
+showroom env <项目>                  # 数据库/Redis 连接信息
+showroom rollback <项目>             # 回上一版本（需用户确认再执行）
+showroom stop|start <项目>
+showroom rm <项目> --yes             # 删除（破坏性：必须先向用户确认）
+```
+
+## 4. 数据库维护（演示数据/Schema 自助管理）
+
+```bash
+showroom db sql <项目> [--file f.sql] [--confirm]     # DROP/TRUNCATE/DELETE 需 --confirm
+showroom db tables <项目>
+showroom db preview <项目> <表> [--limit 50]
+showroom db dump <项目> -o x.dump                     # zstd-19 高压缩加密备份
+showroom db restore <项目> <file.dump> --confirm      # 兼容 zstd 压缩包与原生格式
+showroom db reset <项目> --confirm                    # 清库重建（破坏性：先确认）
+```
+
+要准备「期望演示效果」：SQL 建表灌数据 → dump 存档 → 随时 restore 还原现场。
+
+## 5. 硬规则
+
+- `rm`/`rollback`/`db reset`/`db restore` 执行前必须获得用户明确确认。
+- 私钥/seed、registry 密码不得写入仓库、日志或聊天记录。
+- 保留名：v2/_api/_bootstrap/_console。
+- 平台侧出问题（502/路由 404 等）：报告用户，让管理员上主机处理（`ssh dejoy@192.168.4.55`，服务名 showroom-api/caddy/docker/chmlfrp），不要尝试直接改主机。
+"##;
+            let skill_path = skill_dir.join("SKILL.md");
+            std::fs::write(&skill_path, SKILL_MD).map_err(|e| format!("写入失败：{e}"))?;
+            println!("Skill 已安装到 {}", skill_path.display());
+            println!("Agent 将在用户提到「发布 demo」「部署演示环境」等时自动使用此 skill。");
+            Ok(())
+        }
         Cmd::Deploy { project_tag, mem, cpu, container_port } => {
             let (project, tag) = split_project_tag(project_tag);
             let project = pick_project(project);
