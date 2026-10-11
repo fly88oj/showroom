@@ -314,8 +314,8 @@
 
   <!-- ———— 标签页 2：发布（plan-17 §5：全站唯一参数输入处） ———— -->
   <section id="tab-pub" class="hidden" role="tabpanel" aria-labelledby="tabbtn-pub">
-    <!-- §13.1 发布入口三存：一键部署（快捷路径）/ 仅上传（择时部署）/ 部署（下方独立表单选已有镜像）——一键不取代分步 -->
-    <h2>发布新版本 <span class="badge">三入口并存：一键部署 · 仅上传 · 部署（见下方）</span></h2>
+    <!-- plan-17 §5：发布表单=全站唯一参数输入处。单表单双镜像源：tar→压缩+分片上传+发布；镜像库→①②skip 直接发布 -->
+    <h2>发布新版本</h2>
     <form id="pub-form">
       <div class="grid">
         <label class="field" for="pub-project"><span>项目（留空自动生成随机 8 位名；也可手输或点「换一个」/从已有项目选择）</span>
@@ -323,20 +323,37 @@
             <input type="text" id="pub-project" list="dl-projects" size="12" pattern="[a-zA-Z0-9][a-zA-Z0-9-]{0,30}" aria-describedby="pub-project-err">
             <button type="button" id="pub-shuffle" title="重新生成随机项目名">换一个</button>
           </span></label>
-        <label class="field" for="pub-tag"><span>镜像标签（必填）</span>
+        <div class="field" role="radiogroup" aria-label="镜像源"><span>镜像源</span>
+          <span class="row">
+            <label class="row" for="pub-src-tar"><input type="radio" name="pub-src" id="pub-src-tar" checked>本地 tar 文件</label>
+            <label class="row" for="pub-src-registry"><input type="radio" name="pub-src" id="pub-src-registry">镜像库（已入库镜像）</label>
+          </span>
+        </div>
+      </div>
+      <div class="grid mt-2">
+        <span class="field" id="pub-src-file-box">
+          <label class="field" for="pub-file"><span>镜像 tar 文件（不选则直接发布，要求镜像已在 registry；选择后自动压缩并分片上传再发布）</span>
+            <input type="file" id="pub-file" aria-describedby="pub-file-err"></label>
+        </span>
+        <span class="field hidden" id="pub-src-reg-box">
+          <label class="field" for="dep-image"><span>镜像（ComboBox：输入前缀过滤；清单来自 <span class="mono">/_api/images</span>，自动加载）</span>
+            <input type="text" id="dep-image" list="dl-images" size="34" class="mono" placeholder="输入前缀过滤，如 alice/demo:…" aria-describedby="dep-image-err"></label>
+          <span class="fb" id="dep-images-fb" aria-live="polite"></span>
+        </span>
+        <label class="field" for="pub-tag"><span>镜像标签（必填；选镜像后自动带出）</span>
           <input type="text" id="pub-tag" required size="10" aria-describedby="pub-tag-err"></label>
         <label class="field" for="pub-mem"><span>内存需求</span>
           <input type="text" id="pub-mem" value="256m" list="dl-mem" size="6"></label>
         <label class="field" for="pub-cport"><span>Demo 服务监听端口（容器内）</span>
           <input type="number" id="pub-cport" value="8080" min="1" max="65535" size="5"></label>
-        <label class="field" for="pub-file"><span>镜像 tar 文件（可选；不选则直接发布，选择后自动压缩并分片上传再发布）</span>
-          <input type="file" id="pub-file" aria-describedby="pub-file-err"></label>
-        <button type="submit" id="pub-submit">一键部署</button>
-        <button type="button" id="btn-upload-only" title="同一 tar：只压缩上传入库，不部署；稍后可从下方「部署」入口选择发布">仅上传</button>
+        <button type="submit" id="pub-submit">发布</button>
+        <button type="button" id="btn-upload-only" title="同一 tar：只压缩上传入库，不部署；稍后到本页选「镜像库」源发布">仅上传</button>
       </div>
+      <p class="note hidden" id="pub-pref-note" aria-live="polite"></p>
       <p class="ferr" id="pub-project-err" aria-live="polite"></p>
       <p class="ferr" id="pub-tag-err" aria-live="polite"></p>
       <p class="ferr" id="pub-file-err" aria-live="polite"></p>
+      <p class="ferr" id="dep-image-err" aria-live="polite"></p>
     </form>
     <!-- plan-17 验收 6：未配置 PEM 时选 tar 发布 → 内联引导「去设置」（whoami 自动带回后永不出现） -->
     <p class="warnbar hidden" id="pub-pem-hint">尚未配置平台公钥 PEM（镜像上传的加密信封公钥）：<button type="button" id="btn-go-settings" class="act">去设置</button>（whoami 自动带回后无需手工粘贴）</p>
@@ -363,10 +380,11 @@
     </div>
     <p class="fb" id="pub-fb" aria-live="polite"></p>
     <p class="note">
-      一键部署 = 压缩 → 分片上传 → 发布 → 展示访问地址（恒为 <span class="mono" id="pub-url">/&lt;project&gt;/</span>）；任一步失败状态条标红，可重试（上传失败自动从断点续传）。
-      「仅上传」只把镜像送入 registry（①②两段，不发布），适合先备好镜像、稍后再部署。
+      单表单双镜像源：选「本地 tar 文件」→ 压缩 → 分片上传 → 发布 → 展示访问地址（恒为 <span class="mono" id="pub-url">/&lt;project&gt;/</span>）；选「镜像库」→ 直接发布已入库镜像（①②两段自动跳过）。任一步失败状态条标红，可重试（上传失败自动从断点续传）。
+      「仅上传」只把镜像送入 registry（①②两段，不发布），适合先备好镜像、稍后到本页选「镜像库」源发布。
       命名规则：<span class="mono">^[a-zA-Z0-9][a-zA-Z0-9-]{0,30}$</span>（随机名 8 位字母数字，降低被字典遍历发现的门槛；项目留空即自动生成并回填），保留名 <span class="mono">v2 _api _bootstrap _console</span>；项目归属首个创建者。
-      未选择文件时「一键部署」直接发布（要求镜像已在 registry 中）；镜像 tar 上传前自动经 <span class="mono">zstd-19</span> 压缩再加密（已是 <span class="mono">.tar.zst</span> 则原样上传）。
+      命中已有项目时自动沿用上次发布参数（内存取服务端当前配置；标签/端口取本机记忆），可修改。
+      未选择文件时「发布」直接发布（要求镜像已在 registry 中）；镜像 tar 上传前自动经 <span class="mono">zstd-19</span> 压缩再加密（已是 <span class="mono">.tar.zst</span> 则原样上传）。
     </p>
 
     <datalist id="dl-projects"></datalist>
@@ -376,41 +394,15 @@
   <!-- ———— 标签页 3：镜像库（plan-17 §1：镜像清单/删除/断点续传收纳） ———— -->
   <section id="tab-img" class="hidden" role="tabpanel" aria-labelledby="tabbtn-img">
     <h2>镜像库</h2>
-    <fieldset>
-      <legend>部署（§13.1 第三入口：从镜像库选择 · 旧版本单独部署走这里）</legend>
-      <div class="row">
-        <label class="field" for="dep-image"><span>镜像（ComboBox：输入前缀过滤；清单来自 <span class="mono">/_api/images</span>，进入本页时自动加载，可点「刷新镜像清单」重取）</span>
-          <span class="row combo">
-            <input type="text" id="dep-image" list="dl-images" size="34" class="mono" placeholder="输入前缀过滤，如 alice/demo:…" aria-describedby="dep-image-err">
-            <button type="button" id="dep-images-refresh">刷新镜像清单</button>
-          </span></label>
-        <span class="fb" id="dep-images-fb" aria-live="polite"></span>
-      </div>
-      <p class="ferr" id="dep-image-err" aria-live="polite"></p>
-      <datalist id="dl-images"></datalist>
-      <!-- §14.3 镜像清单：与部署 ComboBox 同源 /_api/images 数据；每行「删除」走 POST /_api/image-rm（内联 GC，秒级回收磁盘） -->
-      <div class="tbl-wrap tbl-low">
-        <table id="img-list">
-          <thead><tr><th>镜像（同上方下拉清单 · 可删除旧镜像释放磁盘）</th><th>操作</th></tr></thead>
-          <tbody><tr><td colspan="2" class="note">未加载</td></tr></tbody>
-        </table>
-      </div>
-      <form id="dep-form" class="grid mt-2">
-        <label class="field" for="dep-project"><span>项目（选中镜像后自动带出，可改）</span>
-          <input type="text" id="dep-project" size="12" pattern="[a-zA-Z0-9][a-zA-Z0-9-]{0,30}" aria-describedby="dep-project-err"></label>
-        <label class="field" for="dep-tag"><span>镜像标签（选中镜像后自动带出，可改）</span>
-          <input type="text" id="dep-tag" required size="10" aria-describedby="dep-tag-err"></label>
-        <label class="field" for="dep-mem"><span>内存需求</span>
-          <input type="text" id="dep-mem" value="256m" list="dl-mem" size="6"></label>
-        <label class="field" for="dep-cport"><span>Demo 服务监听端口（容器内）</span>
-          <input type="number" id="dep-cport" value="8080" min="1" max="65535" size="5"></label>
-        <button type="submit" id="dep-submit">发布</button>
-      </form>
-      <p class="ferr" id="dep-project-err" aria-live="polite"></p>
-      <p class="ferr" id="dep-tag-err" aria-live="polite"></p>
-      <p class="fb" id="dep-fb" aria-live="polite"></p>
-      <p class="note">默认仅列出您名下的镜像；管理员钥匙可见全部账号的镜像并标注「管理员视图」。选中镜像后项目与标签自动带出（仍可修改），填写内存需求与监听端口后即可发布——旧版本单独部署、或对「仅上传」入库的镜像择时部署都从此入口。清单中每行可删除不再使用的旧镜像：删除即触发回收（秒级释放磁盘），正在运行的展项不受影响，但其回滚/重建将失效。</p>
-    </fieldset>
+    <p class="note">镜像清单来自 <span class="mono">/_api/images</span>（发布页选「镜像库」源时下拉同此数据，自动加载）；默认仅列出您名下的镜像，管理员钥匙可见全部账号的镜像并标注「管理员视图」。每行可删除不再使用的旧镜像：删除即触发回收（秒级释放磁盘），正在运行的展项不受影响，但其回滚/重建将失效。</p>
+    <!-- §14.3 镜像清单：与发布表单「镜像库」下拉同源 /_api/images 数据；每行「删除」走 POST /_api/image-rm（内联 GC，秒级回收磁盘） -->
+    <div class="tbl-wrap tbl-low">
+      <table id="img-list">
+        <thead><tr><th>镜像（同发布页下拉清单 · 可删除旧镜像释放磁盘）</th><th>操作</th></tr></thead>
+        <tbody><tr><td colspan="2" class="note">未加载</td></tr></tbody>
+      </table>
+    </div>
+    <datalist id="dl-images"></datalist>
 
     <fieldset>
       <legend>镜像分片上传（压缩后 8MB/片逐片加密 · 服务端拼接解密导入 · 断点续传）</legend>
@@ -537,7 +529,7 @@
 
     <h2>镜像规范</h2>
     <ul class="note help-list">
-      <li>Demo 服务须监听容器内 <span class="mono">8080</span> 端口（其他端口在发布表单「Demo 服务监听端口（容器内）」如实填写）。</li>
+      <li>Demo 服务须监听容器内 <span class="mono">8080</span> 端口（其他端口在发布表单的端口字段如实填写）。</li>
       <li>展项经子路径对外发布：访问地址恒为 <span class="mono">/&lt;project&gt;/</span>，读 <span class="mono">SHOWROOM_BASE_PATH</span>（值即该前缀）适配，或页面内一律使用相对 URL。</li>
       <li>建议在 Dockerfile 里配置 <span class="mono">HEALTHCHECK</span>，平台据此判定健康并自愈。</li>
       <li>镜像内配置文件替换推荐 <span class="mono">envsubst &lt; config.tpl &gt; config</span> 模式（占位符由注入的环境变量填充）。</li>
@@ -588,7 +580,7 @@
         <tr><td>补发 / 重置密码（管理员）</td><td class="mono">showroomctl user-passwd &lt;账号&gt; --gen-password</td></tr>
         <tr><td>登记公钥（管理员 · 专家路径）</td><td class="mono">showroomctl user-add &lt;账号&gt; --pubkey &lt;公钥串&gt;</td></tr>
         <tr><td>展项列表</td><td class="mono">showroom ps</td></tr>
-        <tr><td>一键部署 / 仅上传 / 部署（选镜像）</td><td class="mono">showroom deploy / push / publish</td></tr>
+        <tr><td>发布（单表单：本地 tar / 镜像库）/ 仅上传</td><td class="mono">showroom deploy / push / publish</td></tr>
         <tr><td>启动 / 停止 / 回滚 / 删除</td><td class="mono">showroom start / stop / rollback / rm</td></tr>
         <tr><td>日志 / 环境变量</td><td class="mono">showroom logs / showroom env</td></tr>
         <tr><td>SQL 执行 / 表清单 / 预览</td><td class="mono">showroom db sql / tables / preview</td></tr>
@@ -602,7 +594,7 @@
       <tbody>
         <tr><td class="mono">E_AUTH</td><td>钥匙未登记或验签未通过（非本人项目同样报此错）。密码登录用户：重新输入账号密码登录即可自动绑定新钥匙；CLI/钥匙用户：把公钥串交管理员登记。时钟偏差可用 <span class="mono">showroom doctor</span> 排查。</td></tr>
         <tr><td class="mono">E_NAME</td><td>命名不符合规则 <span class="mono">^[a-zA-Z0-9][a-zA-Z0-9-]{0,30}$</span> 或使用了保留名（v2/_api/_bootstrap/_console）。</td></tr>
-        <tr><td class="mono">E_QUOTA</td><td>超出限额：内存需求 / 导入体积 / 磁盘空间（扣除预留）不足；请调低内存需求、精简镜像，磁盘不足时可在部署区镜像清单删除旧镜像后重试。</td></tr>
+        <tr><td class="mono">E_QUOTA</td><td>超出限额：内存配额 / 导入体积 / 磁盘空间（扣除预留）不足；请调低内存配置、精简镜像，磁盘不足时可在「镜像库」删除旧镜像后重试。</td></tr>
         <tr><td class="mono">E_NOTFOUND</td><td>展项或上传/下载会话不存在。</td></tr>
         <tr><td class="mono">E_STATE</td><td>当前状态不允许该操作（如危险 SQL 未确认、容器状态冲突）。</td></tr>
         <tr><td class="mono">E_NET</td><td>网络或服务不可用，稍后重试。</td></tr>
@@ -899,7 +891,7 @@ function shimCStr(call, cap0) {
 const ERR_CN = {
   E_AUTH: '钥匙未登记或验签未通过（非本人项目同样报此错）：请退出后重新用账号密码登录（自动绑定新钥匙）；CLI/钥匙用户请把公钥串交管理员登记',
   E_NAME: '命名不符合规则或使用了保留名；请按提示修正名称后重试',
-  E_QUOTA: '超出平台限额（内存需求/导入体积/磁盘空间不足）；请调低内存需求、精简镜像，磁盘不足时可先删除旧镜像',
+  E_QUOTA: '超出平台限额（内存配额/导入体积/磁盘空间不足）；请调低内存配置、精简镜像，磁盘不足时可先删除旧镜像',
   E_NOTFOUND: '对象不存在（展项/会话）；请确认名称或重新发起',
   E_STATE: '当前状态不允许该操作；请检查前置条件（如确认标记、容器状态）后重试',
   E_NET: '网络或服务不可用；请稍后重试，或用 showroom doctor 排查',
@@ -2043,12 +2035,12 @@ function wireProjTab() {
   $('proj-tbl').addEventListener('click', onProjAction);
   $('img-list').addEventListener('click', onImageRm);                       // §14.3：镜像清单行删除（事件委托）
   $('space-refresh').addEventListener('click', () => refreshSpace(true));      // §14.1：空间条手动刷新（绕过 TTL）
-  $('pub-form').addEventListener('submit', onDeploy); // 入口一「一键部署」：压缩→上传→发布一条龙（§12.1）
-  $('btn-upload-only').addEventListener('click', onUploadOnly); // 入口二「仅上传」：同一 tar，只入库不部署
-  $('dep-form').addEventListener('submit', onDeployForm); // 入口三「部署」：选 registry 已有镜像直接发布（§13.1）
-  $('dep-images-refresh').addEventListener('click', () => ensureImages(true));
+  $('pub-form').addEventListener('submit', onDeploy); // 单表单提交：tar→压缩+上传+发布 / 镜像库→直接发布（plan-17 §5）
+  $('btn-upload-only').addEventListener('click', onUploadOnly); // 次要按钮「仅上传」：同一 tar，只入库不部署
+  for (const r of ['tar', 'registry']) $(`pub-src-${r}`).addEventListener('change', () => pickPubSource(r));
   $('dep-image').addEventListener('input', onImagePick);
   for (const id of ['pub-project', 'pub-tag', 'pub-file']) $(id).addEventListener('input', () => fieldErr(id, ''));
+  $('pub-project').addEventListener('change', onPubProjectChange); // 命中已有项目 → 沿用上次发布参数
   $('dlg-env-close').addEventListener('click', () => $('dlg-env').close());
   $('dp-retry').addEventListener('click', () => {
     if (deploy.busy) return;
@@ -2071,7 +2063,7 @@ function wireProjTab() {
 let imagesLoaded = false;
 async function ensureImages(force = false) {
   if (imagesLoaded && !force && dataFresh('images')) return; // plan-17 §3：TTL 300s
-  $('dep-images-fb').textContent = '正在加载镜像清单…';
+  $('dep-images-fb').textContent = '正在加载镜像清单…'; // 镜像库下拉（发布页）反馈
   try {
     const j = await api('GET', '/_api/images');
     const images = (j.images || []).map(String);
@@ -2122,36 +2114,50 @@ async function refreshSpace(force = false) {
     dataMark('space');
   } catch { $('space-note').textContent = '空间信息不可用'; } // 静默降级：不上顶部条、不阻断上传表单
 }
-// —— 选中镜像 → 自动带出项目与标签（形如 user/project:tag；可手改） ——
+// —— 镜像库源：选中镜像 → 自动带出项目与标签到发布表单（形如 user/project:tag；可手改） ——
 function onImagePick() {
   fieldErr('dep-image', '');
   const m = $('dep-image').value.trim().match(/^[^\/\s]+\/([^\/\s:]+):(\S+)$/);
-  if (m) { $('dep-project').value = m[1]; $('dep-tag').value = m[2]; fieldErr('dep-project', ''); fieldErr('dep-tag', ''); }
-}
-/** 入口三「部署」：校验 → publish → 展示 URL（旧版本单独部署 / 对「仅上传」镜像择时部署）。 */
-async function onDeployForm(ev) {
-  ev.preventDefault();
-  if (deploy.busy || upBusy) return showMsg('已有部署或上传进行中，请等待完成后再从「部署」入口发布');
-  const project = $('dep-project').value.trim();
-  const bad = checkProj(project);
-  if (bad) return fieldErr('dep-project', bad);
-  const tag = $('dep-tag').value.trim();
-  if (!tag || /\s|\//.test(tag)) return fieldErr('dep-tag', `镜像标签「${tag}」不合法（非空、无空白/斜杠），请修正后重试`);
-  const body = { project, tag, container_port: parseInt($('dep-cport').value, 10) || 8080 };
-  const memv = $('dep-mem').value.trim();
-  if (memv) body.mem = memv;
-  busy($('dep-submit'), true, '发布中…');
-  try {
-    const j = await api('POST', '/_api/publish', body);
-    const url = externalUrl({ project });
-    $('dep-fb').textContent = `部署成功，访问地址：${url}`;
-    showMsg(`部署成功，访问地址：${url}`, 'ok');
-    refreshProjects(true);
-  } catch (e) {
-    $('dep-fb').textContent = '';
-    apiFail(`部署 ${project}:${tag}`, e);
+  if (m) {
+    $('pub-project').value = m[1];
+    $('pub-tag').value = m[2];
+    updatePubUrl();
+    fieldErr('pub-project', ''); fieldErr('pub-tag', '');
+    pubPrefill(m[1], { keepTag: true }); // 参数预填（镜像 tag 优先于本地记忆 tag）
   }
-  busy($('dep-submit'), false);
+}
+/** plan-17 §5：镜像源 radio（默认 tar）。「镜像库」源发布时 ①压缩②上传自动跳过。 */
+const pubSrc = () => ($('pub-src-registry').checked ? 'registry' : 'tar');
+function pickPubSource(v) {
+  for (const r of ['tar', 'registry']) $(`pub-src-${r}`).checked = r === v;
+  $('pub-src-file-box').classList.toggle('hidden', v !== 'tar');
+  $('pub-src-reg-box').classList.toggle('hidden', v !== 'registry');
+  $('btn-upload-only').disabled = v !== 'tar'; // 仅上传只对本地 tar 有意义
+  if (v === 'tar') fieldErr('dep-image', '');
+}
+/** 命中已有项目名 → 沿用上次发布参数（mem=服务端 conf 行；tag/cport=本机 sr.conf.* 记忆）。 */
+function onPubProjectChange() {
+  const v = $('pub-project').value.trim();
+  if (state.projects.some((x) => x.project === v)) pubPrefill(v);
+  else $('pub-pref-note')?.classList.add('hidden');
+}
+function pubPrefill(project, opts = {}) {
+  const row = state.projects.find((x) => x.project === project);
+  let conf = null;
+  try { conf = JSON.parse(localStorage.getItem('sr.conf.' + project) || 'null'); } catch { /* 坏记录忽略 */ }
+  let hit = false;
+  if (row && row.mem) { $('pub-mem').value = row.mem; hit = true; } // 服务端 conf 权威（GET /_api/projects）
+  if (conf && conf.cport) { $('pub-cport').value = String(conf.cport); hit = true; } // 响应无 cport 字段 → 本地记忆补（字符串赋值）
+  if (conf && conf.tag && !opts.keepTag) { $('pub-tag').value = conf.tag; hit = true; }
+  const note = $('pub-pref-note');
+  if (note) {
+    if (hit) {
+      const d = conf && conf.ts ? new Date(conf.ts) : null;
+      const md = d && !Number.isNaN(d) ? `（${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}）` : '';
+      note.textContent = `沿用上次发布参数${md}，可修改`;
+      note.classList.remove('hidden');
+    } else note.classList.add('hidden');
+  }
 }
 async function refreshProjects(force = false) {
   if (!force && dataFresh('projects')) return; // plan-17 §3：TTL 内跳过（内存单源）
@@ -2275,8 +2281,8 @@ async function deployRun(mode) {
       dpSet(2, 'done');
       if (deploy.intent === 'upload') { // 入口二「仅上传」：到②即完成，不发布（③④ 跳过）
         dpSet(3, 'skip'); dpSet(4, 'skip');
-        dpText('② 完成：镜像已入库。可稍后从下方「部署（选择已有镜像）」入口选择发布。');
-        showMsg(`仅上传完成：镜像 ${project}:${tag} 已入库，可稍后从「部署」入口选择发布。`, 'ok');
+        dpText('② 完成：镜像已入库。可稍后到本页选「镜像库」源发布。');
+        showMsg(`仅上传完成：镜像 ${project}:${tag} 已入库，可稍后到「发布」页选「镜像库」源发布。`, 'ok');
         deploy.failAt = null;
         ensureImages(true); // 清单立刻补上新镜像
         return;
@@ -2290,6 +2296,7 @@ async function deployRun(mode) {
     const memv = $('pub-mem').value.trim();
     if (memv) body.mem = memv;
     const j = await api('POST', '/_api/publish', body);
+    try { localStorage.setItem('sr.conf.' + project, JSON.stringify({ tag, cport: parseInt($('pub-cport').value, 10) || 8080, ts: Date.now() })); } catch { /* 存储不可写忽略 */ } // plan-17 §5：下次发布/「更新」预填
     dpSet(3, 'done'); dpSet(4, 'done'); // ④ 完成：大字 URL + 复制
     const url = j.url || `/${project}/`;
     dpText('④ 完成：部署成功。');
@@ -2323,7 +2330,7 @@ function collectPubFields(requireFile) {
   const badP = checkProj(project);
   if (badP) { fieldErr('pub-project', badP); return null; }
   if (!tag || /\s|\//.test(tag)) { fieldErr('pub-tag', `镜像标签「${tag}」不合法（非空、无空白/斜杠），请填写后再试`); return null; }
-  const file = $('pub-file').files[0] || null;
+  const file = ($('pub-file').files || [])[0] || null;
   if (requireFile && !file) { fieldErr('pub-file', '「仅上传」需要选择镜像 tar 文件（不选文件的直发请用「一键部署」，选已有镜像请用「部署」表单）'); return null; }
   return { project, tag, file };
 }
@@ -2337,22 +2344,30 @@ function pubBtnsBusy(on) {
 async function onDeploy(ev) {
   ev.preventDefault();
   if (deploy.busy || upBusy) return showMsg('已有部署或上传进行中，请等待完成');
-  clearErrs('pub-project', 'pub-tag', 'pub-file');
+  clearErrs('pub-project', 'pub-tag', 'pub-file', 'dep-image');
+  let file = null;
+  if (pubSrc() === 'registry') { // 镜像库源：①②跳过直接发布；镜像必须已选（选中即带出项目/标签）
+    const img = $('dep-image').value.trim();
+    if (!/^[^\/\s]+\/[^\/\s:]+:\S+$/.test(img)) return fieldErr('dep-image', '请先在「镜像库」源选择镜像（格式 user/project:tag），或切换回「本地 tar 文件」源');
+  } else {
+    file = ($('pub-file').files || [])[0] || null; // files 恒存在（FileList）；防御stub/异常环境
+  }
   const f = collectPubFields(false);
   if (!f) return;
-  if (f.file && !pemReady()) return; // plan-17 验收 6：未配置 PEM → 内联「去设置」引导
+  if (file && !pemReady()) return; // plan-17 验收 6：未配置 PEM → 内联「去设置」引导
   deploy.intent = 'deploy';
   deploy.project = f.project; deploy.tag = f.tag;
-  deploy.file = f.file;
+  deploy.file = file; // tar 源才携带文件；镜像库源恒 null（①②跳过）
   deploy.blob = null; deploy.uploadId = null;
   dpReset();
   pubBtnsBusy(true);
   await deployRun('fresh');
   pubBtnsBusy(false);
 }
-/** 入口二「仅上传」（§13.1）：同一 tar 选择，只压缩上传入库，不部署。 */
+/** 次要按钮「仅上传」（§13.1）：同一 tar 选择，只压缩上传入库，不部署。 */
 async function onUploadOnly() {
   if (deploy.busy || upBusy) return showMsg('已有部署或上传进行中，请等待完成');
+  if (pubSrc() !== 'tar') return showMsg('「仅上传」用于本地 tar 文件：请先选回「本地 tar 文件」镜像源');
   clearErrs('pub-project', 'pub-tag', 'pub-file');
   const f = collectPubFields(true);
   if (!f) return;

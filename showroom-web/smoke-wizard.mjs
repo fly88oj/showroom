@@ -112,7 +112,7 @@ const armLoginInit = () => {
 /** 模拟浏览器渲染 HTML：给关键按钮桩设置初始文案（busy 恢复断言按真实文字比对）。 */
 const BTN_TEXT = {
   'lg-submit': '登录',
-  'pub-submit': '一键部署', 'btn-upload-only': '仅上传', 'dep-submit': '发布', 'ad-na-submit': '发放',
+  'pub-submit': '发布', 'btn-upload-only': '仅上传', 'ad-na-submit': '发放', // plan-17 §5：单表单（dep-submit 删除）
   'hs-apply': '查看变更', 'hs-confirm': '确认执行', 'hs-rx-preview': '获取确认提示', 'hs-rx-run': '我已了解，执行扩容',
   'pw-submit': '确认修改', 'ad-na-pubsubmit': '登记公钥发放',
 };
@@ -660,9 +660,8 @@ ok(($s('dl-images').innerHTML || '').includes('alice/demo:v1') && ($s('dl-images
   '镜像清单填充 ComboBox（datalist）');
 ok(!($s('dl-images').innerHTML || '').includes('bob/other'), '普通用户：清单不含他人镜像（服务端按 user 过滤）');
 ok(($s('dep-images-fb').textContent || '').includes('您名下的镜像 2 个'), '普通用户：清单计数提示「您名下」');
-click('dep-images-refresh');
-await sleep(60);
-ok(imagesN === 2, '「刷新镜像清单」强制重取');
+// S3：手动「刷新镜像清单」按钮随部署 fieldset 溶解而删除（plan-17 §0-5：显式刷新归零，TTL+写路径失效取代；
+// 强制重取路径由 whoami admin 后 ensureImages(true) 与镜像删除后重取覆盖）
 
 // —— §14.1/§14.3 空间条（上传区常显）+ 镜像清单删除（部署区）——
 ok(spaceN >= 1, '进入发布区：/_api/space 已拉取（空间条常显）');
@@ -706,10 +705,11 @@ ok(($s('img-list:q').innerHTML || '').includes('alice/demo2:v2'), '删除失败�
 
 // —— §14.2 磁盘 E_QUOTA：顶部条追加删除引导并刷新空间条；内存类 E_QUOTA 不追加 ——
 publishQuota = { msg: '磁盘空间不足：可用 10240 MB（已预留 20480 MB）＜ 估算需求 30720 MB（7680 MB × 膨胀因子 4）；请先删除旧镜像后重试' };
-$s('dep-project').value = 'demo5';
-$s('dep-tag').value = 'v5';
+const pubProjKeep = $s('pub-project').value; // 保存当前（随机）项目名：单表单后 E_QUOTA 用例与 §11 共用 pub-project
+$s('pub-project').value = 'demo5';
+$s('pub-tag').value = 'v5';
 spBase = spaceN;
-fire($s('dep-form'), 'submit', { preventDefault() {} });
+fire($s('pub-form'), 'submit', { preventDefault() {} }); // plan-17 §5：单表单（原 dep-form）
 await sleep(60);
 let qmsg = $s('msg').textContent || '';
 ok(qmsg.includes('E_QUOTA') && qmsg.includes('磁盘空间不足') && qmsg.includes('膨胀因子'),
@@ -717,11 +717,11 @@ ok(qmsg.includes('E_QUOTA') && qmsg.includes('磁盘空间不足') && qmsg.inclu
 ok(qmsg.includes('可到部署区删除旧镜像后重试'), '磁盘 E_QUOTA：顶部条追加删除引导');
 ok(spaceN > spBase, '磁盘 E_QUOTA：触发空间条刷新');
 publishQuota = { msg: '可用内存不足：可用 512 MB（已预留 1536 MB）＜ 需求 2048 MB' };
-fire($s('dep-form'), 'submit', { preventDefault() {} });
+fire($s('pub-form'), 'submit', { preventDefault() {} });
 await sleep(60);
 qmsg = $s('msg').textContent || '';
 ok(qmsg.includes('E_QUOTA') && !qmsg.includes('可到部署区删除旧镜像后重试'), '内存类 E_QUOTA：不追加磁盘删除引导');
-$s('dep-project').value = 'demo'; // 还原（后续场景复用）
+$s('pub-project').value = pubProjKeep; // 还原（后续场景复用；含 §11 的随机名断言）
 
 // —— tablist 方向键切换（role=tablist 键盘约定） ——
 fire($s('tabs'), 'keydown', { key: 'ArrowRight', preventDefault() {}, target: tabBtn('proj') });
@@ -739,6 +739,19 @@ ok(($s('pub-url').textContent || '') === `/${rp2}/`, `URL 提示恒 /<项目名>
 $s('pub-project').value = 'demo'; // 手输（用户可清空手输的路径）
 fire($s('pub-project'), 'input');
 ok($s('pub-url').textContent === '/demo/', 'URL 提示随手输联动');
+// —— S3 §5 参数单源预填：命中已有项目 → mem=服务端行值、tag/cport=sr.conf.* 记忆 + 注记 ——
+store.set('sr.conf.demo', JSON.stringify({ tag: 'v9', cport: 9000, ts: Date.parse('2026-10-01T10:00:00') }));
+$s('pub-project').value = 'demo';
+fire($s('pub-project'), 'change');
+ok($s('pub-mem').value === '256m' && $s('pub-tag').value === 'v9' && $s('pub-cport').value === '9000',
+  'S3 预填：mem=projects 行值（服务端权威）、tag/cport=sr.conf.* 记忆');
+ok(($s('pub-pref-note').textContent || '').includes('沿用上次发布参数') && ($s('pub-pref-note').textContent || '').includes('10-01'),
+  'S3 预填：注记「沿用上次发布参数（MM-DD）」');
+$s('pub-project').value = 'nosuch';
+fire($s('pub-project'), 'change');
+ok(hidden('pub-pref-note'), 'S3 预填：未命中项目不显注记');
+$s('pub-project').value = 'demo'; // 还原
+
 // —— S1 §6 对外 URL 策略：设置公网域名后主链接换 base；清空回退；非法域名内联报错 ——
 $s('set-base').value = 'http://47.107.155.180:10100/';
 fire($s('set-base'), 'input');
@@ -941,26 +954,32 @@ ok(($s('db-out').textContent || '').includes('三段式下载完成'), 'dbOut �
   ok($s('dp-s1').classList.contains('done') && $s('dp-s2').classList.contains('done'), '仅上传：①压缩②上传两段完成');
   ok($s('dp-s3').classList.contains('skip') && $s('dp-s4').classList.contains('skip'), '仅上传：③发布④完成标记为跳过');
   ok(($s('dp-text').textContent || '').includes('镜像已入库'), '仅上传完成文案：「镜像已入库」');
-  ok(($s('dp-text').textContent || '').includes('部署'), '仅上传完成文案：指引稍后从「部署」入口发布');
+  ok(($s('dp-text').textContent || '').includes('镜像库'), '仅上传完成文案：指引稍后到「发布」页选「镜像库」源');
   ok(hidden('dp-done'), '仅上传：不展示部署完成 URL 段');
   ok(imagesN > imgBase, '仅上传完成后自动刷新镜像清单（新镜像即刻可选）');
   ok(!$s('btn-upload-only').disabled && $s('btn-upload-only').textContent === '仅上传', '请求结束：按钮恢复原文与可用');
 
-  // 7c. §13.1 入口三「部署」表单：镜像 ComboBox 选择自动带出项目/标签 → 发布（旧版本单独部署路径）
+  // 7c. plan-17 §5 镜像库源：radio 切换 → ComboBox 选中镜像带出项目/标签 → ①②skip 直接发布
+  fire($s('pub-src-registry'), 'change');
+  ok(hidden('pub-src-file-box') && !hidden('pub-src-reg-box') && $s('btn-upload-only').disabled,
+    '镜像库源：tar 框收起、镜像下拉出现、「仅上传」禁用');
   $s('dep-image').value = 'alice/demo:v1';
   fire($s('dep-image'), 'input');
-  ok($s('dep-project').value === 'demo' && $s('dep-tag').value === 'v1', '选中镜像：项目与标签自动带出（user/project:tag 解析）');
-  $s('dep-mem').value = '512m'; $s('dep-cport').value = '9090';
-  fire($s('dep-form'), 'submit', { preventDefault() {} });
-  ok(await waitFor(() => ($s('dep-fb').textContent || '').includes('部署成功'), 8000), '部署表单：发布完成');
+  ok($s('pub-project').value === 'demo' && $s('pub-tag').value === 'v1', '选中镜像：项目与标签自动带出到发布表单（user/project:tag 解析）');
+  $s('pub-mem').value = '512m'; $s('pub-cport').value = '9090';
+  fire($s('pub-form'), 'submit', { preventDefault() {} });
+  ok(await waitFor(() => $s('dp-s4').classList.contains('done'), 8000), '镜像库源：直接发布完成（③④ done）');
+  ok($s('dp-s1').classList.contains('skip') && $s('dp-s2').classList.contains('skip'), '镜像库源：①压缩②上传自动跳过');
   ok(lastPublishBody.project === 'demo' && lastPublishBody.tag === 'v1'
     && lastPublishBody.mem === '512m' && lastPublishBody.container_port === 9090,
-    '部署表单提交体：镜像带出的项目/标签 + 内存需求 + 监听端口');
-  ok(($s('dep-fb').textContent || '').includes('/demo/'), '部署表单：完成提示含访问地址');
-  $s('dep-project').value = ''; $s('dep-tag').value = '';
-  fire($s('dep-form'), 'submit', { preventDefault() {} });
-  ok(($s('dep-project-err').textContent || '').includes('不合法'), '部署表单：项目校验为字段内联错误');
-  $s('dep-project').value = 'demo'; // 还原
+    '镜像库源提交体：镜像带出的项目/标签 + 内存需求 + 监听端口');
+  ok(($s('dp-url').textContent || '').includes('/demo/'), '镜像库源：完成大字 URL 含访问地址');
+  $s('pub-project').value = 'bad_name!';
+  fire($s('pub-form'), 'submit', { preventDefault() {} });
+  ok(($s('pub-project-err').textContent || '').includes('不合法'), '发布表单：项目校验为字段内联错误');
+  fire($s('pub-src-tar'), 'change');
+  ok(!hidden('pub-src-file-box') && hidden('pub-src-reg-box') && !$s('btn-upload-only').disabled, '切回 tar 源：文件框恢复、仅上传可用');
+  $s('pub-project').value = 'demo'; // 还原
 
   // 7b. 恢复上传魔数两态：已是 zstd（备份下载产物）原样；原生 -Fc 压缩后
   const plain = new Uint8Array(5 * 1024 * 1024 + 77); // > 4MiB：恢复信封跨 seal 段
@@ -1522,7 +1541,7 @@ ok(html.includes('<details id="ad-na-expert"') && html.includes('登记公钥发
 for (const id of ['pw-cur', 'pw-new', 'pw-new2']) ok(html.includes(`for="${id}"`), `规范：改密控件 label for="${id}"`);
 ok(!html.includes('op=change'), '改密路径与服务端对齐（pw-begin 无 op 查询参数——按 serve.rs/SPEC §16 实形状）');
 ok(!html.includes('内存上限'), '§10.2：「内存上限」零残留');
-ok((html.match(/内存需求/g) || []).length >= 3, '§10.2：表单/帮助/错误文案均用「内存需求」');
+ok((html.match(/内存需求/g) || []).length === 1, '§10.2/plan-17 验收 4：「内存需求」仅发布表单 label 一处');
 ok(!/槽位|slot/i.test(html), '§11：全 HTML「槽位/slot」零残留');
 ok(!html.includes('SHOWROOM_SLOT'), '§11：环境变量清单去掉 SHOWROOM_SLOT');
 ok(html.includes('^[a-zA-Z0-9][a-zA-Z0-9-]{0,30}$'), '§11：项目名规则已放宽（允许大写字母）');
@@ -1536,8 +1555,17 @@ ok(html.includes('compressToBlob') && html.includes('uploadPayload'), '上传压
 ok(html.includes('sr_zstd_begin') && html.includes('sr_zstd_push') && html.includes('sr_zstd_end'), 'wasm zstd 压缩会话（sr_zstd_*）已接线');
 ok((html.match(/压缩后上传/g) || []).length >= 1, '上传进度文案标注「压缩后上传」');
 // —— §12.1 一键部署 ——
-ok(html.includes('一键部署'), '§12.1：「一键部署」入口存在');
+ok(html.includes('单表单双镜像源') && html.includes('id="pub-src-tar"') && html.includes('id="pub-src-registry"')
+  && html.includes('id="pub-src-file-box"') && html.includes('id="pub-src-reg-box"') && html.includes('id="pub-pref-note"'),
+  'plan-17 §5：发布单表单双镜像源（radio + 双源容器 + 预填注记）齐备');
+ok(!html.includes('id="dep-form"') && !html.includes('id="dep-project"') && !html.includes('id="dep-tag"')
+  && !html.includes('id="dep-mem"') && !html.includes('id="dep-cport"') && !html.includes('id="dep-submit"')
+  && !html.includes('id="dep-fb"') && !html.includes('id="dep-project-err"') && !html.includes('id="dep-tag-err"'),
+  'S3：dep-form 九件全零残留（能力并入发布表单镜像库源）');
+ok((html.match(/内存需求/g) || []).length === 1 && (html.match(/监听端口/g) || []).length === 1,
+  'S3/验收 4：「内存需求」「监听端口」label 全站各恰好 1 次');
 for (const s of ['① 压缩', '② 上传', '③ 发布', '④ 完成']) ok(html.includes(s), `§12.1：状态条分段「${s}」`);
+ok(html.includes('沿用上次发布参数'), '§5：预填注记文案');
 ok(html.includes('压缩后总长') && html.includes('断点续传') && html.includes('复制地址'), '§12.1：②段文案「已传/压缩后总长」+ 断点续传 + 完成段复制按钮');
 ok(html.includes('自动生成随机项目名') || html.includes('留空自动生成'), '§12.1：项目留空自动生成随机 8 位');
 ok(html.includes('重试'), '§12.1：失败可重试按钮');
@@ -1550,12 +1578,12 @@ for (const s of ['发放新账号', '同时授予管理员', '仅显示一次', 
   ok(html.includes(s), `§12.2 新增文案全中文：${s}`);
 }
 // —— §13.1 三入口并存（一键不取代分步）+ §13.2/13.3 Redis 隔离 ——
-ok(html.includes('id="pub-submit"') && html.includes('id="btn-upload-only"') && html.includes('id="dep-submit"'),
-  '§13.1：三入口并存（一键部署 pub-submit / 仅上传 btn-upload-only / 部署 dep-submit）');
-for (const s of ['一键部署', '仅上传', '刷新镜像清单', '镜像已入库']) ok(html.includes(s), `§13.1：入口文案「${s}」`);
+ok(html.includes('id="pub-submit"') && html.includes('id="btn-upload-only"'),
+  'plan-17 §5：发布主按钮 pub-submit + 次要按钮「仅上传」（三入口收敛为单表单）');
+for (const s of ['仅上传', '镜像已入库', '镜像库（已入库镜像）']) ok(html.includes(s), `§13.1/§5：入口与镜像源文案「${s}」`);
 ok(html.includes('/_api/images'), '§13.1：/_api/images 已接线（镜像 ComboBox 数据源）');
 ok(html.includes('list="dl-images"') && html.includes('id="dl-images"'), '§13.1：镜像 ComboBox（datalist 前缀过滤）');
-ok(html.includes('旧版本单独部署'), '§13.1：部署表单注明旧版本单独部署入口');
+ok(html.includes('onImagePick'), '§5：镜像库源选中即带出项目/标签（onImagePick 保留）');
 ok(html.includes('仅显示您名下项目的库') && html.includes('管理员视图'), '§13.2/13.3：Redis 浏览隔离文案 + 管理员视图标注');
 ok(html.includes('界面级/协作级隔离') || html.includes('界面级'), '§13.2：诚实边界文案（非安全边界）');
 // —— §14 磁盘空间显示 + 镜像删除 ——
