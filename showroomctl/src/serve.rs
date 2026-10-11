@@ -1011,12 +1011,41 @@ fn uri_str(uri: &OriginalUri) -> String {
 }
 
 fn qmap(uri: &OriginalUri) -> HashMap<String, String> {
-    // 参数字符集受 SPEC §4 限制（小写字母数字连字符），免 percent-decode
+    // Redis key 含 `:` 等符号，前端 encodeURIComponent 会编码——必须 percent-decode
     uri.query()
         .unwrap_or_default()
         .split('&')
-        .filter_map(|kv| kv.split_once('=').map(|(k, v)| (k.to_string(), v.to_string())))
+        .filter_map(|kv| {
+            kv.split_once('=').map(|(k, v)| {
+                (percent_decode(k), percent_decode(v))
+            })
+        })
         .collect()
+}
+
+/// 极简 percent-decode（%XX 十六进制 → 字节；'+' → 空格）
+fn percent_decode(s: &str) -> String {
+    let bytes = s.as_bytes();
+    let mut out = Vec::with_capacity(bytes.len());
+    let mut i = 0;
+    while i < bytes.len() {
+        match bytes[i] {
+            b'%' if i + 2 < bytes.len() => {
+                let hex = |b: u8| (b as char).to_digit(16).unwrap_or(0) as u8;
+                out.push(hex(bytes[i + 1]) << 4 | hex(bytes[i + 2]));
+                i += 3;
+            }
+            b'+' => {
+                out.push(b' ');
+                i += 1;
+            }
+            b => {
+                out.push(b);
+                i += 1;
+            }
+        }
+    }
+    String::from_utf8_lossy(&out).into_owned()
 }
 
 fn qget(m: &HashMap<String, String>, k: &str) -> R<String> {

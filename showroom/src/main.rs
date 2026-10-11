@@ -230,12 +230,12 @@ fn run(cli: &Cli) -> Result<(), String> {
             // SKILL.md 从 /_bootstrap 下载或内嵌
             const SKILL_MD: &str = r##"---
 name: showroom-publisher
-description: 把 Docker 镜像形式的 Demo/演示程序发布到 showroom 展示平台（dejoy-node，内网 192.168.4.55 / 公网 47.107.155.180:10100）。凡用户提到发布 demo、部署演示环境、showroom、发布展项、demo 上线、更新 demo 版本、看 demo 日志、回滚 demo、管理 demo 数据库——一律用本 skill 的 showroom CLI 完成，不要手写 curl 或 docker 命令。
+description: 把 Docker 镜像形式的 Demo/演示程序发布到 showroom 展示平台（dejoy-node，内网 your-host / 公网 your-public-host:port）。凡用户提到发布 demo、部署演示环境、showroom、发布展项、demo 上线、更新 demo 版本、看 demo 日志、回滚 demo、管理 demo 数据库——一律用本 skill 的 showroom CLI 完成，不要手写 curl 或 docker 命令。
 ---
 
 # Showroom 发布
 
-所有操作通过 `showroom` CLI 完成（工具优先，不要自己拼 HTTP/签名）。CLI 未安装时先跑 `/home/jeffrey/.agents/skills/showroom-publisher/scripts/install-cli.sh`（需内网可达 192.168.4.55）。
+所有操作通过 `showroom` CLI 完成（工具优先，不要自己拼 HTTP/签名）。CLI 未安装时先跑 `/home/jeffrey/.agents/skills/showroom-publisher/scripts/install-cli.sh`（需内网可达 your-host）。
 
 ## 0. 前置检查（每次任务开始先跑）
 
@@ -246,7 +246,7 @@ showroom doctor
 - 全绿 → 直接干活。
 - 提示缺密钥 → `showroom keygen`，把输出的 `ed25519:...` 公钥串给用户，让用户找平台管理员执行 `showroomctl user-add <用户名> --pubkey <公钥串>`，登记完重跑 doctor。
 - 提示缺 config → 让用户提供账号名和 registry 密码，然后：
-  `showroom config --user <名> --server-lan http://192.168.4.55 --server-public http://47.107.155.180:10100 --registry-user <名> --registry-password <密码>`
+  `showroom config --user <名> --server-lan http://your-host --server-public http://your-public-host:port --registry-user <名> --registry-password <密码>`
   （`--server-public` 可选：只有需要从公网发布时才配。）
 - **中间态（重要）**：密钥/config 都齐、唯独「签名自测」一项 ✗ 且其余全 ✓ = 公钥还没被管理员登记——这不是故障，把 doctor 输出顶部的公钥串交给用户走登记流程，登记后重跑即绿。此时不要 push/publish（会 E_AUTH）。
 
@@ -265,7 +265,7 @@ showroom push   [项目] <tag>              # 项目名可省略=自动随机 8 
 showroom publish [项目] <tag> --wait      # 项目名可省略=自动随机并打印；起容器→健康→打印 URL
 ```
 
-- URL 规则：`http://192.168.4.55/<项目名>/`（公网同路径换域名）。项目名规则 `^[a-zA-Z0-9][a-zA-Z0-9-]{0,30}$`。
+- URL 规则：`http://your-host/<项目名>/`（公网同路径换域名）。项目名规则 `^[a-zA-Z0-9][a-zA-Z0-9-]{0,30}$`。
 - **多版本并存 = 多个项目**（自命名区分，如 `demo` / `demo-pr42`）；要替换就同名重发（数据库数据保留）。
 - 内存为「内存需求」语义：系统按 可用内存−预留(1536MB) 是否满足需求做准入，不足报 E_QUOTA（消息含三个数字）。
 
@@ -298,7 +298,7 @@ showroom db reset <项目> --confirm                    # 清库重建（破坏�
 - `rm`/`rollback`/`db reset`/`db restore` 执行前必须获得用户明确确认。
 - 私钥/seed、registry 密码不得写入仓库、日志或聊天记录。
 - 保留名：v2/_api/_bootstrap/_console。
-- 平台侧出问题（502/路由 404 等）：报告用户，让管理员上主机处理（`ssh dejoy@192.168.4.55`，服务名 showroom-api/caddy/docker/chmlfrp），不要尝试直接改主机。
+- 平台侧出问题（502/路由 404 等）：报告用户，让管理员上主机处理（`ssh dejoy@your-host`，服务名 showroom-api/caddy/docker/chmlfrp），不要尝试直接改主机。
 "##;
             let skill_path = skill_dir.join("SKILL.md");
             std::fs::write(&skill_path, SKILL_MD).map_err(|e| format!("写入失败：{e}"))?;

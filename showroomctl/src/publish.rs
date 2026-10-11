@@ -357,7 +357,7 @@ fn import_inner(root: &Path, user: &str, project: &str, tag: &str, sealed: &Path
     let target = image_ref(user, project, tag);
     dockerops::docker(&["tag", src, &target])?;
     dockerops::docker(&["push", &target])?; // 主机 root 已 docker login 127.0.0.1:5000
-    dockerops::manifest_digest(root, &format!("{user}/{project}"), tag)
+    dockerops::manifest_digest(root, &format!("{}/{}", user.to_lowercase(), project.to_lowercase()), tag)
 }
 
 // —— 分片导入会话（SPEC §8.1；_tmp/<id>.bin 追加 + <id>.meta JSON；陈旧 >24h 由 gc-images 清）——
