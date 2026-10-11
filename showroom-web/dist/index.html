@@ -130,6 +130,10 @@
   }
   progress { width: 100%; height: 14px; }
   .status-ok { color: var(--ok); } .status-bad { color: var(--bad); } .status-mid { color: var(--warn); }
+  /* plan-17 §4：7 态状态机——待部署=灰（仅镜像无容器）；重建中=呼吸（reduced-motion 时静止） */
+  .st-wait { color: var(--fg-dim); }
+  .st-breath { animation: st-pulse 1.6s ease-in-out infinite; }
+  @keyframes st-pulse { 50% { opacity: .4; } }
   /* §12.1 一键部署状态条：四段步骤 / 失败标红 / 完成大字 URL；§12.2 管理标签 */
   .wz-step.done { background: #21362a; border-color: #3a6b4c; color: #a9e8b8; }
   .wz-step.err { background: #3a2226; border-color: #6b3a42; color: #ffb3bd; }
@@ -949,9 +953,70 @@ const fmtGB = (n) => { // admin/status 磁盘字节（df -B1）→ 人读；非�
   return Number.isFinite(v) ? `${(v / 1024 ** 3).toFixed(1)} GB` : String(n ?? '—');
 };
 const esc = (s) => String(s ?? '').replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
-const STATUS_CN = { running: '运行中', exited: '已退出', paused: '已暂停', restarting: '重启中', created: '已创建', dead: '异常终止', missing: '未部署' };
+const STATUS_CN = { running: '运行中', exited: '已退出', paused: '已暂停', restarting: '重启中', created: '已创建', dead: '异常终止' }; // 管理页容器列表用（missing 不进 UI）
 const statusCn = (s) => STATUS_CN[s] || s || '未知';
-const statusCls = (s) => s === 'running' ? 'status-ok' : (s === 'missing' ? 'status-bad' : 'status-mid');
+const statusCls = (s) => s === 'running' ? 'status-ok' : 'status-mid';
+
+// —— plan-17 §4：展项 7 态显示机（服务器真值 5 + 本地在途 2；显示层只出 7 词，后端原词进 tooltip） ——
+const PUB_REBUILD_MS = 60000; // 发布成功后「重建中」滚动窗口
+const localState = { publishing: new Set(), failedUntil: new Map(), rebuiltUntil: new Map() };
+function markPublishing(project) { localState.publishing.add(project); renderProjects(); }
+function markPublishDone(project) {
+  localState.publishing.delete(project);
+  localState.failedUntil.delete(project);
+  localState.rebuiltUntil.set(project, Date.now() + PUB_REBUILD_MS);
+  setTimeout(() => { if (state.loggedIn) refreshProjects(true); }, PUB_REBUILD_MS + 1000); // 窗口结束回真实态
+}
+function markPublishFail(project) { localState.publishing.delete(project); localState.failedUntil.set(project, Date.now() + PUB_REBUILD_MS); }
+function projState(p) {
+  const raw = String(p.status || '');
+  const q = p.project;
+  const now = Date.now();
+  if (localState.publishing.has(q))
+    return { label: '发布中…', cls: 'st-wait', breath: false, tip: '发布请求进行中（本地在途）：行操作已禁用，请稍候', act: { update: 0, logs: 0, ss: null, more: 0 } };
+  if (deploy.phase === 'upload' && deploy.project === q)
+    return { label: `上传中${deploy.upPct != null ? ` ${deploy.upPct}%` : ''}`, cls: 'st-wait', breath: false,
+      tip: '镜像分片上传中（本地在途）：完成状态条见发布页；失败可断点续传', act: { update: 0, logs: 0, ss: null, more: 0 } };
+  if (raw === 'running')
+    return { label: '运行中', cls: 'status-ok', breath: false, tip: raw, act: { update: 1, logs: 1, ss: 'stop', more: 1 } };
+  if (raw === 'exited' || raw === 'paused' || raw === 'created')
+    return { label: '已停止', cls: 'status-mid', breath: false, tip: raw, act: { update: 1, logs: 1, ss: 'start', more: 1 } };
+  if (raw === 'restarting' || (localState.rebuiltUntil.get(q) || 0) > now)
+    return { label: '重建中', cls: 'status-mid', breath: true, tip: `${raw || 'publish:ok(本地)'}：更新发布成功后的滚动窗口`, act: { update: 0, logs: 1, ss: null, more: 0 } };
+  if (raw === 'dead' || (localState.failedUntil.get(q) || 0) > now)
+    return { label: '异常', cls: 'status-bad', breath: false, tip: `${raw || 'publish:fail(本地)'}：可看日志排查，或更新重新发布`, act: { update: 1, logs: 1, ss: null, more: 0, rmOnly: 1 } };
+  if (raw === 'missing')
+    return { label: '待部署', cls: 'st-wait', breath: false, tip: '仅镜像无容器：从发布页选择镜像即可拉起', act: { update: 0, logs: 0, ss: null, more: 0, deploy: 1 } };
+  return { label: '已停止', cls: 'status-mid', breath: false, tip: raw, act: { update: 1, logs: 1, ss: 'start', more: 1 } }; // 未知原词回落已停止（原词进 tooltip）
+}
+/** 行操作区按状态机渲染（§4 可执行动作表）；●+文字双通道（色盲可辨，单色打印可分）。 */
+function rowStatusHtml(p) {
+  const st = projState(p);
+  return `<td class="${st.cls}" title="${esc(st.tip)}"><span class="${st.breath ? 'st-breath' : ''}">●</span> ${esc(st.label)}</td>`;
+}
+function rowActionsHtml(p) {
+  const st = projState(p);
+  const q = esc(p.project);
+  const b = (act, label, extra = '') => `<button class="act" data-act="${act}" data-p="${q}"${extra}>${label}</button>`;
+  const open = `<a class="act" href="${esc(externalUrl(p))}" target="_blank" rel="noopener" title="新标签打开 ${q}">打开</a>`;
+  if (st.act.deploy) // 待部署：部署（→发布页预填项目名）·删除；日志禁用占位（§4）
+    return `${open}${b('deploy-row', '部署', ' title="到发布页预填该项目并选择镜像拉起"')}${b('logs', '日志', ' disabled')}${b('rm', '删除')}`;
+  let html = open
+    + (st.act.update ? b('update', '更新') : b('update', '更新', ' disabled'))
+    + (st.act.logs ? b('logs', '日志') : b('logs', '日志', ' disabled'));
+  if (st.act.ss) html += b(st.act.ss, st.act.ss === 'stop' ? '停止' : '启动');
+  if (st.act.rmOnly) html += b('rm', '删除');
+  if (st.act.more) html += `<span class="more-wrap">
+          <button class="act" data-act="more" data-p="${q}" aria-haspopup="menu" aria-expanded="false">更多 ▾</button>
+          <span class="menu hidden" role="menu" aria-label="更多操作">
+            <button class="act" role="menuitem" data-act="rollback" data-p="${q}">回滚到上一版本</button>
+            <button class="act" role="menuitem" data-act="env" data-p="${q}">环境变量</button>
+            <button class="act" role="menuitem" data-act="dblink" data-p="${q}">数据</button>
+            <button class="act danger" role="menuitem" data-act="rm" data-p="${q}">删除</button>
+          </span>
+        </span>`;
+  return html;
+}
 
 // —— 对外 URL 展示策略（plan-17 §6）：全站主链接一律 externalUrl()；服务端 p.url 仅作 tooltip ——
 // base 解析：① 设置 sr.publicBase（#set-base）→ ② location.origin（host 非私网）→ ③ 兜底 origin + 内网提示条
@@ -2204,32 +2269,22 @@ function renderProjects() {
   else {
     const acts = state.projects.map((p) => {
       const q = esc(p.project);
-      const canStop = p.status === 'running'; // S5 换 7 态表后按状态机细化禁用
       return `<tr data-row="${q}">
       <td class="mono">${q}</td>
-      <td class="${statusCls(p.status)}">${esc(statusCn(p.status))}</td>
+      ${rowStatusHtml(p)}
       <td class="wrap"><a href="${esc(externalUrl(p))}" target="_blank" rel="noopener" title="服务器登记地址：${esc(p.url || '—')}">${esc(externalUrl(p))}</a></td>
       <td class="mono">${esc(p.tag)}</td>
       <td class="mono">${esc(fmtTime(p.updated))}</td>
-      <td>
-        <a class="act" href="${esc(externalUrl(p))}" target="_blank" rel="noopener" title="新标签打开 ${q}">打开</a>
-        <button class="act" data-act="update" data-p="${q}">更新</button>
-        <button class="act" data-act="logs" data-p="${q}">日志</button>
-        <button class="act" data-act="${canStop ? 'stop' : 'start'}" data-p="${q}">${canStop ? '停止' : '启动'}</button>
-        <span class="more-wrap">
-          <button class="act" data-act="more" data-p="${q}" aria-haspopup="menu" aria-expanded="false">更多 ▾</button>
-          <span class="menu hidden" role="menu" aria-label="更多操作">
-            <button class="act" role="menuitem" data-act="rollback" data-p="${q}">回滚到上一版本</button>
-            <button class="act" role="menuitem" data-act="env" data-p="${q}">环境变量</button>
-            <button class="act" role="menuitem" data-act="dblink" data-p="${q}">数据</button>
-            <button class="act danger" role="menuitem" data-act="rm" data-p="${q}">删除</button>
-          </span>
-        </span>
-      </td>
+      <td>${rowActionsHtml(p)}</td>
       <td><button class="act" data-act="logs" data-p="${q}" title="展开日志抽屉" aria-expanded="false">▾</button></td>
     </tr>`;
     }).join('');
     tb.innerHTML = acts;
+  }
+  // 行抽屉保持：重渲后重新挂到原项目行后（上传/发布中行内标记刷新不丢抽屉）
+  if (drawerRow.dataset.drawer) {
+    const r = $('proj-tbl')?.querySelector?.(`tr[data-row="${drawerRow.dataset.drawer}"]`);
+    if (r && r.after) r.after(drawerRow);
   }
   // 项目下拉候选 = 已有项目
   $('dl-projects').innerHTML = [...new Set(state.projects.map((p) => p.project))]
@@ -2269,7 +2324,7 @@ async function onProjAction(ev) {
   if (act === 'logs') { closeMoreMenu(); return openDrawer(project); } // plan-17 §1：日志随行抽屉展开（J3 ≤2 点击）
   if (act === 'more') return toggleMoreMenu(btn);
   closeMoreMenu();
-  if (act === 'update') {
+  if (act === 'update' || act === 'deploy-row') { // 待部署行「部署」=发布页预填项目名（§4）
     const row = state.projects.find((x) => x.project === project);
     if (row) updateViaPub(row);
     return;
@@ -2322,6 +2377,7 @@ async function deployRun(mode) {
   $('dp-bar').classList.remove('err');
   const { project, tag, file } = deploy;
   let phase = mode === 'publish' ? 'publish' : (mode === 'resume' ? 'upload' : 'compress');
+  deploy.phase = phase; // plan-17 §4：本地「上传中」行标记数据源
   try {
     if (mode === 'fresh') { // ① 压缩（未选文件则①②一并跳过）
       if (file) {
@@ -2341,6 +2397,8 @@ async function deployRun(mode) {
     }
     if (file && mode !== 'publish') { // ② 上传（失败重试走断点续传，§8.1）
       phase = 'upload';
+      deploy.phase = 'upload';
+      renderProjects(); // 行内标记「上传中」（dp-bar 为主显示）
       dpSet(2, 'on');
       if (deploy.uploadId) {
         await resumeUploadCore(deploy.uploadId, {
@@ -2365,6 +2423,8 @@ async function deployRun(mode) {
       dpText('上传完成：镜像已导入 registry。');
     }
     phase = 'publish'; // ③ 发布（参数取自表单）
+    deploy.phase = 'publish';
+    markPublishing(project); // 行内标记「发布中…」
     dpSet(3, 'on');
     dpText('③ 发布中…');
     const body = { project, tag, container_port: parseInt($('pub-cport').value, 10) || 8080 };
@@ -2372,6 +2432,7 @@ async function deployRun(mode) {
     if (memv) body.mem = memv;
     const j = await api('POST', '/_api/publish', body);
     try { localStorage.setItem('sr.conf.' + project, JSON.stringify({ tag, cport: parseInt($('pub-cport').value, 10) || 8080, ts: Date.now() })); } catch { /* 存储不可写忽略 */ } // plan-17 §5：下次发布/「更新」预填
+    markPublishDone(project); // 「重建中」60s 滚动窗口（§4）
     dpSet(3, 'done'); dpSet(4, 'done'); // ④ 完成：大字 URL + 复制
     const url = j.url || `/${project}/`;
     dpText('④ 完成：部署成功。');
@@ -2384,13 +2445,14 @@ async function deployRun(mode) {
     deploy.failAt = null;
   } catch (e) {
     deploy.failAt = phase;
+    if (phase === 'publish') markPublishFail(project); // 本地「异常」终态标记（§4）
     $('dp-bar').classList.add('err');
     dpSet(phase === 'compress' ? 1 : phase === 'upload' ? 2 : 3, 'err');
     dpText(`「${PHASE_CN[phase]}」步骤失败：${errText(e)}${phase === 'upload' && deploy.uploadId ? '；点「重试」将从断点续传（保留已传分片）。' : '；可点「重试」再次执行。'}`);
     $('dp-retry').classList.remove('hidden');
     apiFail(`一键部署（${PHASE_CN[phase]}）`, e);
     if (phase === 'compress') deploy.blob = null;
-  } finally { deploy.busy = false; upBusy = false; }
+  } finally { deploy.busy = false; upBusy = false; deploy.phase = null; deploy.upPct = null; renderProjects(); }
 }
 /** 校验并填充公共发布参数（项目留空自动生成回填；标签必填）；返回 null=校验未过。 */
 function collectPubFields(requireFile) {
@@ -2460,6 +2522,7 @@ async function onUploadOnly() {
 function dpUploadNote(sent, total) {
   upProgress(sent, total);
   $('dp-prog').max = total; $('dp-prog').value = sent;
+  deploy.upPct = total ? Math.floor((sent / total) * 100) : 0; // 行内「上传中 x%」
   dpText(`② 上传中：已传 ${sent} / 压缩后总长 ${total} 字节（${total ? ((sent / total) * 100).toFixed(1) : '0'}%）`);
 }
 /** 全新上传（一键部署②段）：import-begin → 本地会话登记 → 逐片加密上传 → 收尾。 */

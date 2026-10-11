@@ -244,7 +244,10 @@ const sealedTotal = (n) => WRAP + n + Math.ceil(n / SEG) * (NONCE + TAG);
 const resp = (status, obj) => ({ ok: status < 400, status, text: async () => JSON.stringify(obj) });
 // plan-17 S1：whoami 附带平台公钥 PEM（服务端读 state/platform_rsa.pub 下发；假 PEM 仅作自动带回验证，密封前场景 7 会替换真钥）
 const WHOAMI_PEM = '-----BEGIN PUBLIC KEY-----\nMIIBsmokeAutoPem\n-----END PUBLIC KEY-----\n';
-const PROJECTS = { projects: [{ project: 'demo', user: 'alice', tag: 'v1', url: '/demo/', status: 'running', port: 8100, mem: '256m', cpu: 0, updated: 1760107200 }] };
+const PROJECTS = { projects: [
+  { project: 'demo', user: 'alice', tag: 'v1', url: '/demo/', status: 'running', port: 8100, mem: '256m', cpu: 0, updated: 1760107200 },
+  { project: 'demo0', user: 'alice', tag: 'v0', url: '/demo0/', status: 'missing', port: 0, mem: '128m', cpu: 0, updated: 1760020800 }, // §4：仅镜像无容器 → 待部署
+] };
 let mode = 'unregistered'; // unregistered | ok（key-bind 成功 → ok）
 // —— plan-16 §2.2 auth 端点族 mock（与页面 MOCK 垫片同一 toy 协议：ke2 内嵌验证因子，
 //    错密码/未知用户在客户端本地 finish 即失败——行为契约与真 OPAQUE 一致：无第三请求） ——
@@ -635,7 +638,15 @@ ok(!wireTexts.some((t) => t.includes('alice-pw') || t.includes('wrong-pw')),
   'OPAQUE 断言：全部上线请求体（含 ke1/ke3 与签名体）均无密码明文（mock 垫片形状级验证）');
 ok(!($s('msg').textContent || '').includes('继承管理员'), '非管理员账号：无 admin 继承提示');
 await sleep(60); // 展项列表异步渲染
-ok(($s('proj-fb').textContent || '').includes('已加载 1 个展项'), '展项列表已请求并渲染');
+ok(($s('proj-fb').textContent || '').includes('已加载 2 个展项'), '展项列表已请求并渲染');
+{
+  const ptbl = $s('proj-tbl:q').innerHTML || '';
+  ok(ptbl.includes('>●</span> 运行中') && ptbl.includes('>●</span> 待部署'), 'S5：●+文字双通道状态（运行中/待部署）');
+  ok(!ptbl.includes('未部署') && !ptbl.includes('missing'), 'S5：「未部署」「missing」零进 UI（§4 词表纪律）');
+  ok(ptbl.includes('仅镜像无容器：从发布页选择镜像即可拉起'), 'S5：待部署 tooltip 说明镜像在库可拉起');
+  ok(ptbl.includes('data-act="deploy-row"') && />部署</.test(ptbl), 'S5：待部署行可执行「部署」（→发布页预填）');
+  ok(/title="running"/.test(ptbl), 'S5：后端原词进 tooltip（运行中行 title=running）');
+}
 await sleep(60); // whoami 异步返回（§12.2）
 ok(($s('hd-pempub').value || '').startsWith('-----BEGIN PUBLIC KEY-----'), 'S1：whoami 附带 platform_pem 自动写入 PEM 字段（免手工粘贴）');
 ok((store.get('sr.pempub') || '').startsWith('-----BEGIN PUBLIC KEY-----'), 'S1：platform_pem 已自动缓存到 sr.pempub（写现有键）');
@@ -1551,6 +1562,14 @@ ok(html.indexOf('id="st-events"') > html.indexOf('id="tab-admin"') && html.inclu
 ok(html.indexOf('id="rd-db"') > html.indexOf('id="tab-db"') && html.indexOf('id="rd-db"') < html.indexOf('id="tab-help"'),
   'S2：Redis 浏览迁入数据页（rd-* 换父容器，id 不变）');
 ok(html.includes('data-drawer') || html.includes("drawerRow.dataset.drawer"), 'S2：行抽屉 data-drawer 机制（无全局行 id）');
+{
+  const words = ['运行中', '已停止', '重建中', '异常', '待部署', '上传中', '发布中'];
+  for (const w of words) ok(html.includes(w), `S5/验收 5：7 态词表含「${w}」`);
+  ok(!html.includes('未部署'), 'S5/验收 5：「未部署」全站零出现');
+  ok(html.includes('st-breath') && html.includes('@keyframes st-pulse'), 'S5：重建中呼吸动画（reduced-motion 全局禁用即静止）');
+  ok(html.includes('markPublishing') && html.includes('markPublishDone') && html.includes('markPublishFail'),
+    'S5：本地在途标记（发布中/上传中/异常终态/60s 重建窗口）已接线');
+}
 ok(html.includes('<th>名称</th><th>状态</th><th>对外 URL</th><th>标签</th><th>更新</th><th>操作</th><th>详情</th>'),
   'S4：列序 名称·状态·对外URL·标签·更新·操作·▾（§1）');
 ok(html.includes('visibilitychange') && html.includes('暂无展项——点顶栏「+ 发布」发布新 Demo'),
