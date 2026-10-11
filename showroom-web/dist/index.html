@@ -1125,9 +1125,7 @@ $('lg-pass').addEventListener('input', () => fieldErr('lg-pass', ''));
 $('lg-expert').addEventListener('toggle', setupExpert);
 for (const r of ['use', 'import']) $(`wz-r-${r}`).addEventListener('change', () => pickKeyChoice(r));
 $('wz-seed').addEventListener('input', () => fieldErr('wz-seed', ''));
-$('wz-verify').addEventListener('click', onExpertKey);
-$('wz-recheck').addEventListener('click', () => expertVerify());
-$('wz-copypub').addEventListener('click', () => copyText(state.pub, '公钥串'));
+// wz-* 事件绑定移至 buildApp()（模板克隆后元素才存在）
 $('lg-reenter').addEventListener('click', async () => { // 退出登录后：本机钥匙仍有效，免密码重进
   busy($('lg-reenter'), true, '进入中…');
   $('lg-fb').textContent = '正在验证本机钥匙…';
@@ -1338,6 +1336,17 @@ const updatePubUrl = () => {
 };
 function buildApp() {
   $('app').append($('app-tpl').content.cloneNode(true));
+
+  // 专家路径事件绑定（元素在 app 模板克隆后才存在于 DOM）
+  const zv = $('wz-verify'); if (zv) zv.addEventListener('click', onExpertKey);
+  const zr = $('wz-recheck'); if (zr) zr.addEventListener('click', () => expertVerify());
+  const zc = $('wz-copypub'); if (zc) zc.addEventListener('click', () => copyText(state.pub, '公钥串'));
+  const zi = $('wz-r-import'); if (zi) zi.addEventListener('input', () => {
+    $('wz-seed-err').classList.add('hidden');
+  });
+  const zu = $('wz-r-use'); if (zu) zu.addEventListener('input', () => {
+    $('wz-seed-err').classList.add('hidden');
+  });
   $('hd-user').textContent = state.user;
   $('hd-srv').textContent = location.origin + '/_api';
   $('hd-pempub').value = localStorage.getItem('sr.pempub') || '';
