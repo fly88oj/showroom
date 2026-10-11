@@ -104,7 +104,7 @@ const shown = (id) => !hidden(id);
 const tabBtn = (name) => ({ dataset: { tab: name }, classList: new Cls(), closest: () => ({ dataset: { tab: name } }) });
 const clickTab = (name) => fire($s('tabs'), 'click', { target: tabBtn(name) });
 /** tabs 方向键支持：querySelectorAll 桩返回按钮序列（与页面 #tabs 初始顺序一致）。 */
-const armTabs = () => { $s('tabs').querySelectorAll = () => ['proj', 'db', 'status', 'help'].map(tabBtn); };
+const armTabs = () => { $s('tabs').querySelectorAll = () => ['proj', 'pub', 'img', 'db', 'help'].map(tabBtn); }; // plan-17 §1 五标签
 /** 与真实登录 HTML 的初始 class 对齐（惰性元素桩无 class 信息；断言「初始不可见」前先打桩）。 */
 const armLoginInit = () => {
   for (const id of ['wz-p3', 'wz-pubbox', 'wz-import-box', 'wz-seed-err', 'lg-reenter', 'lg-forget']) $s(id).classList.add('hidden');
@@ -725,9 +725,9 @@ $s('dep-project').value = 'demo'; // 还原（后续场景复用）
 
 // —— tablist 方向键切换（role=tablist 键盘约定） ——
 fire($s('tabs'), 'keydown', { key: 'ArrowRight', preventDefault() {}, target: tabBtn('proj') });
-ok(!hidden('tab-db') && hidden('tab-proj'), 'ArrowRight：proj → db 切换');
-fire($s('tabs'), 'keydown', { key: 'ArrowLeft', preventDefault() {}, target: tabBtn('db') });
-ok(!hidden('tab-proj') && hidden('tab-db'), 'ArrowLeft：db → proj 切回（首尾循环）');
+ok(!hidden('tab-pub') && hidden('tab-proj'), 'ArrowRight：proj → pub 切换（五标签）');
+fire($s('tabs'), 'keydown', { key: 'ArrowLeft', preventDefault() {}, target: tabBtn('pub') });
+ok(!hidden('tab-proj') && hidden('tab-pub'), 'ArrowLeft：pub → proj 切回（首尾循环）');
 
 // —— §11 发布表单：随机项目名 + 「换一个」 + URL 恒 /<project>/ ——
 const rp1 = $s('pub-project').value;
@@ -761,33 +761,29 @@ ok(!store.has('sr.publicBase'), 'S1 §6：清空即回退当前访问地址（�
 }
 ok(!els.has('pub-slot') || $s('pub-slot') === undefined, '发布表单无版本维度控件');
 
-// ═══ 场景 6a：§10.4 平台事件流（进入状态页自动订阅） ═══
-const projBase = projectsN;
-clickTab('status');
-await sleep(80);
-ok(eventsN === 1, '进入状态页：自动订阅 /_api/events');
+// ═══ 场景 6a：§10.4 平台事件流（S2：展项页可见即订阅，事件驱动列表自动刷新，离页退订） ═══
+ok(await waitFor(() => eventsN >= 1, 5000), '登录落地展项页：自动订阅 /_api/events（零点击）');
 ok(/^SR-SIG1 /.test(lastEventsAuth), '事件流为签名 GET（SR-SIG1，空 body 哈希）');
-ok(projectsN === projBase + 1, '进入状态页：健康列表刷新一次');
-ok(($s('ev-state').textContent || '').includes('5 秒后自动重连'), '事件流关闭（done）→ 显示 5 秒重连');
+ok(await waitFor(() => projectsN >= 2, 5000), '事件到达 → 2 秒去抖自动刷新展项列表（验收 11：无手动刷新）');
+ok(/5 秒后自动重连|已连接/.test($s('ev-state').textContent || ''), '事件流状态：流关闭（done）→ 5 秒重连或已重连');
 const evTxt = $s('st-events').textContent || '';
 ok(evTxt.includes('sr-demo') && evTxt.includes('启动') && evTxt.includes('转为健康'), '事件渲染：时间+动作+容器（含健康检查翻译）');
 ok(!evTxt.includes('other-box'), '非 sr- 前缀容器被过滤');
 ok(!evTxt.includes('hb') && !evTxt.includes('true'), '心跳行被忽略');
 ok(/^\d{2}:\d{2}:\d{2}/.test(evTxt), '事件行带时间戳（HH:MM:SS）');
-await sleep(2100);
-ok(projectsN === projBase + 2, '事件到达 → 2 秒去抖自动刷新健康列表');
-ok(await waitFor(() => eventsN === 2, 4500), '断线 5 秒后自动重连（第二次订阅）');
+clickTab('pub');
+ok(($s('ev-state').textContent || '').includes('未连接'), '离开展项页：事件流退订（服务端收尸子进程）');
+clickTab('proj');
+ok(await waitFor(() => eventsN >= 2, 5000), '回到展项页：自动重新订阅（第二次订阅）');
 await sleep(80);
 ok(($s('st-events').textContent || '').includes('sr-demo2') && ($s('st-events').textContent || '').includes('停止'), '重连后新事件继续滚动（最近 20 条）');
-clickTab('proj');
-ok(($s('ev-state').textContent || '').includes('未连接'), '离开状态页：事件流停止');
 
-// ═══ 场景 6b：§10.4 日志实时流（ndjson 行缓冲 + 1000 行帽 + 开关停流） ═══
-clickTab('status');
+// ═══ 场景 6b：§10.4 日志实时流（S2：st-logs* 迁入行抽屉——行「日志」展开即订阅，J3 ≤2 点击） ═══
 $s('st-logs-live').checked = true; // 与真实浏览器 HTML 默认 checked 对齐
 fire($s('st-logs-live'), 'change');
-fire($s('st-tbl'), 'click', { target: { closest: () => ({ dataset: { logs: '', p: 'demo' } }) } });
+fire($s('proj-tbl'), 'click', { target: { closest: () => ({ dataset: { act: 'logs', p: 'demo' } }) } });
 await waitFor(() => logsN === 1, 3000);
+ok($s('proj-tbl').dataset !== undefined, '行抽屉随「日志」展开（data-drawer 行插机制）');
 ok(lastLogsUrl.includes('/_api/logs-stream?project=demo&tail=100'), `日志流请求仅按项目（${lastLogsUrl}）`);
 ok(!lastLogsUrl.includes('slot'), '日志流请求无版本参数');
 ok(/^SR-SIG1 /.test(lastLogsAuth), '日志流为签名 GET（SR-SIG1）');
@@ -801,6 +797,9 @@ $s('st-logs-live').checked = false;
 fire($s('st-logs-live'), 'change');
 ok(($s('st-logs-fb').textContent || '').includes('已停止实时跟随'), '开关关闭 → 停流提示');
 ok(logsN === 1, '停流后不再发起日志请求（AbortController）');
+click('drawer-close');
+ok(($s('st-logs-fb').textContent || '').includes('已收起抽屉'), 'S2：收起抽屉 → 日志流随行断开（§3 离页退订）');
+ok(logsN === 1, '收起抽屉后不再发起日志请求');
 
 // ═══ 场景 6c：§10.4 三段式备份下载（begin → 轮询两轮 → 两个 chunk → 解密落地） ═══
 blobs.length = 0;
@@ -1260,8 +1259,8 @@ ok(!$s('hs-rx-run').disabled && $s('hs-rx-run').textContent === '我已了解，
 click('hs-rx-close');
 ok($s('dlg-redis-x').open === false, '扩容对话框关闭');
 
-// —— §13.2 Redis 浏览管理员视图（服务端 admin_view 标注路径） ——
-clickTab('status');
+// —— §13.2 Redis 浏览管理员视图（S2：Redis 已迁数据页；服务端 admin_view 标注路径） ——
+clickTab('db');
 await sleep(80);
 ok($s('rd-scope').textContent === '管理员视图', 'admin 钥匙：Redis 浏览 DB 下拉标注「管理员视图」（全量逻辑库）');
 clickTab('proj');
@@ -1487,6 +1486,18 @@ ok(html.includes('/_api/tool/') && html.includes('wireHelpTab') && html.includes
 // —— plan-16 收口：发卡初始密码 / 补发 / 改密入口 ——
 for (const ep of ['/_api/auth/pw-begin', '/_api/auth/pw-commit', '/_api/admin/passwd-set']) ok(html.includes(ep), `plan-16 §1.5/§2.2：${ep} 已接线`);
 ok(html.includes('id="btn-pwchange"') && html.includes('id="dlg-pw"') && html.includes('修改密码'), '改密入口：设置对话框聚合按钮 + 对话框容器');
+ok(!html.includes('id="tab-status"') && !html.includes('id="tabbtn-status"') && !html.includes('id="st-tbl"')
+  && !html.includes('id="st-auto"') && !html.includes('id="st-refresh"') && !html.includes('id="st-fb"')
+  && !html.includes('refreshStatus'),
+  'S2：tab-status 拆除——健康表/手动刷新/10s 开关归零（能力并入展项列表+行抽屉+事件流去抖）');
+ok(html.includes('id="tabbtn-pub"') && html.includes('id="tabbtn-img"') && html.includes('id="tab-pub"') && html.includes('id="tab-img"')
+  && html.includes('id="btn-new-pub"') && html.includes('id="hd-role"'),
+  'S2：五标签（我的展项/发布/镜像库/数据/帮助）+ 顶栏「+ 发布」CTA + 角色徽标');
+ok(html.indexOf('id="st-events"') > html.indexOf('id="tab-admin"') && html.includes('管理员工具'),
+  'S2：docker events 原始流降为管理员工具（st-events 迁入管理页）');
+ok(html.indexOf('id="rd-db"') > html.indexOf('id="tab-db"') && html.indexOf('id="rd-db"') < html.indexOf('id="tab-help"'),
+  'S2：Redis 浏览迁入数据页（rd-* 换父容器，id 不变）');
+ok(html.includes('data-drawer') || html.includes("drawerRow.dataset.drawer"), 'S2：行抽屉 data-drawer 机制（无全局行 id）');
 {
   const appTop = html.slice(html.indexOf('<template id="app-tpl">'), html.indexOf('</header>'));
   ok(!appTop.includes('hd-pempub') && !appTop.includes('btn-pempub') && !appTop.includes('btn-pwchange'),

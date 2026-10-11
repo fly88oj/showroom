@@ -168,6 +168,8 @@
   /* 状态监控 */
   #st-events { min-height: 3em; max-height: 9em; }
   #st-logs { min-height: 10em; }
+  /* plan-17 S2：行抽屉（日志跟随）——插在展项行后，data-drawer 标注所属项目 */
+  .drawer-row > td { background: var(--bg-input); }
   /* Redis 浏览：左右两栏滚动容器统一高度 */
   .rd-panes { align-items: flex-start; gap: var(--sp-4); }
   .rd-keys-pane { flex: 0 0 300px; }
@@ -249,9 +251,11 @@
       <div class="brand">
         <h1>Showroom 控制台</h1>
         <span class="user-badge"><span class="mono" id="hd-user"></span><span class="admin-mark hidden" id="hd-admin" title="管理员钥匙">管</span></span>
+        <span class="badge" id="hd-role" title="当前钥匙的角色（whoami 判定；未回=?)">?</span>
         <span class="srv">服务器 <span class="mono" id="hd-srv"></span></span>
       </div>
       <div class="chrome-actions">
+        <button id="btn-new-pub" title="发布新 Demo（跳转发布页）">+ 发布</button>
         <button id="btn-settings" title="对外访问域名 / 平台公钥 PEM / 修改密码 / 忘记此设备">设置</button>
         <button id="btn-logout">退出登录</button>
       </div>
@@ -259,9 +263,10 @@
   </header>
   <!-- 三层层级·第二层：标签栏（sticky，顶栏正下方）；当前标签实底高亮 -->
   <nav id="tabs" role="tablist" aria-label="控制台功能分区">
-    <button data-tab="proj" class="on" role="tab" id="tabbtn-proj" aria-selected="true" aria-controls="tab-proj">展项管理</button>
-    <button data-tab="db" role="tab" id="tabbtn-db" aria-selected="false" aria-controls="tab-db">数据库</button>
-    <button data-tab="status" role="tab" id="tabbtn-status" aria-selected="false" aria-controls="tab-status">状态监控</button>
+    <button data-tab="proj" class="on" role="tab" id="tabbtn-proj" aria-selected="true" aria-controls="tab-proj">我的展项</button>
+    <button data-tab="pub" role="tab" id="tabbtn-pub" aria-selected="false" aria-controls="tab-pub">发布</button>
+    <button data-tab="img" role="tab" id="tabbtn-img" aria-selected="false" aria-controls="tab-img">镜像库</button>
+    <button data-tab="db" role="tab" id="tabbtn-db" aria-selected="false" aria-controls="tab-db">数据</button>
     <button data-tab="help" role="tab" id="tabbtn-help" aria-selected="false" aria-controls="tab-help">帮助</button>
   </nav>
   <!-- 三层层级·第三层：内容区（1200px 居中功能卡片） -->
@@ -307,7 +312,8 @@
     </div>
     <p class="note">仅展示对外可见信息；主机端口等内部细节不在此显示。删除会一并移除容器/路由/数据库与凭据。</p>
 
-    <div class="sep"></div>
+  <!-- ———— 标签页 2：发布（plan-17 §5：全站唯一参数输入处） ———— -->
+  <section id="tab-pub" class="hidden" role="tabpanel" aria-labelledby="tabbtn-pub">
     <!-- §13.1 发布入口三存：一键部署（快捷路径）/ 仅上传（择时部署）/ 部署（下方独立表单选已有镜像）——一键不取代分步 -->
     <h2>发布新版本 <span class="badge">三入口并存：一键部署 · 仅上传 · 部署（见下方）</span></h2>
     <form id="pub-form">
@@ -363,6 +369,13 @@
       未选择文件时「一键部署」直接发布（要求镜像已在 registry 中）；镜像 tar 上传前自动经 <span class="mono">zstd-19</span> 压缩再加密（已是 <span class="mono">.tar.zst</span> 则原样上传）。
     </p>
 
+    <datalist id="dl-projects"></datalist>
+    <datalist id="dl-mem"><option value="128m"></option><option value="256m"></option><option value="512m"></option><option value="1g"></option></datalist>
+  </section>
+
+  <!-- ———— 标签页 3：镜像库（plan-17 §1：镜像清单/删除/断点续传收纳） ———— -->
+  <section id="tab-img" class="hidden" role="tabpanel" aria-labelledby="tabbtn-img">
+    <h2>镜像库</h2>
     <fieldset>
       <legend>部署（§13.1 第三入口：从镜像库选择 · 旧版本单独部署走这里）</legend>
       <div class="row">
@@ -422,6 +435,8 @@
     <datalist id="dl-mem"><option value="128m"></option><option value="256m"></option><option value="512m"></option><option value="1g"></option></datalist>
   </section>
 
+  </section>
+
   <!-- ———— 标签页 2：数据库（SPEC §9） ———— -->
   <section id="tab-db" class="hidden" role="tabpanel" aria-labelledby="tabbtn-db">
     <h2>目标库</h2>
@@ -477,42 +492,9 @@
     <h3>操作输出（psql 原文）</h3>
     <pre class="out mono" id="db-out" aria-live="polite">（尚无输出）</pre>
     <p class="fb" id="db-fb" aria-live="polite"></p>
-  </section>
-
-  <!-- ———— 标签页 3：状态监控 ———— -->
-  <section id="tab-status" class="hidden" role="tabpanel" aria-labelledby="tabbtn-status">
-    <h2>实时事件（平台容器启停）</h2>
-    <div class="row">
-      <span class="note">连接状态：<span class="mono" id="ev-state" aria-live="polite">未连接</span></span>
-      <span class="note">仅显示 <span class="mono">sr-</span> 开头的展项容器（时间 / 动作 / 容器名，最近 20 条）；心跳行忽略；事件到达后自动刷新下方健康列表（2 秒去抖）。</span>
-    </div>
-    <pre class="out mono" id="st-events" aria-live="polite">（暂无事件）</pre>
 
     <div class="sep"></div>
-    <h2>展项健康</h2>
-    <div class="row">
-      <button id="st-refresh">立即刷新</button>
-      <label class="row" for="st-auto"><input type="checkbox" id="st-auto">每 10 秒自动刷新</label>
-      <span class="fb" id="st-fb" aria-live="polite"></span>
-    </div>
-    <div class="tbl-wrap">
-      <table id="st-tbl">
-        <thead><tr><th>名称</th><th>状态</th><th>更新时间</th><th>操作</th></tr></thead>
-        <tbody><tr><td colspan="4" class="note">未加载</td></tr></tbody>
-      </table>
-    </div>
-
-    <div class="sep"></div>
-    <h2>日志（实时跟随，保留最近 1000 行）</h2>
-    <div class="row">
-      <span class="note">当前：<span class="mono" id="st-logs-target">（未选择）</span></span>
-      <label class="row" for="st-logs-live"><input type="checkbox" id="st-logs-live" checked>实时跟随（断线 5 秒自动重连）</label>
-      <span class="fb warn" id="st-logs-fb" aria-live="polite"></span>
-    </div>
-    <pre class="out mono" id="st-logs" aria-live="polite">（未选择展项）</pre>
-
-    <div class="sep"></div>
-    <!-- §13.2/13.3：DB 下拉来自 /_api/redis-dbs（服务端按用户过滤；admin 全量标注「管理员视图」）；逻辑库池 256 -->
+    <!-- §13.2/13.3（plan-17 S2 自状态页迁入）：DB 下拉来自 /_api/redis-dbs（服务端按用户过滤；admin 全量标注「管理员视图」） -->
     <h2>Redis 浏览（仅显示您名下项目的库）</h2>
     <div class="row">
       <label class="field" for="rd-db"><span>逻辑库（DB）<span id="rd-scope" class="badge"></span></span><select id="rd-db"></select></label>
@@ -669,6 +651,14 @@
 <template id="admin-tpl">
   <div id="admin-root">
     <section id="tab-admin" class="hidden" role="tabpanel" aria-labelledby="tabbtn-admin">
+      <h2>实时事件（平台容器启停 · 管理员工具）</h2>
+      <div class="row">
+        <span class="note">连接状态：<span class="mono" id="ev-state" aria-live="polite">未连接</span></span>
+        <span class="note">仅显示 <span class="mono">sr-</span> 开头的展项容器（时间 / 动作 / 容器名，最近 20 条）；心跳行忽略；事件同时驱动展项列表自动刷新（2 秒去抖）。</span>
+      </div>
+      <pre class="out mono" id="st-events" aria-live="polite">（暂无事件）</pre>
+
+      <div class="sep"></div>
       <h2>账号与钥匙</h2>
       <div class="row">
         <button id="ad-refresh">刷新</button>
@@ -1424,10 +1414,10 @@ function enterApp() {
   $('app').classList.remove('hidden');
   // plan-17 §3：登录即 4 路并发（projects/images/space/whoami），任一路失败不阻断其余（allSettled）
   Promise.allSettled([refreshProjects(true), ensureImages(), refreshSpace(true), syncAdmin()]);
+  evLive.want = true; startEventsStream(); // 进页即订阅事件流（展项页为默认落地页；验收 11 ≤5s 行状态收敛）
 }
 function logout() {
   state.loggedIn = false;
-  clearInterval(stTimer); stTimer = null; $('st-auto').checked = false;
   if (adminBuilt) { // 管理页定时器与发卡/补发/扩容对话框随登录态收尾
     clearInterval(adTimer); adTimer = null; $('ad-st-auto').checked = false;
     if ($('dlg-user-add').open) $('dlg-user-add').close();
@@ -1435,8 +1425,8 @@ function logout() {
     if ($('dlg-redis-x')?.open) $('dlg-redis-x').close(); // §15 扩容对话框同收尾
   }
   if ($('dlg-pw')?.open) $('dlg-pw').close(); // 改密对话框随登录态收尾
-  stopLogsStream('已退出登录');      // 日志实时流随登录态终止
-  logsLive.project = null; logsLive.lines = [];
+  closeDrawer();                    // 行抽屉随登录态收起（内部停日志流）
+  logsLive.lines = [];
   $('st-logs-target').textContent = '（未选择）'; logsRender();
   stopEventsStream();               // 平台事件流同上
   $('app').classList.add('hidden');
@@ -1554,7 +1544,16 @@ function buildApp() {
   wireHelpTab();
   $('pub-project').value = randomProject(); // 页面加载（建壳）时预填一次随机名；「换一个」随时重随机
   updatePubUrl();
-  wireTabs(); wireProjTab(); wireDbTab(); wireStatusTab();
+  // 行抽屉（S2）：st-logs* 在抽屉内，克隆后接线
+  $('drawer-close').addEventListener('click', () => closeDrawer());
+  logsLive.want = $('st-logs-live').checked; // 与勾选框初始状态同步
+  $('st-logs-live').addEventListener('change', () => {
+    logsLive.want = $('st-logs-live').checked;
+    if (logsLive.want && logsLive.project) startLogsStream();
+    else if (!logsLive.want) stopLogsStream('已停止实时跟随（勾选后重连）');
+  });
+  $('btn-new-pub').addEventListener('click', () => activateTab('pub')); // 唯一常驻 CTA
+  wireTabs(); wireProjTab(); wireDbTab();
 }
 const platformPem = () => $('hd-pempub').value.trim();
 /** PEM 就绪检查（plan-17 验收 6）：未配置 → 展示「去设置」内联引导。
@@ -1594,23 +1593,21 @@ function refreshAdminBadge() {
 
 // —— 标签页导航（role=tablist/tab/tabpanel：aria-selected 同步 + 左右方向键切换） ——
 function activateTab(name) {
-  const tabs = ['proj', 'db', 'status', 'help'];
-  if (adminBuilt) tabs.push('admin'); // 第五「管理」标签仅 admin 钥匙渲染后存在（§12.2）
+  const tabs = ['proj', 'pub', 'img', 'db', 'help']; // plan-17 §1 五标签（管理页动态追加）
+  if (adminBuilt) tabs.push('admin');
   for (const b of $('tabs').querySelectorAll('button')) {
     const on = b.dataset.tab === name;
     b.classList.toggle('on', on);
     b.setAttribute?.('aria-selected', on ? 'true' : 'false');
   }
   for (const s of tabs) $(`tab-${s}`).classList.toggle('hidden', s !== name);
-  if (name === 'proj') { ensureImages(); refreshSpace(); } // §13.1 惰性加载镜像清单（已加载则跳过）；§14.1 进入展项页刷新空间条
-  if (name === 'status') {
-    evLive.want = true;              // 进入状态页才订阅事件流（§10.4：连接常驻 docker events）
-    startEventsStream();
-    if (!$('st-auto').checked) refreshStatus();
-    ensureRedisDbs(); // Redis 浏览区：首次进入状态页时拉取库编号（§13.2 按用户过滤）
-  } else stopEventsStream();         // 离开即断开（服务端随之收尸 docker events 子进程）
-  if (name === 'db') fillDbTargets();
-  if (name === 'admin') { loadAdminUsers(); refreshAdminStatus(); refreshHost(); } // 管理页：进入即拉取（§15 期望状态同源）
+  if (name === 'proj') { refreshProjects(); refreshSpace(); } // TTL 内跳过（plan-17 §3）
+  if (name === 'pub') ensureImages();                       // 发布页镜像下拉数据源（TTL 300s）
+  if (name === 'img') { ensureImages(); refreshSpace(); }   // 镜像库：清单 + 空间条
+  if (name === 'proj') { evLive.want = true; startEventsStream(); } // 展项页可见即订阅（§3）
+  else stopEventsStream();                                  // 离页退订（服务端收尸 docker events 子进程）
+  if (name === 'db') { ensureRedisDbs(); fillDbTargets(); } // Redis 区首次展开惰性拉库号；下拉消费已加载 projects
+  if (name === 'admin') { loadAdminUsers(); refreshAdminStatus(); refreshHost(); }
 }
 function wireTabs() {
   $('tabs').addEventListener('click', (ev) => {
@@ -1648,6 +1645,7 @@ async function syncAdmin() {
     isAdmin = !!j.admin;
   } catch (e) { apiFail('身份查询（whoami）', e); }
   state.admin = isAdmin; // §13.1/§13.2：镜像清单与 Redis 浏览据此标注「管理员视图」
+  const role = $('hd-role'); if (role) role.textContent = isAdmin ? '管理员' : '发布者'; // plan-17 §1 角色徽标（whoami 未回=?）
   refreshAdminBadge(); // whoami 落定后同步顶栏角标（纯呈现）
   if (isAdmin && imagesLoaded) ensureImages(true); // whoami 晚于首次清单加载时重取，刷新管理员视图标注
   if (isAdmin && !adminBuilt) { buildAdminTab(); adminBuilt = true; }
@@ -2175,7 +2173,7 @@ async function refreshProjects(force = false) {
 function renderProjects() {
   const tb = $('proj-tbl').querySelector('tbody');
   if (!state.projects.length) { tb.innerHTML = '<tr><td colspan="6" class="note">暂无展项</td></tr>'; }
-  else tb.innerHTML = state.projects.map((p) => `<tr>
+  else tb.innerHTML = state.projects.map((p) => `<tr data-row="${esc(p.project)}">
       <td class="mono">${esc(p.project)}</td>
       <td class="mono">${esc(p.tag)}</td>
       <td class="${statusCls(p.status)}">${esc(statusCn(p.status))}</td>
@@ -2199,7 +2197,7 @@ async function onProjAction(ev) {
   if (!btn || btn.disabled) return;
   const { act, p: project } = btn.dataset;
   if (act === 'env') return showEnvDlg(project);
-  if (act === 'logs') { switchTab('status'); return pickLogs(project); }
+  if (act === 'logs') return openDrawer(project); // plan-17 §1：日志随行抽屉展开（≤2 点击见实时日志）
   if (act === 'rm' && !confirm(`确认删除展项 ${project}？容器、路由、数据库与凭据将一并移除，不可恢复。`)) return;
   btn.disabled = true;
   try {
@@ -2601,6 +2599,10 @@ async function onResumeUpload() {
 // ================ 标签页 2：数据库（SPEC §9） ================
 function wireDbTab() {
   $('btn-db-fill').addEventListener('click', fillDbTargets);
+  // Redis 浏览（§10.3；S2 自状态页迁入数据页）
+  $('rd-refresh').addEventListener('click', refreshRedisKeys);
+  $('rd-q').addEventListener('keydown', (ev) => { if (ev.key === 'Enter') { ev.preventDefault(); refreshRedisKeys(); } });
+  $('rd-keys').addEventListener('change', onRedisKeyPick);
   $('btn-db-tables').addEventListener('click', onDbTables);
   $('btn-db-preview').addEventListener('click', onDbPreview);
   $('btn-db-sql').addEventListener('click', onDbSql);
@@ -2896,27 +2898,29 @@ const EV_CN = { start: '启动', stop: '停止', die: '退出', destroy: '销毁
   'health_status: healthy': '转为健康', 'health_status: unhealthy': '转为不健康', 'health_status: starting': '健康检查中' };
 const evLive = { ac: null, timer: null, want: false, rows: [], debounce: null };
 function evRender() {
-  $('st-events').textContent = evLive.rows.length ? evLive.rows.join('\n') : '（暂无事件）';
+  const el = $('st-events'); // S2：st-events 迁入管理页（非管理员 DOM 不存在——静默跳过渲染）
+  if (el) el.textContent = evLive.rows.length ? evLive.rows.join('\n') : '（暂无事件）';
 }
 function evPush(t, e, actor) {
   evLive.rows.push(`${tsCn(t)}  ${EV_CN[e] || e}  ${actor}`); // 时间 + 动作 + 容器名
   if (evLive.rows.length > EV_MAX) evLive.rows.splice(0, evLive.rows.length - EV_MAX);
   evRender();
-  if (evLive.debounce) clearTimeout(evLive.debounce); // 事件到达 → 2 秒去抖自动刷新健康列表
-  evLive.debounce = setTimeout(() => { evLive.debounce = null; if (state.loggedIn) refreshStatus(); }, 2000);
+  if (evLive.debounce) clearTimeout(evLive.debounce); // 事件到达 → 2 秒去抖自动刷新展项列表（验收 11）
+  evLive.debounce = setTimeout(() => { evLive.debounce = null; if (state.loggedIn) refreshProjects(true); }, 2000);
 }
 function stopEventsStream() {
   evLive.want = false;
   clearTimeout(evLive.timer); evLive.timer = null;
   if (evLive.debounce) { clearTimeout(evLive.debounce); evLive.debounce = null; }
   if (evLive.ac) { evLive.ac.abort(); evLive.ac = null; }
-  $('ev-state').textContent = '未连接（进入本页自动订阅）';
+  const st = $('ev-state'); // S2：ev-state 迁入管理页（非管理员不存在）
+  if (st) st.textContent = '未连接（展项页可见时自动订阅）';
 }
 async function startEventsStream() {
   if (!evLive.want || evLive.ac || !state.loggedIn) return;
   evLive.ac = new AbortController();
   const ac = evLive.ac;
-  $('ev-state').textContent = '已连接';
+  const st = $('ev-state'); if (st) st.textContent = '已连接';
   try {
     await consumeNdjson('/_api/events', (j) => {
       // 仅展示 sr- 开头的展项容器；心跳（{"hb":true}）与缺字段行静默忽略
@@ -2931,46 +2935,37 @@ async function startEventsStream() {
 }
 function reconnectEvents(why) {
   evLive.ac = null;
-  $('ev-state').textContent = `${why}，5 秒后自动重连…`;
+  const st = $('ev-state'); if (st) st.textContent = `${why}，5 秒后自动重连…`;
   clearTimeout(evLive.timer);
   evLive.timer = setTimeout(() => { if (evLive.want && state.loggedIn) startEventsStream(); }, 5000);
 }
 
-function wireStatusTab() {
-  $('st-refresh').addEventListener('click', refreshStatus);
-  $('st-auto').addEventListener('change', () => {
-    clearInterval(stTimer); stTimer = null;
-    if ($('st-auto').checked) { refreshStatus(); stTimer = setInterval(refreshStatus, 10000); }
-  });
-  logsLive.want = $('st-logs-live').checked; // 与勾选框初始状态同步
-  $('st-logs-live').addEventListener('change', () => {
-    logsLive.want = $('st-logs-live').checked;
-    if (logsLive.want && logsLive.project) startLogsStream();
-    else if (!logsLive.want) stopLogsStream('已停止实时跟随（勾选后重连）');
-  });
-  $('st-tbl').addEventListener('click', (ev) => {
-    const btn = ev.target.closest('button[data-logs]');
-    if (btn) pickLogs(btn.dataset.p);
-  });
-  // Redis 浏览（§10.3）
-  $('rd-refresh').addEventListener('click', refreshRedisKeys);
-  $('rd-q').addEventListener('keydown', (ev) => { if (ev.key === 'Enter') { ev.preventDefault(); refreshRedisKeys(); } });
-  $('rd-keys').addEventListener('change', onRedisKeyPick);
+// —— 行抽屉（plan-17 §1/S2）：st-logs* 迁入展项行后插行；一次一行，展开即订阅、收起/换行即断 ——
+const drawerRow = document.createElement('tr');
+drawerRow.className = 'drawer-row';
+drawerRow.dataset.drawer = ''; // 展开时=所属项目（无全局行 id；st-logs* 唯一 id 在抽屉内）
+drawerRow.innerHTML = `<td colspan="6">
+  <div class="row">
+    <button type="button" id="drawer-close" class="act">收起</button>
+    <span class="note">当前：<span class="mono" id="st-logs-target">（未选择）</span></span>
+    <label class="row" for="st-logs-live"><input type="checkbox" id="st-logs-live" checked>实时跟随（断线 5 秒自动重连）</label>
+    <span class="fb warn" id="st-logs-fb" aria-live="polite"></span>
+  </div>
+  <pre class="out mono" id="st-logs" aria-live="polite">（未选择展项）</pre>
+</td>`;
+function openDrawer(project) {
+  closeDrawer();
+  const esc2 = (typeof CSS !== 'undefined' && CSS.escape) ? CSS.escape(project) : project; // 项目名恒 [a-zA-Z0-9-]，转义仅防御
+  const row = $('proj-tbl').querySelector(`tr[data-row="${esc2}"]`);
+  if (row && row.after) row.after(drawerRow); else $('proj-tbl').querySelector('tbody')?.append?.(drawerRow);
+  drawerRow.dataset.drawer = project;
+  pickLogs(project);
 }
-async function refreshStatus() {
-  const tb = $('st-tbl').querySelector('tbody');
-  tb.innerHTML = '<tr><td colspan="4" class="note">加载中…</td></tr>';
-  try {
-    const j = await api('GET', '/_api/projects');
-    state.projects = j.projects || [];
-    tb.innerHTML = state.projects.length ? state.projects.map((p) => `<tr>
-      <td class="mono">${esc(p.project)}</td>
-      <td class="${statusCls(p.status)}">${esc(statusCn(p.status))}</td>
-      <td class="mono">${esc(fmtTime(p.updated))}</td>
-      <td><button class="act" data-logs data-p="${esc(p.project)}">查看日志</button></td>
-    </tr>`).join('') : '<tr><td colspan="4" class="note">暂无展项</td></tr>';
-    $('st-fb').textContent = `已刷新（${new Date().toLocaleTimeString()}）`;
-  } catch (e) { tb.innerHTML = ''; apiFail('健康列表刷新', e); }
+function closeDrawer(fbText) {
+  drawerRow.remove?.();
+  drawerRow.dataset.drawer = '';
+  if (logsLive.project) stopLogsStream(fbText || '已收起抽屉，停止实时跟随'); // 收起即断（§3）
+  logsLive.project = null;
 }
 
 // —— Redis 浏览（SPEC §13.2/13.3：DB 下拉仅列自己的（admin 全量标注「管理员视图」）；错误一律走顶部条）——
