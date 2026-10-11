@@ -1572,7 +1572,7 @@ ok(html.includes('data-drawer') || html.includes("drawerRow.dataset.drawer"), 'S
   ok(html.includes('markPublishing') && html.includes('markPublishDone') && html.includes('markPublishFail'),
     'S5：本地在途标记（发布中/上传中/异常终态/60s 重建窗口）已接线');
 }
-ok(html.includes('<th>名称</th><th>状态</th><th>对外 URL</th><th>标签</th><th>更新</th><th>操作</th><th>详情</th>'),
+ok(html.includes('<th>名称</th><th>状态</th><th>对外 URL</th><th>标签</th><th class="num">更新</th><th>操作</th><th>详情</th>'),
   'S4：列序 名称·状态·对外URL·标签·更新·操作·▾（§1）');
 ok(html.includes('visibilitychange') && html.includes('暂无展项——点顶栏「+ 发布」发布新 Demo'),
   'S4：事件流可见性钩子 + 空态卡引导「+ 发布新 Demo」（验收 16）');
@@ -1692,6 +1692,14 @@ ok(html.includes('touch-action: manipulation'), '规范：touch-action: manipula
 ok(html.includes('font-variant-numeric: tabular-nums'), '规范：表格数字列 tabular-nums');
 ok(html.includes('name="theme-color"') && html.includes('color-scheme: dark'), '规范：theme-color + color-scheme: dark');
 ok(html.includes('select option {'), '规范：select option 显式配色');
+// —— plan-17 S7 视觉 token ——
+ok(!html.includes('<fieldset') && !html.includes('<legend'), 'S7/验收 9：全站无卡片内嵌 fieldset（分组一律 .fs + h3）');
+ok(html.includes('.fs {') && html.includes('--sp-1:') && html.includes('--sp-8:'),
+  'S7/验收 12：间距刻度 token（4/8/12/16/24/32）+ 分组样式 .fs');
+ok(html.includes('h2 { font-size: 15px') && html.includes('.field > span { color: var(--fg-dim); font-size: 13px'),
+  'S7/§7：字号刻度（卡片题 15/600、label/辅助 13、正文 14、注释 12）');
+ok(html.includes('.num { text-align: right; font-variant-numeric: tabular-nums; }') && html.includes('<th class="num">更新</th>'),
+  'S7/验收 12：时间列右对齐且等宽数字');
 {
   const ph = [...html.matchAll(/placeholder="([^"]*)"/g)].map((x) => x[1]);
   ok(ph.length > 0 && ph.every((p) => p.endsWith('…')), `规范：占位符全部以 … 结尾（${ph.length} 处）`);
