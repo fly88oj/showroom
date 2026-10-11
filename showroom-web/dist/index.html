@@ -824,6 +824,10 @@ function busy(btn, on, txt = '处理中…') {
   if (on) { btn.dataset.label = btn.textContent; btn.textContent = txt; btn.disabled = true; }
   else { if (btn.dataset.label !== undefined) btn.textContent = btn.dataset.label; btn.disabled = false; }
 }
+const fmtTime = (unixSec) => {
+  if (!unixSec) return '\u2014';
+  return new Intl.DateTimeFormat('zh-CN', {month:'2-digit',day:'2-digit',hour:'2-digit',minute:'2-digit'}).format(new Date(unixSec * 1000));
+};
 const esc = (s) => String(s ?? '').replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
 const STATUS_CN = { running: '运行中', exited: '已退出', paused: '已暂停', restarting: '重启中', created: '已创建', dead: '异常终止', missing: '未部署' };
 const statusCn = (s) => STATUS_CN[s] || s || '未知';
