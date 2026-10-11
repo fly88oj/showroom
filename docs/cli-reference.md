@@ -165,10 +165,13 @@ showroom db restore demo demo-2026-10-10.bin.zst --confirm
 
 ## 5. Agent Skill
 
-```text
-TODO：`showroom skill` 命令尚未实现（规划中）。
-规划形态：一键安装/更新发布 Skill（供编码代理调用的操作手册），经内网面 /_bootstrap/* 分发。
+### showroom skill
+
+```sh
+showroom skill [install]     # install 为缺省动作，当前唯一动作（其他动作报「未知动作」）
 ```
+
+把发布 Skill 安装到 `~/.agents/skills/showroom-publisher/`（内嵌于 CLI 的 SKILL.md 操作手册，重复执行覆盖更新）。安装后，编码代理在用户提到「发布 demo / 部署演示环境 / 回滚 demo」等时自动按该手册使用 `showroom` CLI，不手写 curl 或 docker 命令。手册内容：doctor 前置检查、镜像规范（8080 监听 / 子路径 / 环境变量注入）、发布标准流、日常操作、db 维护与硬规则。
 
 ## 6. 退出码与错误码
 
@@ -215,7 +218,7 @@ TODO：`showroom skill` 命令尚未实现（规划中）。
 | 命令 | 说明 |
 |---|---|
 | `showroomctl setup [--apply] [--lan-host <地址>] [--public-host <地址>]` | 主机自举：无 `--apply`=diff 模式（列变更与偏差）；`--apply` 幂等收敛目录/policy/中间件容器/Caddy/systemd/调优。首跑按探测值生成 `state/host.env`，限额缺省随实测硬件推导 |
-| `showroomctl middleware status\|enable <名>\|disable <名> [--force]\|set <名> <k>=<v> [--confirm]` | 中间件编排：期望/实际/漂移对照；`set redis databases=N` 为 Redis 逻辑库扩容确认流（无 `--confirm` 只见提示不动容器——变更需重启实例） |
+| `showroomctl middleware status\|enable <名>\|disable <名> [--force]\|set <名> <k>=<v> [--confirm]` | 中间件编排：期望/实际/漂移对照；`set redis databases=N`（16–256）为 Redis 逻辑库扩容确认流（无 `--confirm` 只见提示不动容器——变更需重启实例） |
 | `showroomctl upgrade [--bin <路径>]` | 就地升级二进制（探针→备份→原子替换→restart 探活→失败回滚；默认取 `/tmp/showroomctl`；同步 user CLI 与 `_bootstrap/`） |
 
 ### 服务与运维

@@ -12,7 +12,7 @@
 | 删除泄露的某把钥匙 | `showroomctl user-key-rm <USER> <KID>` | `POST /_api/admin/key-rm`；控制台账号表快捷动作 |
 | 收/授管理员权限（标记在钥匙上） | `showroomctl key-admin <USER> <KID> --admin false\|true` | `POST /_api/admin/key-admin` |
 | 吊销整账号（签名 + registry 全失效，展项不动） | `showroomctl user-revoke <USER>` | `POST /_api/admin/user-revoke` |
-| Redis 逻辑库扩容（需重启实例，约 3 秒，AOF 持久；**不静默重启**） | `showroomctl middleware set redis databases=512 --confirm` | `GET /_api/admin/host` 黄条 → 控制台「扩容」确认流 |
+| Redis 逻辑库扩容（需重启实例，约 3 秒，AOF 持久；**不静默重启**） | `showroomctl middleware set redis databases=256 --confirm`（取值 16–256） | `GET /_api/admin/host` 黄条 → 控制台「扩容」确认流 |
 | 主机形状变更（中间件增减/开关） | 编辑 `state/host.env` → `showroomctl setup --apply` | `POST /_api/admin/host` 两段式：无 confirm 返回变更清单与影响面（removed_middleware/affected_projects），`confirm=true` 才执行 |
 | 主机状态面板（服务/磁盘/内存/容器/timers/Redis 池水位） | `showroomctl admin status` | `GET /_api/admin/status`；控制台「管理 → 状态」30s 自动刷新 |
 | 账号/钥匙清单（kid/admin/登记时间/项目数/未设密码徽标） | `showroomctl admin users` | `GET /_api/admin/users` |
@@ -150,7 +150,7 @@ sudo vi /srv/showroom/state/policy.env
 
 - 池大小 = policy `REDIS_DBS`（默认 256），实例启动参数 `--databases` 与之一致；每项目一库；
 - 池水位常驻检查：余量 <20% 时状态面板黄条提示「建议扩容」；publish 分配到池耗尽返回 `E_QUOTA`，消息直接附扩容命令；
-- 扩容（databases 变更需重启实例，走确认流）：`showroomctl middleware set redis databases=512` 先见提示（约 3 秒、AOF 持久、运行中应用连接自动重连），加 `--confirm` 才停旧起新并验证 ping+库数。**不静默重启**。
+- 扩容（databases 变更需重启实例，走确认流）：`showroomctl middleware set redis databases=256` 先见提示（约 3 秒、AOF 持久、运行中应用连接自动重连），加 `--confirm` 才停旧起新并验证 ping+库数。**不静默重启**。取值 16–256——`Conf.redisdb` 为 u8，单实例至多 256 库。
 
 ### 其他
 

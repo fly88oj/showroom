@@ -1,7 +1,8 @@
 # Showroom Protocol Spec v1（crate 间契约 — 改动需同步三处实现）
 
 ## 术语
-user=发布者账号；project=展项（全局唯一）；slot=版本槽位（stable/next/pr42…）；tag=镜像 tag。
+user=发布者账号；project=展项（全局唯一）；tag=镜像 tag。
+（slot=版本槽位——**已废弃**：v1.4 全链路移除（§11），模型恒为项目级单路径。）
 
 ## 1. 认证：SR-SIG1（所有 /_api 写操作与签名读操作）
 ```
@@ -28,69 +29,71 @@ body= wrap || aes256gcm(k, zstd(docker_save_tar))
 | 方法路径 | 请求 | 响应 |
 |---|---|---|
 | GET /_api/health | - | `{"ok":true}` |
-| GET /_api/projects | - | `{"projects":[{project,slot,user,tag,url,status,port,mem,cpu,updated}]}` |
-| POST /_api/publish | `{project,slot,tag,mem?,cpu?,container_port?}` | `{ok,url,port}` |
-| POST /_api/stop\|start\|rm\|rollback | `{project,slot}` | `{ok,...}` |
-| GET /_api/logs | `?project=&slot=&tail=100` | `{"logs":"..."}` |
-| GET /_api/env | `?project=&slot=` | `{"env":{…}}`（发布者查看连接信息的入口） |
-| POST /_api/import | query `?project=&slot=&tag=`，body=信封 | `{ok,digest}` |
+| GET /_api/projects | - | `{"projects":[{project,user,tag,url,status,port,mem,cpu,updated}]}` |
+| POST /_api/publish | `{project,tag,mem?,cpu?,container_port?}` | `{ok,url,port}` |
+| POST /_api/stop\|start\|rm\|rollback | `{project}` | `{ok,...}` |
+| GET /_api/logs | `?project=&tail=100` | `{"logs":"..."}` |
+| GET /_api/env | `?project=` | `{"env":{…}}`（发布者查看连接信息的入口） |
+| POST /_api/import | query `?project=&tag=`，body=信封 | `{ok,digest}` |
 | POST /_api/import-check | `{image_id}` | `{present:bool}` |
 
 错误统一：HTTP 4xx/5xx + `{"error":"E_CODE","msg":"..."}`；错误码 `E_AUTH/E_NAME/E_QUOTA/E_NOTFOUND/E_STATE/E_NET`（msg 不得包含未登记公钥串以外的内部信息；验签失败与路径不存在不可区分）。
-user 归属校验：签名 user 必须等于 slot.conf 中归属者（磁盘键名 owner=，见 §5；publish 时 project 归属首个创建者）。
+user 归属校验：签名 user 必须等于 `<project>.conf` 中归属者（磁盘键名 owner=，见 §5；publish 时 project 归属首个创建者）。
 
-**静态面（Caddy）**：`/{project}[/slot]/*` 展项页面公开；`/_bootstrap/*`（CLI/Skill 分发）**仅 site A（内网面）提供，site B（公网面）返回 404**；未来的 `/_console` 公网面仅暴露最小登录壳（登录成功前不加载任何管理资源）。
+**静态面（Caddy）**：`/{project}/*` 展项页面公开；`/_bootstrap/*`（CLI/Skill 分发）**仅 site A（内网面）提供，site B（公网面）返回 404**；未来的 `/_console` 公网面仅暴露最小登录壳（登录成功前不加载任何管理资源）。
 
 ## 4. 命名与保留
-project/slot：`^[a-z0-9][a-z0-9-]{0,30}$`，project 全局唯一，保留：`v2 _api _bootstrap _console`。
+project：`^[a-zA-Z0-9][a-zA-Z0-9-]{0,30}$`（§11 放宽，大写放开），project 全局唯一，保留：`v2 _api _bootstrap _console`。
 镜像：`127.0.0.1:5000/<user>/<project>:<tag>`（外部经 :80 /v2）。
-容器：`sr-<project>-<slot>`；DB：`sr_<project>_<slot>`；槽位端口 127.0.0.1:8100–8199（ports.reg 登记）。
+容器：`sr-<project>`；DB：`sr_<project 的 - → _>`（legacy 双名兼容见 §9）；项目端口 127.0.0.1:8100–8199（ports.reg 登记）。
 
 ## 5. 主机状态布局（/srv/showroom，btrfs @showroom）
 ```
 state/policy.env        MAX_SLOTS=30 DEFAULT_MEM=256m MAX_MEM=1g IMPORT_MAX_GB=8 ALLOW_LAN_PORT=0
+                        # MAX_SLOTS：键名沿用存量文件，§11 起语义=项目数上限（MAX_PROJECTS）
                         # RESERVE_MEM_MB=1536：内存准入预留 MB（§10.2，缺省 1536，可不写）
                         # DISK_RESERVE_GB=20 UPLOAD_SPACE_FACTOR=4：磁盘准入预留 GB 与上传膨胀因子（§14.4，缺省 20/4，可不写）
-state/ports.reg         每行 <port> <project> <slot>
+                        # REDIS_DBS=256：Redis 逻辑库池（§13.3）；BOUND_KEYS_MAX=5：密码绑定钥匙 keep-N（§16.1）
+state/ports.reg         每行 <port> <project>（§11 去 slot 列，两列）
 state/tokens/<user>/<kid>.pub    （ed25519 公钥，可多把）
 state/users/<user>/reg.cred     registry basic_auth user:hash（bcrypt）
-state/projects/<project>/<slot>.conf   key=value: owner tag port cport mem cpu redisdb updated（磁盘键名沿用 owner=）
-state/projects/<project>/<slot>.env    见下方环境变量契约
-state/projects/<project>/<slot>.last2  上一 tag
+state/projects/<project>.conf   key=value: owner tag port cport mem cpu redisdb updated（磁盘键名沿用 owner=）
+state/projects/<project>.env    见下方环境变量契约
+state/projects/<project>.last2  上一 tag
 _middleware/{postgres,redis,registry}/  数据卷(bind)
 _tmp/                   import 暂存（即用即删）
 ```
-URL 规则：`/{project}/`（stable 槽位特例：路由写 `<project>-stable` 文件但路径不带 slot）与 `/{project}/{slot}/`。
+URL 规则：恒 `/{project}/`（§11 起项目级单路径；路由文件 `routes/<project>.caddy`）。
 
-## 6. 发布者环境变量契约（publish 时自动生成注入，值全部具体化，无占位符遗留）
-容器启动 `--env-file` 注入，应用侧按 12-factor 读环境即可；`showroom env` / `GET /_api/env` 可随时查看这些值（连接地址一目了然）：
+## 6. 发布者环境变量契约（publish 时自动生成注入，值全部具体化，无占位符遗留；§11 起共 12 键）
+容器启动 `--env-file` 注入，应用侧按 12-factor 读环境即可；`showroom env` / `GET /_api/env` 可随时查看这些值（连接地址一目了然）。§15.2 自适应：禁用 redis 中间件时 `REDIS_*` 组（4 键）不注入，其余 8 键照常：
 ```
 DB_HOST=sr-postgres          DB_PORT=5432
-DB_NAME=sr_<project>_<slot>  DB_USER=sr_<project>_<slot>
+DB_NAME=sr_<project 的 - → _>  DB_USER=<同 DB_NAME>
 DB_PASSWORD=<随机生成>
 DATABASE_URL=postgresql://<user>:<password>@sr-postgres:5432/<dbname>
-REDIS_HOST=sr-redis          REDIS_PORT=6379     REDIS_DB=<0-15 分配>
+REDIS_HOST=sr-redis          REDIS_PORT=6379     REDIS_DB=<按项目分配，池 REDIS_DBS 默认 256>
 REDIS_URL=redis://sr-redis:6379/<n>
-SHOWROOM_PROJECT=<project>   SHOWROOM_SLOT=<slot>  SHOWROOM_BASE_PATH=/<project>[/<slot>]/
+SHOWROOM_PROJECT=<project>   SHOWROOM_BASE_PATH=/<project>/
 ```
 发布文档/控制台展示的「如何配置」= 上述键列表 + `showroom env` 输出示例；若发布者镜像内配置文件需要替换，推荐模式为镜像入口脚本里 `envsubst < config.tpl > config`（模板占位符 `${DB_PASSWORD}` 等由容器启动时自动替换，平台只负责注入真实值）。
 
 ## 7. 行为约定
 - publish：校验名/配额→registry 镜像存在→分配端口→供给 DB/Redis→起容器（滚动：`-new` 后缀起新、健康后删旧改名）→写路由 `reload caddy`→更新 last2。健康=TCP 127.0.0.1:port 可连或 60s 超时放行。
 - rollback：读 last2，按其 tag 重跑 publish 内核，旧 tag 写回 last2。
-- reconcile：遍历 slot.conf，容器缺失/路由缺失则按 conf 重建（幂等）。
+- reconcile：遍历 `state/projects/<project>.conf`，容器缺失/路由缺失则按 conf 重建（幂等）。
 - import：验签→解密到 _tmp（IMPORT_MAX_GB 帽）→`docker load`→`docker tag`→push 127.0.0.1:5000→删临时。
-- gc-images/gc-registry/registry-gc/snapshot/autoheal/disksentinel：见设计文档 §6，由 systemd timer 调 `showroomctl <sub>`。
+- gc-images/gc-registry/registry-gc/snapshot/autoheal：见设计文档 §6，由 systemd timer 调 `showroomctl <sub>`。disksentinel（磁盘哨兵）：**待实现**——当前无实现，磁盘水位以 `/_api/space` 与 admin/status 面板为准。
 
 ## 8. 選产补篇（v1.1）：分片导入 / 快照 / 控制台
 ### 8.1 分片导入（大文件断点续传；控制台用，CLI 单发不变）
 ```
-POST /_api/import-begin   {"project","slot","tag","image_id","total_bytes"}  → {"upload_id"}   [签名]
+POST /_api/import-begin   {"project","tag","image_id","total_bytes"}  → {"upload_id"}   [签名]
 POST /_api/import-chunk?upload=<id>&seq=<n>   body=信封原始字节切片（顺序追加）             [签名，每片独立验签]
 GET  /_api/import-status?upload=<id>          → {"received":[seq...],"total"}                [签名]
 POST /_api/import-end?upload=<id>             → 拼接后走单发 import 同一管道（解密→load→tag→push→manifest），删会话 [签名]
 ```
-- 服务端会话：_tmp/<upload_id>.bin（追加）+ .meta（user/project/slot/tag/total/seq 列表，JSON）；seq 必须连续且不重复；total 累计不得超 IMPORT_MAX_GB；end 时字节总数必须等于 total_bytes。
+- 服务端会话：_tmp/<upload_id>.bin（追加）+ .meta（user/project/tag/total/seq 列表，JSON）；seq 必须连续且不重复；total 累计不得超 IMPORT_MAX_GB；end 时字节总数必须等于 total_bytes。
 - 完整性：每片独立 SR-SIG1（哈希覆盖该片）；顺序与完整性由服务端 seq/total 强制——整包完整性=片完整性∪顺序完备。
 - 陈旧会话（>24h）由 gc-images 顺带清理。
 ### 8.2 btrfs 快照（showroomctl snapshot hourly|daily）
@@ -102,19 +105,19 @@ POST /_api/import-end?upload=<id>             → 拼接后走单发 import 同�
 - 功能对齐 CLI 只读+发布：列表/发布/停止/启动/删除/回滚/env/logs；镜像上传走 8.1 分片（File.slice 流式 seal，8MB/片，进度条+断点续传）。
 
 ## 9. 数据库维护（v1.2）：发布者自助管理 Schema 与数据
-**原则**：user 只能碰自己 project×slot 的库 `sr_<p>_<s>`；全端点签名；下行数据（dump）端到端加密（客户端一次性 RSA 公钥上行，信封同 §2 布局）；publish 改为**首建不重建**（数据保留），显式重置走 db-reset。
-**库名归一化**：db_ident = `sr_` + project/slot 中 `-`→`_`（psql -d、CREATE、env 的 DB_NAME/DB_USER/DATABASE_URL 一律用它）；v1.2 前带连字符的存量库在供给/访问时检测旧名存在则沿用，直到 db-reset 重建为新名。
+**原则**：user 只能碰自己 project 的库 `sr_<p>`；全端点签名；下行数据（dump）端到端加密（客户端一次性 RSA 公钥上行，信封同 §2 布局）；publish 改为**首建不重建**（数据保留），显式重置走 db-reset。
+**库名归一化**：db_ident = `sr_` + project 中 `-`→`_`（psql -d、CREATE、env 的 DB_NAME/DB_USER/DATABASE_URL 一律用它）；v1.4 前的存量库（含旧槽位名 `sr_<p>_<s>` 与带连字符名）在供给/访问时检测旧名存在则沿用，直到 db-reset 重建为新名。
 | 端点 | 请求 | 行为 |
 |---|---|---|
-| POST /_api/db-sql | `{project,slot,sql,confirm}` | `docker exec -i sr-postgres psql -d sr_<p>_<s> -v ON_ERROR_STOP=1` 执行（stdin 传 sql，禁 argv）；confirm!=true 且语句含 DROP/TRUNCATE/DELETE 时拒（E_STATE 提示确认）；返回 `{out}`（psql 文本输出）|
-| GET /_api/db-tables | `?project=&slot=` | 列表查询（\dt 等价 SQL）→ `{"tables":[...]}`（控制台 ComboBox 数据源）|
-| POST /_api/db-preview | `{project,slot,table,limit≤200}` | `SELECT * LIMIT n` → `{columns,rows}` |
-| POST /_api/db-dump-begin | `{project,slot,client_pub_pem}` | v1.3 起改为三段式（begin/chunk/status，见 §10.4）；本行旧单发 base64 形式已移除 |
-| POST /_api/db-restore | query `?project=&slot=&confirm=` body=信封（客户端用平台公钥 seal 的 -Fc dump） | 验签→解密到 _tmp→`pg_restore --clean --if-exists`→删临时；走 import 同管道与大帽 |
-| POST /_api/db-reset | `{project,slot,confirm}` | DROP DATABASE WITH (FORCE)+重建+重发凭据（env 文件密码不变） |
+| POST /_api/db-sql | `{project,sql,confirm}` | `docker exec -i sr-postgres psql -d sr_<p> -v ON_ERROR_STOP=1` 执行（stdin 传 sql，禁 argv）；confirm!=true 且语句含 DROP/TRUNCATE/DELETE 时拒（E_STATE 提示确认）；返回 `{out}`（psql 文本输出）|
+| GET /_api/db-tables | `?project=` | 列表查询（\dt 等价 SQL）→ `{"tables":[...]}`（控制台 ComboBox 数据源）|
+| POST /_api/db-preview | `{project,table,limit≤200}` | `SELECT * LIMIT n` → `{columns,rows}` |
+| POST /_api/db-dump-begin | `{project,client_pub_pem}` | v1.3 起改为三段式（begin/chunk/status，见 §10.4）；本行旧单发 base64 形式已移除 |
+| POST /_api/db-restore | query `?project=&confirm=` body=信封（客户端用平台公钥 seal 的 -Fc dump） | 验签→解密到 _tmp→`pg_restore --clean --if-exists`→删临时；走 import 同管道与大帽 |
+| POST /_api/db-reset | `{project,confirm}` | DROP DATABASE WITH (FORCE)+重建+重发凭据（env 文件密码不变） |
 CLI 对应：`showroom db sql|tables|preview|dump|restore|reset`。公网全可用（签名+加密），无需内网。
 ### 9.1 控制台（登录后四区，全中文，免装 CLI）
-- **展项**：列表（不含槽位端口等内部细节）+ 发布（项目=ComboBox(已有)+可新建、槽位=ComboBox(stable/next/pr42/自定义)、tag=Input(必填)、内存=ComboBox(128m/256m/512m/1g)、Demo 监听端口=数字 Input 默认 8080、镜像 tar 上传=文件选择）。
+- **展项**：列表（不含项目端口等内部细节）+ 发布（项目=Input 预填随机 8 位、带「换一个」按钮，可改为已有名；tag=Input(必填)、内存=ComboBox(128m/256m/512m/1g)、Demo 监听端口=数字 Input 默认 8080、镜像 tar 上传=文件选择；§11 起无槽位字段）。
 - **数据库**：表清单 ComboBox→预览表格；SQL 编辑器（唯一自由文本，多行）；备份下载（自动生成一次性密钥对）；恢复上传（confirm 二次确认）；重置（confirm）。
 - **状态**：展项健康列表 + 日志查看（自动刷新开关）。
 - **帮助**：镜像规范/环境变量清单（§6）/CLI 对照/常见错误表。登录前仅登录界面（零管理信息）。
@@ -135,18 +138,18 @@ CLI 对应：`showroom db sql|tables|preview|dump|restore|reset`。公网全可�
 - 控制台：状态监控页新增「Redis 浏览」区（或独立第五标签）：DB 下拉+key 前缀过滤+点击查看值（等宽展示，值截断 4KB）。
 ### 10.4 实时下行与低内存大流量传输（ndjson 流 + 分片 dump）
 方向性决策：控制台上行全是短请求，无需双向通道——不引 WebSocket，统一用 fetch 流式消费的 ndjson 流（SSE 风格，逐行 JSON）；大体积下行（db-dump）不再整包进内存，改三段式分片。旧 `POST /_api/db-dump`（base64 单发）**直接移除不保留兼容**（未发布给外部），CLI 同步切换。
-- **GET /_api/logs-stream ?project&slot&tail（默认 100，上限 10000）** `[签名+user_check]`
+- **GET /_api/logs-stream ?project&tail（默认 100，上限 10000）** `[签名+user_check]`
   `docker logs -f --tail <n> <容器>`（不加 --timestamps；stdout+stderr 双流合并桥接，逐行封装）→ 响应 `Content-Type: application/x-ndjson`，每行一个 JSON：`{"t":<unix_ms>,"l":"<日志行>"}`（l 经 JSON 转义；t=服务端收到时刻）。客户端断开（连接关闭→响应流 drop→桥接发送失败）即 kill docker logs 子进程并收尸，绝不留孤儿；容器 EOF（被删除）则流正常结束。
 - **GET /_api/events** `[签名；全局事件流无 user_check，控制台按容器名 sr- 前缀自行过滤展示]`
   `docker events --filter event=start --filter event=stop --filter event=die --filter event=health_status --format {{json .}}`（事件量小不做容器过滤），逐行解析 JSON 提取字段后封装为 `{"t":<unix_ms>,"e":"<Action>","actor":"<容器名>"}`（t=timeNano/1e6 回落 time*1000；actor=Actor.Attributes.name 回落 Actor.ID；解析失败的行静默丢弃）；同为 x-ndjson 流+断开清理。**心跳**：每 30s 推一行 `{"hb":true}` 防代理空闲断连。
 - **db-dump 三段式**（替代 §9 表中 db-dump 行；§9 内存 4× 问题：pg_dump 全量收进 Vec 再 base64 String）：
-  1. `POST /_api/db-dump-begin {project,slot,client_pub_pem}` → `{dump_id}` `[签名+user_check]`：校验 PEM（E_NAME）→ 定库 → 立即返回；后台线程执行 `pg_dump -Fc` 直连 `seal(客户端公钥)` **流式**写 `_tmp/<id>.bin`（信封必须一次成包才能解，故生成整体单次、生成过程流式，内存恒定 ~4MiB；明文 >256MB → E_QUOTA，杀子进程）；会话记录于 `_tmp/<id>.meta`（user/project/slot/db），进度于 `_tmp/<id>.status`（running|ready|failed，failed 附 error，成功附 total=信封字节数）。
+  1. `POST /_api/db-dump-begin {project,client_pub_pem}` → `{dump_id}` `[签名+user_check]`：校验 PEM（E_NAME）→ 定库 → 立即返回；后台线程执行 `pg_dump -Fc` 直连 `seal(客户端公钥)` **流式**写 `_tmp/<id>.bin`（信封必须一次成包才能解，故生成整体单次、生成过程流式，内存恒定 ~4MiB；明文 >256MB → E_QUOTA，杀子进程）；会话记录于 `_tmp/<id>.meta`（user/project/db），进度于 `_tmp/<id>.status`（running|ready|failed，failed 附 error，成功附 total=信封字节数）。
   2. `GET /_api/db-dump-chunk ?dump=&offset=&len=` `[签名；meta 校验 user]`：ready 门（否则 E_STATE）→ 按 offset/len 切片返回 `.bin` 原始字节（`application/octet-stream` + `X-Sr-Total` 头）；len ≤4MB（E_NAME 越界同拒），offset 越过 total → E_NAME，尾片自动钳到 total-offset；**offset+len ≥ total（读完最后一片）即删会话三件套**——多客户端并发拉同一 dump 允许（只读切片），后到者可能 E_NOTFOUND 需重走 begin；24h gc 兜底。
   3. `GET /_api/db-dump-status ?dump=` `[签名；meta 校验 user]` → `{"ready":bool,"total":n,"error":...}`（轮询用）。
 - CLI `showroom db dump` 同步三段式：begin → 1s 轮询 status 至 ready（1h 上限，failed 即时报错）→ 4MB chunk 循环落本地临时信封（每片≤4MB，内存恒定）→ 一次性私钥解密流式写目标文件/stdout。
 - 陈旧清理：`_tmp` 下 `.status` 并入 gc-images 的 24h 清理（原有 .bin/.meta 不变）。
 
-## 11. v1.4 修订：移除槽位（slot）模型
+## 11. v1.4 修订：移除槽位（slot）模型【历史决策记录——slot 模型已废弃，§3–§10 原文已按本节同步去 slot】
 **动机**：简化概念（Demo 定向展示）；多版本并存=发布者自建多个相近名称项目；项目名默认随机提升被字典遍历发现的门槛。
 - 项目名规则放宽：`^[a-zA-Z0-9][a-zA-Z0-9-]{0,30}$`（保留名不变）；**发布入口默认预填随机 `[a-zA-Z0-9]{8}`**，发布者不改直接用。
 - 全链路去 slot：API 请求体/查询参数不再含 slot；URL 恒 `/<project>/`；容器名 `sr-<project>`；DB 名 `sr_<project 的 - → _>`（legacy 双名兼容沿用 §9 归一化思路：老 `sr_<p>_<slot>` 检测沿用/迁移）；Redis 逻辑库按项目分配；env 注入去掉 SHOWROOM_SLOT，SHOWROOM_BASE_PATH=/<project>/。
@@ -227,7 +230,7 @@ CLI 对应：`showroom db sql|tables|preview|dump|restore|reset`。公网全可�
 - env 注入自适应：禁用的中间件对应变量组（REDIS_*）不再注入，publish 照常；ps/env 标注「未启用」。
 ### 15.3 Redis 逻辑库自动扩容
 - admin/status 与 /_api/admin/host 常驻检查：`已用库数 + 头 room` vs `REDIS_DBS`；余量 <20% 时状态面板黄条提示「建议扩容」。
-- 扩容流程（databases 变更需重启实例）：管理员 `showroomctl middleware set redis databases=512`（或 Web 表单）→ showroom 提示「需重启 Redis（约 3 秒，数据 AOF 持久，运行中应用的连接将自动重连）」→ confirm → 停旧容器→新容器带 `--databases N` 起来→自动验证 ping+库数→回报结果。**不静默重启**——用户明确要求提示管理员确认。
+- 扩容流程（databases 变更需重启实例）：管理员 `showroomctl middleware set redis databases=256`（或 Web 表单；取值 16–256——Conf.redisdb 为 u8，单实例至多 256 库）→ showroom 提示「需重启 Redis（约 3 秒，数据 AOF 持久，运行中应用的连接将自动重连）」→ confirm → 停旧容器→新容器带 `--databases N` 起来→自动验证 ping+库数→回报结果。**不静默重启**——用户明确要求提示管理员确认。
 - 项目数逼近池上限时 publish 的 redisdb 分配 E_QUOTA 消息直接给扩容命令建议。
 ### 15.4 分发
 - release 二进制经 GitHub Releases（CI 产物）+ 主机 `_bootstrap`；docs/deployment.md 改写为 setup 单命令流程（旧手工步骤降级为附录/原理说明）。
@@ -261,7 +264,8 @@ S→C 200 {"kid","admin"}   # 写 <kid>.pub+.bound；账号已有任一 admin �
                           #（密码即账号级最高凭证，控制台显式提示）；GC 旧 .bound 钥匙
                           #（按 .pub mtime 保最近 BOUND_KEYS_MAX 把，无 .bound 的 CI 公钥不受 GC）；
                           # 幂等（同钥匙重绑=ok）
-# 改密码（登录态，旧密码免输——已绑定钥匙即会话证明）：
+# 改密码（登录态。控制台要求输入当前密码并先本地校验——复用 login-begin+本地 finish、
+#   不调 login-finish 即不产生登录态；校验通过才走下列两步。旧密码不上线，签名即会话证明）：
 C→S POST /_api/auth/pw-begin  {"user":u,"m1":b64}    [SR-SIG1 常规]
 S→C 200 {"m2":b64}                                  # 在途注册态内存保存，60s
 C→S POST /_api/auth/pw-commit {"user":u,"record":b64} [SR-SIG1 常规]  # 原子替换记录

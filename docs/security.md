@@ -34,7 +34,8 @@ C→S POST /_api/auth/key-bind {"user":u,"pubkey":串}
      Authorization: SR-SIG1 …  # 用候选钥匙签名、服务端按 body 内公钥验签（非已登记钥匙）
      X-Sr-Bind: <bind_token>
 S→C 200 {"kid","admin"}   # 写 <kid>.pub+.bound；继承语义见 §4.2；GC 旧 .bound 钥匙；幂等
-# 改密码（登录态，旧密码免输——已绑定钥匙即会话证明）：
+# 改密码（登录态。控制台要求输入当前密码并先本地校验——复用 login-begin+本地 finish、
+#   不调 login-finish 即不产生登录态；校验通过才走下列两步。旧密码不上线，签名即会话证明）：
 C→S POST /_api/auth/pw-begin  {"user":u,"m1":b64}    [SR-SIG1 常规]
 S→C 200 {"m2":b64}                                  # 在途注册态内存保存，60s
 C→S POST /_api/auth/pw-commit {"user":u,"record":b64} [SR-SIG1 常规]  # 原子替换记录

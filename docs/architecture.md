@@ -69,7 +69,7 @@ C→S GET /_api/reg-cred [SR-SIG1] → registry 凭据（login 免手工 config�
 
 - 密码经盲化 OPRF **永不上线**；服务端只存注册记录信封（`state/users/<u>/pass.opaque`），无离线可验证哈希；
 - `/_api/auth/*` 是唯一应答未签名请求的端点族；畸形/限流/族内未知路径一律 404 `{"error":"E_AUTH"}`；login-begin 双令牌桶（账号 10 次/10 分 + 全局 120 次/10 分）；
-- 改密码走登录态两段（`pw-begin`/`pw-commit`，SR-SIG1 常规签名，旧密码免输）；自助下线 `/_api/key-selfrm` 仅能删当前签名所用 kid。
+- 改密码（控制台）：先输入**当前密码本地校验**（复用 login-begin+本地 finish，不调 login-finish、不产生登录态），通过后才走 `pw-begin`/`pw-commit` 两段（SR-SIG1 常规签名，旧密码不上线——签名即会话证明）；自助下线 `/_api/key-selfrm` 仅能删当前签名所用 kid。
 
 ### 2.1 发布双通道（push）与三入口（SPEC §13.1）
 
@@ -147,9 +147,9 @@ docker --restart unless-stopped：进程级兜底
 ```text
 /srv/showroom                      # btrfs 子卷 @showroom；SHOWROOM_ROOT 可覆盖
 ├─ state/
-│  ├─ policy.env                   # 业务限额：MAX_SLOTS DEFAULT_MEM MAX_MEM IMPORT_MAX_GB
-│  │                               #   ALLOW_LAN_PORT RESERVE_MEM_MB REDIS_DBS DISK_RESERVE_GB
-│  │                               #   UPLOAD_SPACE_FACTOR BOUND_KEYS_MAX
+│  ├─ policy.env                   # 业务限额：MAX_SLOTS（键名沿用，语义=项目数上限）DEFAULT_MEM
+│  │                               #   MAX_MEM IMPORT_MAX_GB ALLOW_LAN_PORT RESERVE_MEM_MB
+│  │                               #   REDIS_DBS DISK_RESERVE_GB UPLOAD_SPACE_FACTOR BOUND_KEYS_MAX
 │  ├─ host.env                     # 设施形状（setup 生成/幂等应用，0600）：MIDDLEWARE CADDY
 │  │                               #   LAN_HOST PUBLIC_HOST TUNING DEDUP FRP FRP_TOKEN FRP_TUNNEL
 │  ├─ ports.reg                    # 每行 <port> <project>
