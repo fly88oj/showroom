@@ -242,6 +242,8 @@ const sealedTotal = (n) => WRAP + n + Math.ceil(n / SEG) * (NONCE + TAG);
 
 // —— fetch 垫片：wasm 服务真实字节；/_api 按 mode 返回（unregistered → 404 E_AUTH） ——
 const resp = (status, obj) => ({ ok: status < 400, status, text: async () => JSON.stringify(obj) });
+// plan-17 S1：whoami 附带平台公钥 PEM（服务端读 state/platform_rsa.pub 下发；假 PEM 仅作自动带回验证，密封前场景 7 会替换真钥）
+const WHOAMI_PEM = '-----BEGIN PUBLIC KEY-----\nMIIBsmokeAutoPem\n-----END PUBLIC KEY-----\n';
 const PROJECTS = { projects: [{ project: 'demo', user: 'alice', tag: 'v1', url: '/demo/', status: 'running', port: 8100, mem: '256m', cpu: 0, updated: 1760107200 }] };
 let mode = 'unregistered'; // unregistered | ok（key-bind 成功 → ok）
 // —— plan-16 §2.2 auth 端点族 mock（与页面 MOCK 垫片同一 toy 协议：ke2 内嵌验证因子，
@@ -501,7 +503,7 @@ globalThis.fetch = async (url, init = {}) => {
   // —— §12.2 身份与管理端点（非管理员/故障 → 404 E_AUTH 不可区分） ——
   if (u.includes('/_api/whoami')) {
     if (whoamiFail) return resp(404, { error: 'E_AUTH' });
-    return resp(200, { user: 'alice', kid: 'kid-self', admin: whoamiAdmin });
+    return resp(200, { user: 'alice', kid: 'kid-self', admin: whoamiAdmin, platform_pem: WHOAMI_PEM });
   }
   if (u.includes('/_api/admin/user-add')) { // plan-16 §1.5：password → login_password 一次性回显；pubkey → kid
     userAddBody = JSON.parse(dec2.decode(init.body));
@@ -631,6 +633,8 @@ ok(!($s('msg').textContent || '').includes('继承管理员'), '非管理员账�
 await sleep(60); // 展项列表异步渲染
 ok(($s('proj-fb').textContent || '').includes('已加载 1 个展项'), '展项列表已请求并渲染');
 await sleep(60); // whoami 异步返回（§12.2）
+ok(($s('hd-pempub').value || '').startsWith('-----BEGIN PUBLIC KEY-----'), 'S1：whoami 附带 platform_pem 自动写入 PEM 字段（免手工粘贴）');
+ok((store.get('sr.pempub') || '').startsWith('-----BEGIN PUBLIC KEY-----'), 'S1：platform_pem 已自动缓存到 sr.pempub（写现有键）');
 ok(!els.has('tab-admin') && !els.has('ad-users-tbl') && !els.has('dlg-user-add') && !els.has('ad-st-auto'),
   'whoami admin=false：管理标签与全部管理 DOM 不存在（第五标签不渲染）');
 
@@ -735,6 +739,26 @@ ok(($s('pub-url').textContent || '') === `/${rp2}/`, `URL 提示恒 /<项目名>
 $s('pub-project').value = 'demo'; // 手输（用户可清空手输的路径）
 fire($s('pub-project'), 'input');
 ok($s('pub-url').textContent === '/demo/', 'URL 提示随手输联动');
+// —— S1 §6 对外 URL 策略：设置公网域名后主链接换 base；清空回退；非法域名内联报错 ——
+$s('set-base').value = 'http://47.107.155.180:10100/';
+fire($s('set-base'), 'input');
+{
+  const ptblBase = $s('proj-tbl:q').innerHTML || '';
+  ok(ptblBase.includes('http://47.107.155.180:10100/demo/') && !ptblBase.includes('http://showroom.test/demo/'),
+    'S1 §6：设置公网域名后展项主链接改用 base（尾斜杠去除）');
+}
+ok(hidden('proj-base-note'), 'S1 §6：配置 base 后「内网地址」提示条不出现');
+$s('set-base').value = 'ftp://bad';
+fire($s('set-base'), 'input');
+ok(($s('set-base-err').textContent || '').includes('http(s)://') && store.get('sr.publicBase') === 'http://47.107.155.180:10100',
+  'S1 §6：非法域名内联报错且保留上一个合法配置');
+$s('set-base').value = '';
+fire($s('set-base'), 'input');
+ok(!store.has('sr.publicBase'), 'S1 §6：清空即回退当前访问地址（移除存储）');
+{
+  const ptblBack = $s('proj-tbl:q').innerHTML || '';
+  ok(ptblBack.includes('http://showroom.test/demo/'), 'S1 §6：清空后主链接回退 origin');
+}
 ok(!els.has('pub-slot') || $s('pub-slot') === undefined, '发布表单无版本维度控件');
 
 // ═══ 场景 6a：§10.4 平台事件流（进入状态页自动订阅） ═══
@@ -802,9 +826,6 @@ ok(($s('db-out').textContent || '').includes('三段式下载完成'), 'dbOut �
 
 // ═══ 场景 7：上传压缩统一（zstd）——发布表单压缩后上传 + 恢复上传魔数两态 ═══
 {
-  // 平台公钥（页面 seal 信封用）：node 生成 RSA-3072 SPKI PEM
-  const plat = generateKeyPairSync('rsa', { modulusLength: 3072 });
-  $s('hd-pempub').value = plat.publicKey.export({ type: 'spki', format: 'pem' }).toString();
   // 伪镜像 tar：9MB+123（跨 8MB 分片边界）周期性内容（可压缩）；独立实例按页面同粒度重压缩对账
   const CHUNK8 = 8 * 1024 * 1024;
   const raw = new Uint8Array(CHUNK8 + 123456);
@@ -814,11 +835,28 @@ ok(($s('db-out').textContent || '').includes('三段式下载完成'), 'dbOut �
   ok(zref.length < raw.length, `压缩率 > 1（${raw.length} → ${zref.length} 字节）`);
   ok(zstdAll([raw.slice(0, CHUNK8), raw.slice(CHUNK8)]).every((b, i) => b === zref[i]), '压缩产物确定性（重算逐字节一致）');
 
-  // 7a. 一键部署（§12.1）：状态条四段流转——压缩 2 片 → 上传 2 chunk（数据片+收尾片）→ 发布 → 完成
+  // S1 验收 6：未配置 PEM（模拟 whoami 未带回）选 tar 发布 → 内联「去设置」引导 → 设置对话框打开
   const fakeFile = (bytes, name) => ({
     name, size: bytes.length,
     slice: (a, b) => { const c = bytes.slice(a, Math.min(b, bytes.length)); return { arrayBuffer: async () => { compSnaps.push($s('dp-text').textContent || ''); return c.buffer; } }; },
   });
+  $s('hd-pempub').value = ''; store.delete('sr.pempub'); // 模拟未配置（清掉 whoami 自动带回值）
+  $s('pub-pem-hint').classList.add('hidden'); // 对齐真实 HTML 初始 hidden（惰性桩无 class 信息）
+  $s('pub-project').value = 'demo9'; $s('pub-tag').value = 'v9';
+  $s('pub-file').files = [fakeFile(new Uint8Array(1024), 'pem-guide.tar')];
+  fire($s('pub-form'), 'submit', { preventDefault() {} });
+  await sleep(40);
+  ok(shown('pub-pem-hint'), 'S1 验收6：未配置 PEM 选 tar 发布 → 内联「去设置」引导出现（不发起上传）');
+  ok(importBeginBody === null && publishN === 0, 'S1 验收6：引导路径未触达 import-begin/publish');
+  click('btn-go-settings');
+  ok($s('dlg-settings').open === true, 'S1 验收6：「去设置」→ 设置对话框打开');
+  click('dlg-settings-close');
+  ok($s('dlg-settings').open === false, 'S1 验收6：设置对话框可关闭');
+  // 平台公钥（页面 seal 信封用）：node 生成 RSA-3072 SPKI PEM（引导测试后恢复真钥）
+  const plat = generateKeyPairSync('rsa', { modulusLength: 3072 });
+  $s('hd-pempub').value = plat.publicKey.export({ type: 'spki', format: 'pem' }).toString();
+
+  // 7a. 一键部署（§12.1）：状态条四段流转——压缩 2 片 → 上传 2 chunk（数据片+收尾片）→ 发布 → 完成
   $s('pub-project').value = 'demo2';
   $s('pub-tag').value = 'v2';
   $s('pub-file').files = [fakeFile(raw, 'demo-img.tar')];
@@ -829,7 +867,7 @@ ok(($s('db-out').textContent || '').includes('三段式下载完成'), 'dbOut �
   ok($s('dp-s1').classList.contains('done') && $s('dp-s2').classList.contains('done')
     && $s('dp-s3').classList.contains('done') && $s('dp-s4').classList.contains('done'), '状态条①压缩②上传③发布④完成四段全部置为完成');
   ok(!$s('dp-bar').classList.contains('err') && hidden('dp-retry'), '成功路径：状态条无标红、无重试按钮');
-  ok(shown('dp-done') && $s('dp-url').textContent === '/demo2/', '④完成段：大字 URL 展示（/demo2/）');
+  ok(shown('dp-done') && $s('dp-url').textContent === 'http://showroom.test/demo2/', '④完成段：大字 URL 展示（externalUrl → http://showroom.test/demo2/）');
   ok(compSnaps.some((t) => /① 压缩中.*%/.test(t)), `①压缩中（x%）进度文案出现（快照 ${compSnaps.filter((t) => t.includes('① 压缩中')).length} 条）`);
   ok(importBeginBody && importBeginBody.project === 'demo2' && importBeginBody.tag === 'v2', 'import-begin 携带项目与标签');
   ok(importBeginBody.total_bytes === sealedTotal(zref.length),
@@ -864,7 +902,7 @@ ok(($s('db-out').textContent || '').includes('三段式下载完成'), 'dbOut �
   ok($s('dp-s1').classList.contains('skip') && $s('dp-s2').classList.contains('skip'), '未选文件：①②段标记为跳过');
   click('dp-retry');
   ok(await waitFor(() => publishN === 2 && shown('dp-done'), 10000), '重试：仅重发发布并完成');
-  ok($s('dp-url').textContent === `/${lastPublishBody.project}/`, '完成 URL 与自动生成项目名一致');
+  ok($s('dp-url').textContent === `http://showroom.test/${lastPublishBody.project}/`, '完成 URL 与自动生成项目名一致（externalUrl）');
 
   // 7a-3. 上传失败 → 状态条标红提示断点续传 → 重试走 import-status 断点补传
   const small = new Uint8Array(300000);
@@ -884,7 +922,7 @@ ok(($s('db-out').textContent || '').includes('三段式下载完成'), 'dbOut �
   ok(await waitFor(() => publishN === 3 && shown('dp-done'), 30000), '重试：断点续传补传后自动发布完成');
   ok(importStatusN > importStatusBase, '重试经 import-status 查询已收分片（断点）');
   ok(![...store.keys()].some((k) => k.startsWith('sr.up.')), '续传成功后本地会话记录清除');
-  ok($s('dp-url').textContent === '/demo3/', '重试后完成 URL 正确');
+  ok($s('dp-url').textContent === 'http://showroom.test/demo3/', '重试后完成 URL 正确（externalUrl）');
 
   // 7a-4. §13.1 入口二「仅上传」：同一 tar 选择，只压缩上传入库——无 publish 调用、③④ skip
   $s('pub-project').value = 'demo4';
@@ -1440,7 +1478,19 @@ ok(html.includes('专家路径：公钥与机器用户（CLI / CI）') && html.i
   'plan-16 帮助页：保留 CLI/公钥专家节（keygen/user-add --pubkey/login）');
 // —— plan-16 收口：发卡初始密码 / 补发 / 改密入口 ——
 for (const ep of ['/_api/auth/pw-begin', '/_api/auth/pw-commit', '/_api/admin/passwd-set']) ok(html.includes(ep), `plan-16 §1.5/§2.2：${ep} 已接线`);
-ok(html.includes('id="btn-pwchange"') && html.includes('id="dlg-pw"') && html.includes('修改密码'), '改密入口：顶部状态条按钮 + 对话框容器');
+ok(html.includes('id="btn-pwchange"') && html.includes('id="dlg-pw"') && html.includes('修改密码'), '改密入口：设置对话框聚合按钮 + 对话框容器');
+{
+  const appTop = html.slice(html.indexOf('<template id="app-tpl">'), html.indexOf('</header>'));
+  ok(!appTop.includes('hd-pempub') && !appTop.includes('btn-pempub') && !appTop.includes('btn-pwchange'),
+    'S1：顶栏不常驻 PEM/改密入口（聚合进设置对话框；验收 9 顶栏单行）');
+  ok(html.includes('id="dlg-settings"') && html.includes('id="set-base"') && html.includes('id="set-base-err"')
+    && html.indexOf('id="hd-pempub"') > html.indexOf('id="dlg-settings"'),
+    'S1：设置对话框齐备（对外访问域名 + PEM 收纳 + 改密/忘记设备聚合；hd-pempub 迁入其中）');
+  ok(html.includes('externalUrl') && html.includes('sr.publicBase') && html.includes('id="proj-base-note"'),
+    'S1 §6：externalUrl 助手 / 公网域名设置 / 内网兜底提示条已接入');
+  ok(html.includes('id="pub-pem-hint"') && html.includes('id="btn-go-settings"'),
+    'S1 验收6：PEM 内联引导容器（去设置）已接入');
+}
 ok(html.includes('autocomplete="current-password"') && html.includes('autocomplete="new-password"'),
   '规范：改密密码框 autocomplete（current-password / new-password）');
 ok((html.match(/type="password"/g) || []).length >= 4, '规范：密码输入均 type=password（登录 1 + 改密 3）');

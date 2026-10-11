@@ -252,8 +252,7 @@
         <span class="srv">服务器 <span class="mono" id="hd-srv"></span></span>
       </div>
       <div class="chrome-actions">
-        <button id="btn-pempub" title="平台公钥 PEM：镜像上传与数据库恢复的加密信封公钥">平台公钥</button>
-        <button id="btn-pwchange" title="当前密码校验后替换为新密码（OPAQUE，密码不明文上线）">修改密码</button>
+        <button id="btn-settings" title="对外访问域名 / 平台公钥 PEM / 修改密码 / 忘记此设备">设置</button>
         <button id="btn-logout">退出登录</button>
       </div>
     </div>
@@ -267,24 +266,33 @@
   </nav>
   <!-- 三层层级·第三层：内容区（1200px 居中功能卡片） -->
 
-  <!-- 平台公钥 PEM 对话框（原页首 PEM 区收纳于此；textarea id=hd-pempub 保持不变，localStorage 读写逻辑不动） -->
-  <dialog id="dlg-pempub" aria-labelledby="dlg-pempub-title">
+  <!-- 设置（plan-17 §0-4/§6）：对外访问域名 + 平台公钥 PEM 收纳（whoami platform_pem 自动取+缓存到
+       sr.pempub，此处手工粘贴兜底）+ 改密/忘记设备入口聚合；页首不再常驻 PEM -->
+  <dialog id="dlg-settings" aria-labelledby="dlg-settings-title">
     <div class="dlg-head">
-      <h2 id="dlg-pempub-title">平台公钥 PEM</h2>
-      <button type="button" id="pempub-close">关闭</button>
+      <h2 id="dlg-settings-title">设置</h2>
+      <button type="button" id="dlg-settings-close">关闭</button>
     </div>
-    <p class="note">管理员分发的 <span class="mono">platform_rsa.pub</span>：镜像上传与数据库恢复的加密信封公钥，配置后保存在本机浏览器 localStorage。</p>
-    <label class="field mt-3" for="hd-pempub"><span>平台公钥 PEM（粘贴完整 PEM，含 BEGIN/END 行）</span>
+    <label class="field" for="set-base"><span>对外访问域名（展项列表与完成页主链接用它拼接，如 <span class="mono">http://47.107.155.180:10100</span>；留空用当前访问地址）</span>
+      <input type="text" id="set-base" class="mono" placeholder="http://…:…"></label>
+    <p class="ferr" id="set-base-err" aria-live="polite"></p>
+    <label class="field mt-3" for="hd-pempub"><span>平台公钥 PEM（管理员分发的 <span class="mono">platform_rsa.pub</span>；镜像上传与数据库恢复的加密信封公钥。whoami 已自动带回时无需粘贴，此处仅兜底）</span>
       <textarea id="hd-pempub" class="mono" rows="9" placeholder="-----BEGIN PUBLIC KEY-----&#10;…&#10;-----END PUBLIC KEY-----…"></textarea>
     </label>
     <div class="row">
       <button type="button" id="pempub-copy">复制 PEM</button>
+    </div>
+    <div class="sep"></div>
+    <div class="row">
+      <button type="button" id="btn-pwchange" title="当前密码校验后替换为新密码（OPAQUE，密码不明文上线）">修改密码…</button>
+      <button type="button" id="btn-settings-forget" class="danger" title="清除本机密钥与账号记忆（可选远程注销本机钥匙）">忘记此设备…</button>
     </div>
   </dialog>
 
   <!-- ———— 标签页 1：展项管理 ———— -->
   <section id="tab-proj" role="tabpanel" aria-labelledby="tabbtn-proj">
     <h2>展项列表</h2>
+    <div class="warnbar hidden" id="proj-base-note">正在用内网地址展示 URL：可在<button type="button" id="btn-base-note-settings" class="act">设置</button>中配置「对外访问域名」（公网域名）。</div>
     <div class="row">
       <button id="btn-refresh">刷新列表</button>
       <span class="fb" id="proj-fb" aria-live="polite"></span>
@@ -324,6 +332,8 @@
       <p class="ferr" id="pub-tag-err" aria-live="polite"></p>
       <p class="ferr" id="pub-file-err" aria-live="polite"></p>
     </form>
+    <!-- plan-17 验收 6：未配置 PEM 时选 tar 发布 → 内联引导「去设置」（whoami 自动带回后永不出现） -->
+    <p class="warnbar hidden" id="pub-pem-hint">尚未配置平台公钥 PEM（镜像上传的加密信封公钥）：<button type="button" id="btn-go-settings" class="act">去设置</button>（whoami 自动带回后无需手工粘贴）</p>
     <!-- §12.1 一键部署状态条：①压缩 → ②上传 → ③发布 → ④完成（大字 URL + 复制）；任一步失败标红可重试；
          「仅上传」走①②并在成功时把③④标记为跳过（镜像已入库，可稍后从下方部署入口选择） -->
     <div id="dp-bar" class="hidden mt-3">
@@ -894,7 +904,7 @@ const errText = (e) => {
 const apiFail = (what, e) => {
   // §14.2/§14.3：磁盘空间不足的 E_QUOTA（msg 含「磁盘空间不足」）→ 顶部条追加删除引导并刷新空间条（内存类 E_QUOTA 不追加）
   if (e && e.error === 'E_QUOTA' && (e.msg || '').includes('磁盘空间不足')) {
-    if ($('space-note')) refreshSpace();
+    if ($('space-note')) refreshSpace(true);
     return showMsg(`${what}失败 — ${errText(e)}；可到部署区删除旧镜像后重试`);
   }
   showMsg(`${what}失败 — ${errText(e)}`);
@@ -926,6 +936,24 @@ const esc = (s) => String(s ?? '').replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '
 const STATUS_CN = { running: '运行中', exited: '已退出', paused: '已暂停', restarting: '重启中', created: '已创建', dead: '异常终止', missing: '未部署' };
 const statusCn = (s) => STATUS_CN[s] || s || '未知';
 const statusCls = (s) => s === 'running' ? 'status-ok' : (s === 'missing' ? 'status-bad' : 'status-mid');
+
+// —— 对外 URL 展示策略（plan-17 §6）：全站主链接一律 externalUrl()；服务端 p.url 仅作 tooltip ——
+// base 解析：① 设置 sr.publicBase（#set-base）→ ② location.origin（host 非私网）→ ③ 兜底 origin + 内网提示条
+const PRIV_HOST_RE = /^(localhost|127\.|0\.0\.0\.0|::1|\[::1\]|10\.|192\.168\.|172\.(1[6-9]|2\d|3[01])\.)/i;
+function publicBase() {
+  const saved = (localStorage.getItem('sr.publicBase') || '').trim().replace(/\/+$/, '');
+  return saved || location.origin; // ②/③：公网 origin 直接用；内网 origin 兜底（列表上方出提示条）
+}
+const usingLanOrigin = () => !localStorage.getItem('sr.publicBase')
+  && location.protocol !== 'https:' && PRIV_HOST_RE.test(location.hostname);
+const externalUrl = (p) => `${publicBase()}/${p.project}/`;
+
+// —— 数据 TTL 缓存（plan-17 §3）：内存+TTL 单源；写操作/事件强制失效（force 绕过） ——
+const DATA_TTL = { projects: 30000, images: 300000, space: 60000 };
+const dataAt = { projects: 0, images: 0, space: 0 };
+const dataFresh = (k) => Date.now() - dataAt[k] < DATA_TTL[k];
+const dataMark = (k) => { dataAt[k] = Date.now(); };
+const dataInvalidate = (...ks) => ks.forEach((k) => { dataAt[k] = 0; });
 
 // —— 密钥状态（localStorage：sr.seed hex64 / sr.user / sr.pempub）——
 const state = { seed: null, pub: '', user: '', loggedIn: false, projects: [], kid: '', admin: false, boundAdmin: false };
@@ -1335,10 +1363,8 @@ function enterApp() {
   $('login').classList.add('hidden');
   if (!appBuilt) { buildApp(); appBuilt = true; }
   $('app').classList.remove('hidden');
-  refreshProjects();
-  ensureImages();     // §13.1：进入发布区（初始标签）即惰性加载镜像清单
-  refreshSpace();     // §14.1：初始进入展项页即拉取空间条
-  syncAdmin(); // §12.2：whoami 决定第五「管理」标签去留
+  // plan-17 §3：登录即 4 路并发（projects/images/space/whoami），任一路失败不阻断其余（allSettled）
+  Promise.allSettled([refreshProjects(true), ensureImages(), refreshSpace(true), syncAdmin()]);
 }
 function logout() {
   state.loggedIn = false;
@@ -1448,13 +1474,17 @@ function buildApp() {
   $('hd-srv').textContent = location.origin + '/_api';
   $('hd-pempub').value = localStorage.getItem('sr.pempub') || '';
   $('hd-pempub').addEventListener('input', () => localStorage.setItem('sr.pempub', $('hd-pempub').value));
-  // 平台公钥对话框（原页首 PEM 区收纳于此）：textarea id=hd-pempub 不变，上方 localStorage 读写逻辑不动
-  $('btn-pempub').addEventListener('click', () => $('dlg-pempub').showModal());
-  $('pempub-close').addEventListener('click', () => $('dlg-pempub').close());
-  $('pempub-copy').addEventListener('click', () => copyText($('hd-pempub').value.trim(), '平台公钥 PEM'));
+  // 设置（plan-17 S1）：PEM 收纳 + 对外访问域名 + 改密/忘记设备聚合入口
+  $('btn-settings').addEventListener('click', () => openSettings(false));
+  $('dlg-settings-close').addEventListener('click', () => $('dlg-settings').close());
+  $('pempub-copy').addEventListener('click', () => copyText(platformPem(), '平台公钥 PEM'));
+  $('set-base').addEventListener('input', onSetBaseInput);
+  $('btn-settings-forget').addEventListener('click', onForgetDevice);
+  $('btn-go-settings').addEventListener('click', () => openSettings(true));
+  $('btn-base-note-settings').addEventListener('click', () => openSettings(false));
   refreshAdminBadge(); // 顶栏账号徽标的管理员角标（密码登录继承的 admin 此刻已可知）
   $('btn-logout').addEventListener('click', logout);
-  // 修改密码（plan-16 §2.2）：顶部入口 + 对话框（密码框 autocomplete、字段内联错误、busy）
+  // 修改密码（plan-16 §2.2）：设置对话框聚合入口 + 对话框（密码框 autocomplete、字段内联错误、busy）
   $('btn-pwchange').addEventListener('click', openPwDlg);
   $('pw-close').addEventListener('click', () => $('dlg-pw').close());
   $('pw-submit').addEventListener('click', onPwChange);
@@ -1467,6 +1497,35 @@ function buildApp() {
   wireTabs(); wireProjTab(); wireDbTab(); wireStatusTab();
 }
 const platformPem = () => $('hd-pempub').value.trim();
+/** PEM 就绪检查（plan-17 验收 6）：未配置 → 展示「去设置」内联引导。
+ *  whoami 已自动带回 platform_pem 时本检查恒过，永不需手工粘贴。 */
+function pemReady() {
+  if (platformPem().startsWith('-----BEGIN PUBLIC KEY-----')) return true;
+  $('pub-pem-hint')?.classList.remove('hidden');
+  return false;
+}
+/** 打开设置对话框（plan-17 S1）：focusPem=true 时焦点落 PEM 字段（内联引导跳转）。 */
+function openSettings(focusPem = false) {
+  $('set-base').value = localStorage.getItem('sr.publicBase') || '';
+  fieldErr('set-base', '');
+  $('pub-pem-hint')?.classList.add('hidden');
+  $('dlg-settings').showModal();
+  (focusPem ? $('hd-pempub') : $('set-base'))?.focus();
+}
+/** 对外访问域名（plan-17 §6）：合法 http(s) 地址即存 sr.publicBase（去尾斜杠）并重渲 URL 列；清空回退 origin。 */
+function onSetBaseInput() {
+  fieldErr('set-base', '');
+  const v = $('set-base').value.trim().replace(/\/+$/, '');
+  if (!v) { localStorage.removeItem('sr.publicBase'); renderProjects(); return; }
+  try {
+    const u = new URL(v);
+    if (u.protocol !== 'http:' && u.protocol !== 'https:') throw new Error('scheme');
+    localStorage.setItem('sr.publicBase', v);
+    renderProjects();
+  } catch {
+    fieldErr('set-base', '对外访问域名须为 http(s):// 开头的完整地址（如 http://47.107.155.180:10100），请修正后重试');
+  }
+}
 /** 顶栏账号徽标的管理员角标（纯呈现）：boundAdmin=密码登录继承；admin=whoami 结论。 */
 function refreshAdminBadge() {
   const m = $('hd-admin');
@@ -1521,6 +1580,11 @@ async function syncAdmin() {
   try {
     const j = await api('GET', '/_api/whoami');
     state.kid = j.kid || '';
+    // plan-17 S1：platform_pem 自动取+缓存（写现有 sr.pempub 键；不覆盖手工已配置值）
+    if (j.platform_pem && !$('hd-pempub').value.trim()) {
+      $('hd-pempub').value = j.platform_pem;
+      localStorage.setItem('sr.pempub', j.platform_pem);
+    }
     isAdmin = !!j.admin;
   } catch (e) { apiFail('身份查询（whoami）', e); }
   state.admin = isAdmin; // §13.1/§13.2：镜像清单与 Redis 浏览据此标注「管理员视图」
@@ -1920,7 +1984,7 @@ function wireProjTab() {
   $('btn-refresh').addEventListener('click', refreshProjects);
   $('proj-tbl').addEventListener('click', onProjAction);
   $('img-list').addEventListener('click', onImageRm);                       // §14.3：镜像清单行删除（事件委托）
-  $('space-refresh').addEventListener('click', () => refreshSpace());      // §14.1：空间条手动刷新
+  $('space-refresh').addEventListener('click', () => refreshSpace(true));      // §14.1：空间条手动刷新（绕过 TTL）
   $('pub-form').addEventListener('submit', onDeploy); // 入口一「一键部署」：压缩→上传→发布一条龙（§12.1）
   $('btn-upload-only').addEventListener('click', onUploadOnly); // 入口二「仅上传」：同一 tar，只入库不部署
   $('dep-form').addEventListener('submit', onDeployForm); // 入口三「部署」：选 registry 已有镜像直接发布（§13.1）
@@ -1948,7 +2012,7 @@ function wireProjTab() {
 // —— §13.1 镜像清单（ComboBox 数据源）：进入发布区惰性加载；force=true 强制重取 ——
 let imagesLoaded = false;
 async function ensureImages(force = false) {
-  if (imagesLoaded && !force) return;
+  if (imagesLoaded && !force && dataFresh('images')) return; // plan-17 §3：TTL 300s
   $('dep-images-fb').textContent = '正在加载镜像清单…';
   try {
     const j = await api('GET', '/_api/images');
@@ -1956,6 +2020,7 @@ async function ensureImages(force = false) {
     $('dl-images').innerHTML = images.map((s) => `<option value="${esc(s)}">`).join('');
     renderImageList(images); // §14.3：清单容器（删除按钮挂此）与 ComboBox 同源同刷
     imagesLoaded = true;
+    dataMark('images');
     const adminView = j.admin_view ?? state.admin; // 服务端标注优先，回退 whoami 结论
     $('dep-images-fb').textContent = adminView
       ? `管理员视图：已列出全部账号镜像 ${images.length} 个`
@@ -1982,18 +2047,21 @@ async function onImageRm(ev) {
   try {
     const j = await api('POST', '/_api/image-rm', { image });
     alert(`已回收约 ${Number(j.freed_est_mb ?? 0)} MB`);
+    dataInvalidate('images', 'space'); // plan-17 §3：写操作强制失效
     ensureImages(true); // 清单重取：被删 tag 即刻消失
-    refreshSpace();     // 空间数字同步刷新
+    refreshSpace(true);     // 空间数字同步刷新
   } catch (e) { apiFail(`删除镜像 ${image}`, e); }
   btn.disabled = false;
 }
 // —— §14.1 空间条：GET /_api/space → 「可用空间（已扣预留）：X GB」（GB 一位小数）；失败静默降级 ——
-async function refreshSpace() {
+async function refreshSpace(force = false) {
+  if (!force && dataFresh('space')) return; // plan-17 §3：TTL 60s
   try {
     const j = await api('GET', '/_api/space');
     const freeMb = Number(j.available_mb) - Number(j.reserve_mb); // 显示口径＝可用−预留（SPEC §14.1）
     if (!Number.isFinite(freeMb)) throw new Error('bad space payload');
     $('space-note').textContent = `可用空间（已扣预留）：${(freeMb / 1024).toFixed(1)} GB`;
+    dataMark('space');
   } catch { $('space-note').textContent = '空间信息不可用'; } // 静默降级：不上顶部条、不阻断上传表单
 }
 // —— 选中镜像 → 自动带出项目与标签（形如 user/project:tag；可手改） ——
@@ -2017,24 +2085,27 @@ async function onDeployForm(ev) {
   busy($('dep-submit'), true, '发布中…');
   try {
     const j = await api('POST', '/_api/publish', body);
-    const url = j.url || `/${project}/`;
+    const url = externalUrl({ project });
     $('dep-fb').textContent = `部署成功，访问地址：${url}`;
     showMsg(`部署成功，访问地址：${url}`, 'ok');
-    refreshProjects();
+    refreshProjects(true);
   } catch (e) {
     $('dep-fb').textContent = '';
     apiFail(`部署 ${project}:${tag}`, e);
   }
   busy($('dep-submit'), false);
 }
-async function refreshProjects() {
+async function refreshProjects(force = false) {
+  if (!force && dataFresh('projects')) return; // plan-17 §3：TTL 内跳过（内存单源）
   const tb = $('proj-tbl').querySelector('tbody');
   tb.innerHTML = '<tr><td colspan="6" class="note">加载中…</td></tr>';
   try {
     const j = await api('GET', '/_api/projects');
     state.projects = j.projects || [];
     renderProjects();
+    dataMark('projects');
     $('proj-fb').textContent = `已加载 ${state.projects.length} 个展项（${new Date().toLocaleTimeString()}）`;
+    $('proj-base-note')?.classList.toggle('hidden', !usingLanOrigin()); // 兜底 origin 为内网时提示
     fillDbTargets();
   } catch (e) {
     tb.innerHTML = '';
@@ -2048,7 +2119,7 @@ function renderProjects() {
       <td class="mono">${esc(p.project)}</td>
       <td class="mono">${esc(p.tag)}</td>
       <td class="${statusCls(p.status)}">${esc(statusCn(p.status))}</td>
-      <td class="wrap"><a href="/${esc(p.project)}/" target="_blank" rel="noopener">/${esc(p.project)}/</a></td>
+      <td class="wrap"><a href="${esc(externalUrl(p))}" target="_blank" rel="noopener" title="服务器登记地址：${esc(p.url || '—')}">${esc(externalUrl(p))}</a></td>
       <td class="mono">${esc(fmtTime(p.updated))}</td>
       <td>
         <button class="act" data-act="start" data-p="${esc(p.project)}">启动</button>
@@ -2073,8 +2144,8 @@ async function onProjAction(ev) {
   btn.disabled = true;
   try {
     const j = await api('POST', `/_api/${act}`, { project });
-    $('proj-fb').textContent = `已${ACT_CN[act]} ${project}${j.url ? `，访问地址 ${j.url}` : ''}`;
-    refreshProjects();
+    $('proj-fb').textContent = `已${ACT_CN[act]} ${project}${j.url ? `，访问地址 ${externalUrl({ project })}` : ''}`;
+    refreshProjects(true); // 写操作强制失效（plan-17 §3）
   } catch (e) { apiFail(`${ACT_CN[act]} ${project}`, e); }
   btn.disabled = false;
 }
@@ -2164,11 +2235,12 @@ async function deployRun(mode) {
     dpSet(3, 'done'); dpSet(4, 'done'); // ④ 完成：大字 URL + 复制
     const url = j.url || `/${project}/`;
     dpText('④ 完成：部署成功。');
-    $('dp-url').textContent = url;
-    $('dp-url').setAttribute?.('href', url);
+    const eurl = externalUrl({ project }); // plan-17 §6：完成大字 URL 一律 externalUrl
+    $('dp-url').textContent = eurl;
+    $('dp-url').setAttribute?.('href', eurl);
     $('dp-done').classList.remove('hidden');
-    showMsg(`一键部署成功，访问地址：${url}`, 'ok');
-    refreshProjects();
+    showMsg(`一键部署成功，访问地址：${eurl}`, 'ok');
+    refreshProjects(true);
     deploy.failAt = null;
   } catch (e) {
     deploy.failAt = phase;
@@ -2210,6 +2282,7 @@ async function onDeploy(ev) {
   clearErrs('pub-project', 'pub-tag', 'pub-file');
   const f = collectPubFields(false);
   if (!f) return;
+  if (f.file && !pemReady()) return; // plan-17 验收 6：未配置 PEM → 内联「去设置」引导
   deploy.intent = 'deploy';
   deploy.project = f.project; deploy.tag = f.tag;
   deploy.file = f.file;
@@ -2225,6 +2298,7 @@ async function onUploadOnly() {
   clearErrs('pub-project', 'pub-tag', 'pub-file');
   const f = collectPubFields(true);
   if (!f) return;
+  if (!pemReady()) return; // 仅上传同样走加密信封
   deploy.intent = 'upload';
   deploy.project = f.project; deploy.tag = f.tag;
   deploy.file = f.file;
@@ -2243,7 +2317,7 @@ function dpUploadNote(sent, total) {
 /** 全新上传（一键部署②段）：import-begin → 本地会话登记 → 逐片加密上传 → 收尾。 */
 async function deployUpload(project, tag) {
   const pem = platformPem();
-  if (!pem.startsWith('-----BEGIN PUBLIC KEY-----')) throw { error: 'E_STATE', msg: '请先在页首配置平台公钥 PEM（管理员分发的 platform_rsa.pub）' };
+  if (!pem.startsWith('-----BEGIN PUBLIC KEY-----')) throw { error: 'E_STATE', msg: '请先在「设置」中配置平台公钥 PEM（管理员分发的 platform_rsa.pub；whoami 自动带回后无需手工粘贴）' };
   const zb = deploy.blob, file = deploy.file;
   const total = sealedTotal(zb.size);
   dpUploadNote(0, total); // 状态条切入②上传段（已传 0 / 压缩后总长）
@@ -2395,7 +2469,7 @@ async function uploadRest(uploadId, sid, blob, startSeq, sent0, total, note) {
   await api('POST', `/_api/import-end?upload=${encodeURIComponent(uploadId)}`, null);
   localStorage.removeItem('sr.up.' + uploadId);
   refreshUpIds();
-  refreshSpace(); // §14.1：import-end 成功后刷新空间条
+  dataInvalidate('space'); refreshSpace(true); // §14.1：import-end 成功后刷新空间条
 }
 /** 断点续传核心（手动「恢复」与一键部署重试共用，§8.1）：查已收分片 → 重新压缩重建产物
  *  （压缩确定性 ⇒ 信封逐字节一致）→ 重放已收分片推进加密会话 → 补传剩余 → import-end 收尾。
@@ -2406,7 +2480,7 @@ async function resumeUploadCore(id, opts = {}) {
   const file = $('pub-file').files[0];
   if (!file || file.size !== saved.size) throw { error: 'E_STATE', msg: `续传需在发布表单选择同一文件（${saved.name}，${saved.size} 字节）` };
   const pem = platformPem();
-  if (!pem.startsWith('-----BEGIN PUBLIC KEY-----')) throw { error: 'E_STATE', msg: '请先在页首配置平台公钥 PEM（管理员分发的 platform_rsa.pub）' };
+  if (!pem.startsWith('-----BEGIN PUBLIC KEY-----')) throw { error: 'E_STATE', msg: '请先在「设置」中配置平台公钥 PEM（管理员分发的 platform_rsa.pub；whoami 自动带回后无需手工粘贴）' };
   const st = await api('GET', `/_api/import-status?upload=${encodeURIComponent(id)}`);
   const rec = (st.received || []).length;
   opts.onRec?.(rec);
@@ -2441,7 +2515,7 @@ async function resumeUploadCore(id, opts = {}) {
   await api('POST', `/_api/import-end?upload=${encodeURIComponent(id)}`, null);
   localStorage.removeItem('sr.up.' + id);
   refreshUpIds();
-  refreshSpace(); // §14.1：import-end 成功后刷新空间条
+  dataInvalidate('space'); refreshSpace(true); // §14.1：import-end 成功后刷新空间条
   return { pre, zsize: zb.size };
 }
 async function onResumeUpload() {
@@ -2449,6 +2523,7 @@ async function onResumeUpload() {
   const id = $('up-id').value.trim();
   if (!id) return showMsg('请填入要恢复的上传编号（开始上传后自动记录）');
   if (!localStorage.getItem('sr.up.' + id)) return showMsg('本地无该会话记录（浏览器数据被清则无法续传，请重新上传）');
+  if (!pemReady()) return; // 续传重建信封同样需要 PEM
   upBusy = true;
   try {
     const r = await resumeUploadCore(id, {
@@ -2659,8 +2734,8 @@ async function onDbRestore() {
   if (!t) return;
   const file = $('db-restore-file').files[0];
   if (!file) return showMsg('请先选择要恢复的 .dump 文件（「备份下载」的产物）');
+  if (!pemReady()) { openSettings(true); return showMsg('恢复需先配置平台公钥 PEM：已打开「设置」，请粘贴或确认自动带回的 PEM（管理员分发的 platform_rsa.pub）'); }
   const pem = platformPem();
-  if (!pem.startsWith('-----BEGIN PUBLIC KEY-----')) return showMsg('恢复需先在页首配置平台公钥 PEM（管理员分发的 platform_rsa.pub）');
   if (!confirm(`确认将 ${file.name}（${file.size} 字节）恢复到 ${t.project}？当前数据将被替换。`)) return;
   busy($('btn-db-restore'), true, '恢复中…');
   $('db-fb').textContent = '正在压缩并加密文件…';

@@ -166,7 +166,7 @@ CLI 对应：`showroom db sql|tables|preview|dump|restore|reset`。公网全可�
 ### 12.2 管理员（标记在 Key 上）
 - state：`tokens/<user>/<kid>.pub` 旁增加 `tokens/<user>/<kid>.admin`（空文件存在=管理员钥匙）。
 - 引导：主机 CLI `showroomctl user-add <名> --gen-password --admin`（或 --pubkey，§16 起密码为主路径）首个管理员；此后管理员可远程授权。
-- 身份接口：`GET /_api/whoami`（签名）→ `{"user","kid","admin":bool}`——控制台据此显示/隐藏「管理」标签。
+- 身份接口：`GET /_api/whoami`（签名）→ `{"user","kid","admin":bool,"platform_pem":str}`——控制台据此显示/隐藏「管理」标签；`platform_pem` 为平台 RSA 公钥 PEM（读 `state/platform_rsa.pub`，缺文件=空串；公钥本就公开，经签名端点下发零信息暴露），控制台自动缓存到本地（`sr.pempub`）免手工粘贴。
 - 管理接口（全部签名+管理员钥匙校验，非管理员=404 E_AUTH 与未登记不可区分；公网可用）：
   - `GET /_api/admin/users` → 账号/钥匙(kid,admin,登记时间)/项目数/has_password（§16 未设密码徽标）
   - `POST /_api/admin/user-add {user,pubkey?,admin?,password?|gen_password:true}` → 一次性返回 `{kid?,login_password,registry_password}` 两把密码分开发放（§16 §1.3；pubkey 与 password 至少其一）

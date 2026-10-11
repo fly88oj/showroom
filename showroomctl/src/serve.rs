@@ -242,9 +242,12 @@ async fn dispatch(
         ("GET", "/_api/health", _) => Ok(Json(json!({"ok": true}))),
 
         // —— 身份（SPEC §12.2）：whoami 用当前请求命中的 kid 判定 admin ——
+        // plan-17 S1：随身份附带平台公钥 PEM（读 state/platform_rsa.pub；RSA 公钥本就公开，
+        // 经签名端点下发零信息暴露；控制台自动缓存 sr.pempub 免手工粘贴，缺文件=空串）
         ("GET", "/_api/whoami", _) => Ok(Json(json!({
             "user": user, "kid": kid,
             "admin": ops::key_is_admin(&s.root, &user, &kid),
+            "platform_pem": std::fs::read_to_string(s.root.join("state/platform_rsa.pub")).unwrap_or_default(),
         }))),
 
         // —— 登录后信任通道下发 registry 凭据（plan-16 §2.2 末段）：CLI login 免手工 config；
