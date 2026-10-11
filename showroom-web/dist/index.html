@@ -1629,7 +1629,8 @@ function buildApp() {
   wireHelpTab();
   $('pub-project').value = randomProject(); // 页面加载（建壳）时预填一次随机名；「换一个」随时重随机
   updatePubUrl();
-  // 行抽屉（S2）：st-logs* 在抽屉内，克隆后接线
+  // 行抽屉（S2）：先挂入文档（hidden）再接线——getElementById 只寻址文档内元素
+  $('proj-tbl').querySelector('tbody')?.append?.(drawerRow);
   $('drawer-close').addEventListener('click', () => closeDrawer());
   logsLive.want = $('st-logs-live').checked; // 与勾选框初始状态同步
   $('st-logs-live').addEventListener('change', () => {
@@ -2296,7 +2297,9 @@ function renderProjects() {
     }).join('');
     tb.innerHTML = acts;
   }
-  // 行抽屉保持：重渲后重新挂到原项目行后（上传/发布中行内标记刷新不丢抽屉）
+  // 行抽屉常驻：重渲后重新挂回（hidden 状态保持；展开时移到原项目行后不丢抽屉）
+  const tbEl = $('proj-tbl')?.querySelector?.('tbody');
+  if (tbEl && !tbEl.contains?.(drawerRow)) tbEl.append?.(drawerRow);
   if (drawerRow.dataset.drawer) {
     const r = $('proj-tbl')?.querySelector?.(`tr[data-row="${drawerRow.dataset.drawer}"]`);
     if (r && r.after) r.after(drawerRow);
@@ -3111,6 +3114,7 @@ function reconnectEvents(why) {
 // —— 行抽屉（plan-17 §1/S2）：st-logs* 迁入展项行后插行；一次一行，展开即订阅、收起/换行即断 ——
 const drawerRow = document.createElement('tr');
 drawerRow.className = 'drawer-row';
+drawerRow.hidden = true; // buildApp 即挂入展项表 tbody（保证 st-logs* 可 getElementById 接线），展开时移动到项目行后
 drawerRow.dataset.drawer = ''; // 展开时=所属项目（无全局行 id；st-logs* 唯一 id 在抽屉内）
 drawerRow.innerHTML = `<td colspan="7">
   <div class="row">
@@ -3131,12 +3135,13 @@ function openDrawer(project) {
   const esc2 = (typeof CSS !== 'undefined' && CSS.escape) ? CSS.escape(project) : project; // 项目名恒 [a-zA-Z0-9-]，转义仅防御
   const row = $('proj-tbl').querySelector(`tr[data-row="${esc2}"]`);
   if (row && row.after) row.after(drawerRow); else $('proj-tbl').querySelector('tbody')?.append?.(drawerRow);
+  drawerRow.hidden = false;
   drawerRow.dataset.drawer = project;
   for (const b of drawerRow.querySelectorAll ? drawerRow.querySelectorAll('button[data-act]') : []) b.dataset.p = project; // 抽屉快捷动作绑定当前项目
   pickLogs(project);
 }
 function closeDrawer(fbText) {
-  drawerRow.remove?.();
+  drawerRow.hidden = true; // 收起=隐藏挂回 tbody（元素常驻文档，st-logs* 始终可寻址）
   drawerRow.dataset.drawer = '';
   if (logsLive.project) stopLogsStream(fbText || '已收起抽屉，停止实时跟随'); // 收起即断（§3）
   logsLive.project = null;
