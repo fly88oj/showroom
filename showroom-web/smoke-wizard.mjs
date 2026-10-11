@@ -417,6 +417,10 @@ globalThis.fetch = async (url, init = {}) => {
     return resp(200, { ok: true });
   }
   if (u.includes('/_api/health')) return mode === 'ok' ? resp(200, { ok: true }) : resp(404, { error: 'E_AUTH' });
+  if (/\/_api\/(start|stop|rollback|rm)$/.test(u)) { // S4：行动作（rm 走诚实 confirm 后直达）
+    const act = u.split('/').pop();
+    return resp(200, { ok: true, ...((act === 'start' || act === 'rollback') ? { url: '/demo/' } : {}) });
+  }
   if (u.includes('/_api/projects')) { projectsN++; return resp(200, PROJECTS); }
   if (u.includes('/_api/images')) { // §13.1：admin 钥匙全量（admin_view），普通仅本人前缀；§14.3 删除后清单收敛
     imagesN++;
@@ -751,6 +755,36 @@ $s('pub-project').value = 'nosuch';
 fire($s('pub-project'), 'change');
 ok(hidden('pub-pref-note'), 'S3 预填：未命中项目不显注记');
 $s('pub-project').value = 'demo'; // 还原
+
+// —— S4 行操作序 / 更多▾ / 更新预填 / 数据深链 / 删除诚实 confirm ——
+{
+  const rowHtml = $s('proj-tbl:q').innerHTML || '';
+  const idx = (t) => rowHtml.indexOf(t);
+  ok(idx('>打开<') >= 0 && idx('>更新<') > idx('>打开<') && idx('>日志<') > idx('>更新<')
+    && (idx('>停止<') > idx('>日志<') || idx('>启动<') > idx('>日志<')) && idx('更多') > idx('>日志<'),
+    'S4：行操作固定顺序 打开·更新·日志·启动/停止·更多▾（§4）');
+  ok(idx('回滚到上一版本') > idx('更多') && idx('>环境变量<') > idx('回滚') && idx('>数据<') > idx('>环境变量<') && idx('>删除<') > idx('>数据<'),
+    'S4：更多▾菜单项序 回滚·环境变量·数据·删除');
+  ok(rowHtml.includes('role="menu"') && rowHtml.includes('aria-haspopup'), 'S4：更多菜单 role=menu/aria-haspopup');
+}
+fire($s('proj-tbl'), 'click', { target: { closest: () => ({ dataset: { act: 'update', p: 'demo' } }) } });
+await sleep(20);
+ok(!hidden('tab-pub') && hidden('tab-proj'), 'S4：行「更新」→ 跳发布页');
+ok($s('pub-project').value === 'demo' && $s('pub-tag').value === 'v9' && String($s('pub-cport').value) === '9000' && $s('pub-mem').value === '256m',
+  'S4/验收 7：更新预填同一套参数（项目/内存/端口一致）');
+ok(shown('pub-pref-note'), 'S4：更新预填注记可见（沿用上次发布参数）');
+clickTab('proj');
+fire($s('proj-tbl'), 'click', { target: { closest: () => ({ dataset: { act: 'dblink', p: 'demo' } }) } });
+ok(!hidden('tab-db') && $s('db-project').value === 'demo', 'S4：数据深链 → 数据页并填项目（零请求）');
+clickTab('proj');
+confirmMsgs.length = 0;
+fire($s('proj-tbl'), 'click', { target: { closest: () => ({ dataset: { act: 'rm', p: 'demo' } }) } });
+await sleep(30);
+{
+  const rmC = confirmMsgs.at(-1) || '';
+  ok(rmC.includes('demo') && rmC.includes('数据库将一并删除，如需保留请先在数据页备份下载 .dump'),
+    'S4/验收 14：删除 confirm 诚实文案（数据库一并删除 + 数据页备份 .dump 指引）');
+}
 
 // —— S1 §6 对外 URL 策略：设置公网域名后主链接换 base；清空回退；非法域名内联报错 ——
 $s('set-base').value = 'http://47.107.155.180:10100/';
@@ -1517,6 +1551,11 @@ ok(html.indexOf('id="st-events"') > html.indexOf('id="tab-admin"') && html.inclu
 ok(html.indexOf('id="rd-db"') > html.indexOf('id="tab-db"') && html.indexOf('id="rd-db"') < html.indexOf('id="tab-help"'),
   'S2：Redis 浏览迁入数据页（rd-* 换父容器，id 不变）');
 ok(html.includes('data-drawer') || html.includes("drawerRow.dataset.drawer"), 'S2：行抽屉 data-drawer 机制（无全局行 id）');
+ok(html.includes('<th>名称</th><th>状态</th><th>对外 URL</th><th>标签</th><th>更新</th><th>操作</th><th>详情</th>'),
+  'S4：列序 名称·状态·对外URL·标签·更新·操作·▾（§1）');
+ok(html.includes('visibilitychange') && html.includes('暂无展项——点顶栏「+ 发布」发布新 Demo'),
+  'S4：事件流可见性钩子 + 空态卡引导「+ 发布新 Demo」（验收 16）');
+ok(html.includes('focusGuided') || html.includes('登录焦点引导'), 'S4/验收 16：登录焦点引导（首行打开 / +发布 CTA）');
 {
   const appTop = html.slice(html.indexOf('<template id="app-tpl">'), html.indexOf('</header>'));
   ok(!appTop.includes('hd-pempub') && !appTop.includes('btn-pempub') && !appTop.includes('btn-pwchange'),
