@@ -1067,6 +1067,7 @@ function pickKeyChoice(v) {
   $('wz-seed-err').classList.toggle('hidden', v !== 'import');
 }
 function setupExpert() { // 折叠打开时刷新：本机指纹可见性与默认单选（种子由无感层保证存在）
+  if (!$('wz-l-use')) return; // 元素在模板内，克隆前不可达
   loadSeed();
   const has = !!state.seed;
   $('wz-l-use').classList.toggle('hidden', !has);
@@ -1075,6 +1076,7 @@ function setupExpert() { // 折叠打开时刷新：本机指纹可见性与默�
   pickKeyChoice(has ? 'use' : 'import');
 }
 function enterVerify(auto) {
+  if (!$('wz-p3')) return;
   $('wz-p3').classList.remove('hidden');
   $('wz-v-fp').textContent = pubFp();
   $('wz-pub').textContent = state.pub;
@@ -1122,9 +1124,7 @@ $('lg-srv').textContent = location.origin + '/_api';
 $('lg-form').addEventListener('submit', onLoginSubmit);
 $('lg-user').addEventListener('input', () => fieldErr('lg-user', ''));
 $('lg-pass').addEventListener('input', () => fieldErr('lg-pass', ''));
-$('lg-expert').addEventListener('toggle', setupExpert);
-for (const r of ['use', 'import']) $(`wz-r-${r}`).addEventListener('change', () => pickKeyChoice(r));
-$('wz-seed').addEventListener('input', () => fieldErr('wz-seed', ''));
+// 全部 wz-*/lg-expert 事件绑定已移入 buildApp()（模板克隆后 DOM 才存在）
 // wz-* 事件绑定移至 buildApp()（模板克隆后元素才存在）
 $('lg-reenter').addEventListener('click', async () => { // 退出登录后：本机钥匙仍有效，免密码重进
   busy($('lg-reenter'), true, '进入中…');
@@ -1338,6 +1338,9 @@ function buildApp() {
   $('app').append($('app-tpl').content.cloneNode(true));
 
   // 专家路径事件绑定（元素在 app 模板克隆后才存在于 DOM）
+  const le = $('lg-expert'); if (le) le.addEventListener('toggle', setupExpert);
+  for (const r of ['use', 'import']) { const el = $(`wz-r-${r}`); if (el) el.addEventListener('change', () => pickKeyChoice(r)); }
+  const ws = $('wz-seed'); if (ws) ws.addEventListener('input', () => fieldErr('wz-seed', ''));
   const zv = $('wz-verify'); if (zv) zv.addEventListener('click', onExpertKey);
   const zr = $('wz-recheck'); if (zr) zr.addEventListener('click', () => expertVerify());
   const zc = $('wz-copypub'); if (zc) zc.addEventListener('click', () => copyText(state.pub, '公钥串'));
