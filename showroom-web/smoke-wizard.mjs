@@ -319,8 +319,9 @@ const ADM_USERS = { users: [
 ] };
 const ADM_STATUS = {
   services: { 'showroom-caddy': 'active', 'showroom-registry': 'active', 'showroom-postgres': 'active', 'showroom-redis': 'inactive' },
-  disks: { '/': { total: '100G', avail: '40G' }, '@showroom': { total: '200G', avail: '88G' } },
-  mem_available_mb: 4096,
+  // 真实服务端形状（ops.rs admin_status）：disk（单数）+ df -B1 字节值 + mem.available_mb
+  disk: { root: { total: 1073741824000, used: 3547525120 }, showroom: { total: 214748364800, used: 45097315666 } },
+  mem: { available_mb: 4096 },
   containers: [{ name: 'sr-demo', status: 'running' }, { name: 'sr-hello', status: 'exited' }],
   timers: [{ timer: 'showroom-snapshot-hourly.timer', next: '2026-10-10 13:00:00' }],
 };
@@ -982,7 +983,8 @@ ok(otbl.includes('吊销整个账号') && otbl.includes('删除钥匙') && otbl.
 const stHtml = $s('ad-status').innerHTML || '';
 ok(stHtml.includes('showroom-caddy') && stHtml.includes('showroom-redis'), '平台状态：四服务状态灯渲染');
 ok(stHtml.includes('运行中') && stHtml.includes('未运行'), '服务状态两态（active/inactive 中文）');
-ok(stHtml.includes('40G') && stHtml.includes('4096'), '磁盘与内存数字展示');
+ok(stHtml.includes('3.3 GB') && stHtml.includes('42.0 GB') && stHtml.includes('4096'),
+  '磁盘与内存数字展示（disk+df -B1 字节 → GB 人读「已用/共」+ MemAvailable）');
 ok(stHtml.includes('sr-demo') && stHtml.includes('sr-hello') && stHtml.includes('已退出'), '容器列表渲染（状态中文化）');
 ok(stHtml.includes('showroom-snapshot-hourly') && stHtml.includes('13:00'), 'timer 下次触发时间展示');
 const adStBase = adminStatusN;

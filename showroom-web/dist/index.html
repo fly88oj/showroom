@@ -4,114 +4,176 @@
 <link rel="icon" href="data:,">
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<meta name="theme-color" content="#14161a">
+<meta name="theme-color" content="#12141a">
 <title>Showroom 控制台</title>
 <style>
-  html { color-scheme: dark; }
+  html { color-scheme: dark; scroll-padding-top: 116px; }
   * { box-sizing: border-box; }
+  /* —— 设计 token：间距 / 圆角 / 边框 / 配色（全站唯一定义处） —— */
+  :root {
+    --sp-1: 4px; --sp-2: 8px; --sp-3: 12px; --sp-4: 16px; --sp-6: 24px; --sp-8: 32px;
+    --r: 8px;         /* 圆角 */
+    --bd: #2a2f39;    /* 边框色 */
+    --bg-card: #1a1e25; --bg-page: #12141a;
+    --fg: #d7dae0; --fg-dim: #8b92a0; --fg-head: #6fa8dc;
+    --bg-input: #12141a; --bd-input: #343b47;
+    --accent: #2b3d55; --accent-hi: #35507a; --accent-bd: #3d5578;
+    --ok: #7fd88f; --bad: #ff9aa5; --warn: #e8c37f; --focus: #79b8ff;
+  }
   body {
-    margin: 0; padding: 0 1rem 3rem; background: #14161a; color: #d7dce3;
-    font: 14px/1.6 system-ui, "PingFang SC", "Microsoft YaHei", sans-serif;
+    margin: 0; padding: 0 1rem 3rem; background: var(--bg-page); color: var(--fg);
+    font-family: system-ui, "PingFang SC", "Microsoft YaHei", sans-serif;
+    font-size: 14px; line-height: 1.6;
     touch-action: manipulation;
   }
-  h1 { font-size: 18px; margin: 0; }
-  h2 { font-size: 15px; margin: 0 0 .6rem; color: #9fc3e8; }
-  h3 { font-size: 13px; margin: .8rem 0 .4rem; color: #8fa0b5; }
-  header, section {
-    background: #1b1f26; border: 1px solid #2a2f39; border-radius: 8px;
-    padding: .8rem 1rem; margin-top: 1rem; max-width: 1100px; margin-left: auto; margin-right: auto;
+  /* —— 字号刻度：页面标题 18 / 卡片标题 14 semibold / 正文与控件 14 / 辅助 12 dim / 等宽 12 —— */
+  h1 { font-size: 18px; font-weight: 700; margin: 0; color: var(--fg); }
+  h2 { font-size: 14px; font-weight: 600; margin: 0 0 var(--sp-3); color: var(--fg-head); }
+  h3 { font-size: 14px; font-weight: 600; margin: var(--sp-4) 0 var(--sp-2); color: var(--fg); }
+  .mono { font-family: ui-monospace, "SF Mono", Consolas, monospace; font-size: 12px; font-variant-numeric: tabular-nums; }
+  .note { color: var(--fg-dim); font-size: 12px; margin: var(--sp-1) 0 0; }
+  /* —— 三层层级：顶栏（sticky）/ 标签栏（sticky）/ 内容区（1200px 居中卡片） —— */
+  .topbar { position: sticky; top: 0; z-index: 30; background: var(--bg-page); border-bottom: 1px solid var(--bd); }
+  .chrome {
+    max-width: 1200px; margin: 0 auto; min-height: 52px; padding: var(--sp-2) 0;
+    display: flex; align-items: center; justify-content: space-between; gap: var(--sp-3); flex-wrap: wrap;
   }
-  .row { display: flex; flex-wrap: wrap; gap: .6rem; align-items: center; }
-  /* 表单一律 label 上、控件下 */
-  .field { display: flex; flex-direction: column; gap: .2rem; min-width: 0; }
-  .field > span { color: #aeb6c2; font-size: 13px; }
+  .brand { display: flex; align-items: center; gap: var(--sp-3); flex-wrap: wrap; min-width: 0; }
+  .user-badge {
+    display: inline-flex; align-items: center; gap: var(--sp-1);
+    background: var(--bg-card); border: 1px solid var(--bd); border-radius: 999px;
+    padding: 0 var(--sp-2); font-size: 12px; color: var(--fg-dim);
+  }
+  .admin-mark { color: var(--warn); border: 1px solid var(--warn); border-radius: 999px; font-size: 10px; line-height: 1.4; padding: 0 var(--sp-1); }
+  .chrome-actions { display: flex; gap: var(--sp-2); flex-wrap: wrap; }
+  .srv { color: var(--fg-dim); font-size: 12px; }
+  /* 标签页导航（role=tablist/tab/tabpanel + aria-selected 同步）：当前标签实底高亮 */
+  #tabs {
+    position: sticky; top: 52px; z-index: 29; background: var(--bg-page); border-bottom: 1px solid var(--bd);
+    display: flex; gap: var(--sp-2); flex-wrap: wrap; align-items: center;
+    padding: var(--sp-2) max(0px, calc((100% - 1200px) / 2));
+  }
+  #tabs button { background: var(--bg-card); border-color: var(--bd); color: var(--fg-dim); }
+  #tabs button.on, #tabs button[aria-selected="true"] { background: var(--accent); border-color: var(--accent-bd); color: #e7edf5; }
+  /* —— 内容卡片：全部 section/fieldset 统一卡面 —— */
+  section {
+    background: var(--bg-card); border: 1px solid var(--bd); border-radius: var(--r);
+    padding: var(--sp-4); max-width: 1200px; margin: var(--sp-4) auto var(--sp-6);
+  }
+  fieldset {
+    background: var(--bg-card); border: 1px solid var(--bd); border-radius: var(--r);
+    padding: var(--sp-3) var(--sp-4) var(--sp-4); margin: 0 0 var(--sp-6); min-width: 0;
+  }
+  fieldset:last-child { margin-bottom: 0; }
+  legend { color: var(--fg-dim); font-size: 12px; padding: 0 var(--sp-1); }
+  #login { max-width: 560px; margin-top: var(--sp-8); }
+  /* —— 表单：label 上、控件下；间距走 token —— */
+  .row { display: flex; flex-wrap: wrap; gap: var(--sp-2); align-items: center; margin-top: var(--sp-2); }
+  .field .row, .grid .row { margin-top: 0; }
+  .field { display: flex; flex-direction: column; gap: var(--sp-1); min-width: 0; }
+  .field > span { color: var(--fg-dim); font-size: 12px; margin-bottom: var(--sp-1); }
   input[type=text], input[type=password], input[type=number], input[type=file], textarea, select {
-    background: #14161a; color: #d7dce3; border: 1px solid #343b47; border-radius: 4px;
-    padding: .3rem .45rem; font: inherit; max-width: 100%;
+    width: 100%; background: var(--bg-input); color: var(--fg); border: 1px solid var(--bd-input);
+    border-radius: 4px; padding: 6px 10px; margin-bottom: var(--sp-2); font: inherit; max-width: 100%; min-width: 0;
   }
-  select option { background: #14161a; color: #d7dce3; } /* 显式配色（下拉展开项） */
-  textarea { width: 100%; min-height: 3.2em; font-family: ui-monospace, monospace; font-size: 12px; }
+  :is(.row, .field, .grid) :is(input[type=text], input[type=password], input[type=number], input[type=file], textarea, select) { margin-bottom: 0; }
+  .row > :is(input[type=text], input[type=password], input[type=number], select) { width: auto; flex: 1 1 auto; }
+  select option { background: var(--bg-input); color: var(--fg); } /* 显式配色（下拉展开项） */
+  textarea { min-height: 3.2em; font-family: ui-monospace, monospace; font-size: 12px; }
   button {
-    background: #2b3d55; color: #e7edf5; border: 1px solid #3d5578; border-radius: 4px;
-    padding: .3rem .8rem; font: inherit; cursor: pointer; touch-action: manipulation;
+    background: var(--accent); color: #e7edf5; border: 1px solid var(--accent-bd); border-radius: 4px;
+    padding: 6px 12px; font: inherit; font-size: 14px; cursor: pointer; touch-action: manipulation;
     transition: background-color .15s ease, border-color .15s ease;
   }
-  button:hover:not(:disabled) { background: #35507a; }
+  button:hover:not(:disabled) { background: var(--accent-hi); }
   button:disabled { opacity: .4; cursor: not-allowed; }
   button.danger { background: #5a2b2b; border-color: #7a3d3d; }
   /* 可见焦点（全控件；不移除 outline） */
-  :focus-visible { outline: 2px solid #79b8ff; outline-offset: 1px; }
-  .mono { font-family: ui-monospace, "SF Mono", Consolas, monospace; font-size: 12px; font-variant-numeric: tabular-nums; }
-  .note { color: #8a93a3; font-size: 12px; margin: .4rem 0 0; }
-  .pub { color: #7fd88f; word-break: break-all; }
+  :focus-visible { outline: 2px solid var(--focus); outline-offset: 1px; }
+  /* —— 间距工具类（HTML 不再写内联 style） —— */
+  .mt-1 { margin-top: var(--sp-1); } .mt-2 { margin-top: var(--sp-2); }
+  .mt-3 { margin-top: var(--sp-3); } .mt-4 { margin-top: var(--sp-4); } .mt-6 { margin-top: var(--sp-6); }
+  .m-0 { margin: 0; } .nowrap { white-space: nowrap; }
+  .row .fb, .row .note { margin: 0; }
+  .combo { flex-wrap: nowrap; }
+  .note-warn { color: var(--warn); }
+  .help-list { margin: var(--sp-1) 0 0; padding-left: 1.2rem; }
+  .expert-fold { margin-top: var(--sp-4); border-top: 1px dashed var(--bd); padding-top: var(--sp-2); }
   .hidden { display: none; }
+  /* —— 表格与滚动容器 —— */
+  table { border-collapse: collapse; width: 100%; font-size: 14px; }
+  th, td { text-align: left; padding: var(--sp-1) var(--sp-2); border-bottom: 1px solid var(--bd); white-space: nowrap; }
+  th { color: var(--fg-dim); font-size: 12px; font-weight: 600; position: sticky; top: 0; background: var(--bg-card); }
+  td .act { margin-right: var(--sp-1); padding: 2px 8px; font-size: 12px; }
+  td.wrap { white-space: normal; word-break: break-all; }
+  .tbl-wrap { overflow: auto; max-height: 60vh; border: 1px solid var(--bd); border-radius: var(--r); }
+  .tbl-low { max-height: 22vh; } .tbl-mid { max-height: 26vh; }
+  form .grid { display: flex; flex-wrap: wrap; gap: var(--sp-4); align-items: flex-end; }
   /* 滚动容器不外溢滚动链 */
   .tbl-wrap, pre.out, dialog pre, textarea, select[size] { overscroll-behavior: contain; }
   #msg {
-    max-width: 1100px; margin: 1rem auto 0; padding: .5rem .8rem; border-radius: 6px;
+    max-width: 1200px; margin: var(--sp-4) auto 0; padding: var(--sp-2) var(--sp-3); border-radius: 6px;
     display: none; font-size: 13px; white-space: pre-wrap; word-break: break-all;
   }
   #msg.err { display: block; background: #3a2226; border: 1px solid #6b3a42; color: #ffb3bd; }
   #msg.ok { display: block; background: #21362a; border: 1px solid #3a6b4c; color: #a9e8b8; }
-  table { border-collapse: collapse; width: 100%; font-size: 13px; }
-  th, td { text-align: left; padding: .3rem .5rem; border-bottom: 1px solid #2a2f39; white-space: nowrap; }
-  th { color: #8fa0b5; font-weight: 600; position: sticky; top: 0; background: #1b1f26; }
-  td .act { margin-right: .25rem; padding: .1rem .5rem; font-size: 12px; }
-  td.wrap { white-space: normal; word-break: break-all; }
-  .tbl-wrap { overflow: auto; max-height: 60vh; border: 1px solid #2a2f39; border-radius: 6px; }
-  form .grid { display: flex; flex-wrap: wrap; gap: .8rem; align-items: flex-end; }
   dialog {
-    background: #1b1f26; color: #d7dce3; border: 1px solid #3d5578; border-radius: 8px;
-    padding: 1rem; max-width: 80vw; width: 720px;
+    background: var(--bg-card); color: var(--fg); border: 1px solid var(--accent-bd); border-radius: var(--r);
+    padding: var(--sp-4); max-width: 80vw; width: 720px;
   }
   dialog::backdrop { background: rgba(0,0,0,.55); }
+  .dlg-head { display: flex; align-items: center; justify-content: space-between; gap: var(--sp-2); margin: 0 0 var(--sp-3); }
+  .dlg-head h2 { margin: 0; }
   dialog pre, pre.out {
-    background: #14161a; border: 1px solid #2a2f39; border-radius: 6px; padding: .6rem;
+    background: var(--bg-input); border: 1px solid var(--bd); border-radius: 6px; padding: var(--sp-2);
     max-height: 50vh; overflow: auto; white-space: pre-wrap; word-break: break-all; font-size: 12px;
   }
   progress { width: 100%; height: 14px; }
-  .status-ok { color: #7fd88f; } .status-bad { color: #ff9aa5; } .status-mid { color: #e8c37f; }
+  .status-ok { color: var(--ok); } .status-bad { color: var(--bad); } .status-mid { color: var(--warn); }
   /* §12.1 一键部署状态条：四段步骤 / 失败标红 / 完成大字 URL；§12.2 管理标签 */
   .wz-step.done { background: #21362a; border-color: #3a6b4c; color: #a9e8b8; }
   .wz-step.err { background: #3a2226; border-color: #6b3a42; color: #ffb3bd; }
   .wz-step.skip { opacity: .45; }
-  #dp-bar.err #dp-text { color: #ff9aa5; }
-  .dp-url { font-size: 20px; font-weight: 700; color: #7fd88f; word-break: break-all; }
-  .ad-user-row td { background: #14161a; border-bottom: 1px solid #343b47; }
-  a { color: #79b8ff; }
-  fieldset { border: 1px solid #2a2f39; border-radius: 6px; margin: 0 0 .6rem; }
-  legend { color: #8fa0b5; font-size: 12px; padding: 0 .3rem; }
-  /* 标签页导航（role=tablist/tab/tabpanel + aria-selected 同步） */
-  #tabs { display: flex; gap: .4rem; flex-wrap: wrap; margin-bottom: .6rem; }
-  #tabs button { background: #1b1f26; border-color: #2a2f39; color: #aeb6c2; }
-  #tabs button.on, #tabs button[aria-selected="true"] { background: #2b3d55; border-color: #3d5578; color: #e7edf5; }
+  #dp-bar.err #dp-text { color: var(--bad); }
+  .dp-url { font-size: 20px; font-weight: 700; color: var(--ok); word-break: break-all; }
+  .ad-user-row td { background: var(--bg-input); border-bottom: 1px solid var(--bd-input); }
+  a { color: var(--focus); }
+  .pub { color: var(--ok); word-break: break-all; font-size: 16px; letter-spacing: .4px; user-select: all; }
+  /* 行内反馈（操作后就近显示，错误另走顶部条） */
+  .fb { font-size: 12px; color: #a9e8b8; min-height: 1.2em; margin: var(--sp-1) 0 0; }
+  .fb.warn { color: var(--warn); }
+  .sep { border-top: 1px dashed var(--bd); margin: var(--sp-4) 0 var(--sp-3); }
+  dl.help dt { color: var(--fg-head); font-weight: 600; margin-top: var(--sp-2); }
+  dl.help dd { margin: 0 0 0 1rem; color: var(--fg-dim); }
+  /* 字段级内联错误（首错聚焦；API 错误另走顶部条） */
+  .ferr { color: var(--bad); font-size: 12px; margin: var(--sp-1) 0 0; min-height: 0; }
+  /* §13.1 三入口并存提示徽记 */
+  .badge { color: var(--fg-dim); font-size: 12px; border: 1px dashed var(--bd); border-radius: 999px; padding: 0 var(--sp-2); }
+  /* §15 主机编排：黄条（漂移/池余量提示）与红条（error 级漂移/受影响项目警示） */
+  .warnbar { background: #3a3222; border: 1px solid #6b5f3a; color: var(--warn); border-radius: 6px; padding: var(--sp-1) var(--sp-2); font-size: 13px; }
+  .warnbar.err { background: #3a2226; border-color: #6b3a42; color: #ffb3bd; }
   /* 登录向导（§10.1）：步骤条 + 三步面板 */
   .wz-step {
-    color: #8fa0b5; font-size: 12px; padding: .1rem .6rem;
-    border: 1px solid #2a2f39; border-radius: 999px; background: #1b1f26;
+    color: var(--fg-dim); font-size: 12px; padding: .1rem .6rem;
+    border: 1px solid var(--bd); border-radius: 999px; background: var(--bg-card);
   }
-  .wz-step.on { background: #2b3d55; border-color: #3d5578; color: #e7edf5; }
-  .wz-pane { margin-top: .6rem; }
-  #wz-key-choices { display: flex; flex-direction: column; gap: .45rem; }
+  .wz-step.on { background: var(--accent); border-color: var(--accent-bd); color: #e7edf5; }
+  .wz-pane { margin-top: var(--sp-3); }
+  #wz-key-choices { display: flex; flex-direction: column; gap: var(--sp-1); }
   #wz-key-choices label { cursor: pointer; }
-  #wz-pub { font-size: 16px; letter-spacing: .4px; user-select: all; }
   /* plan-16 §3：钥匙登录收进折叠（专家路径）；主路径一步「账号+密码」 */
-  details > summary { cursor: pointer; color: #9fc3e8; }
-  #lg-expert { margin-top: .9rem; border-top: 1px dashed #2a2f39; padding-top: .5rem; }
+  details > summary { cursor: pointer; color: var(--fg-head); }
+  #lg-expert { margin-top: var(--sp-4); border-top: 1px dashed var(--bd); padding-top: var(--sp-2); }
   #lg-expert > summary { padding: .1rem 0; }
-  /* 行内反馈（操作后就近显示，错误另走顶部条） */
-  .fb { font-size: 12px; color: #a9e8b8; min-height: 1.2em; margin: .3rem 0 0; }
-  .fb.warn { color: #e8c37f; }
-  .sep { border-top: 1px dashed #2a2f39; margin: .9rem 0 .6rem; }
-  dl.help dt { color: #9fc3e8; font-weight: 600; margin-top: .5rem; }
-  dl.help dd { margin: 0 0 0 1rem; color: #aeb6c2; }
-  /* 字段级内联错误（首错聚焦；API 错误另走顶部条） */
-  .ferr { color: #ff9aa5; font-size: 12px; margin: .1rem 0 0; min-height: 0; }
-  /* §13.1 三入口并存提示徽记 */
-  .badge { color: #8fa0b5; font-size: 12px; border: 1px dashed #2a2f39; border-radius: 999px; padding: 0 .5rem; }
-  /* §15 主机编排：黄条（漂移/池余量提示）与红条（error 级漂移/受影响项目警示） */
-  .warnbar { background: #3a3222; border: 1px solid #6b5f3a; color: #e8c37f; border-radius: 6px; padding: .4rem .6rem; font-size: 13px; }
-  .warnbar.err { background: #3a2226; border-color: #6b3a42; color: #ffb3bd; }
+  /* 状态监控 */
+  #st-events { min-height: 3em; max-height: 9em; }
+  #st-logs { min-height: 10em; }
+  /* Redis 浏览：左右两栏滚动容器统一高度 */
+  .rd-panes { align-items: flex-start; gap: var(--sp-4); }
+  .rd-keys-pane { flex: 0 0 300px; }
+  .rd-val-pane { flex: 1; min-width: 0; }
+  #rd-keys, #rd-val { height: min(24rem, 48vh); }
+  @media (max-width: 900px) { .srv { display: none; } }
   @media (prefers-reduced-motion: reduce) {
     *, *::before, *::after { transition: none !important; animation: none !important; scroll-behavior: auto !important; }
   }
@@ -128,14 +190,14 @@
   <p class="note">服务器（同源代理，经 <span class="mono">/_api/*</span> 签名调用）：<span class="mono" id="lg-srv"></span></p>
 
   <!-- 主路径：一步登录（OPAQUE → 绑定本机钥匙 → 进入控制台，plan-16 §2.2 报文序列） -->
-  <form id="lg-form" style="margin-top:.6rem">
+  <form id="lg-form" class="mt-3">
     <label class="field" for="lg-user"><span>账号（发布者账号）</span>
       <input type="text" id="lg-user" placeholder="如 alice…" size="14" pattern="[a-z0-9][a-z0-9\-]{0,30}" autocomplete="username" aria-describedby="lg-user-err"></label>
     <p class="ferr" id="lg-user-err" aria-live="polite"></p>
-    <label class="field" for="lg-pass" style="margin-top:.4rem"><span>密码（管理员发放；与 docker push 用的 registry 密码是两把不同密码）</span>
+    <label class="field mt-2" for="lg-pass"><span>密码（管理员发放；与 docker push 用的 registry 密码是两把不同密码）</span>
       <input type="password" id="lg-pass" placeholder="输入账号密码…" size="14" autocomplete="current-password" aria-describedby="lg-pass-err"></label>
     <p class="ferr" id="lg-pass-err" aria-live="polite"></p>
-    <div class="row" style="margin-top:.6rem">
+    <div class="row">
       <button type="submit" id="lg-submit">登录</button>
       <button type="button" id="lg-reenter" class="hidden" title="本机钥匙自测通过即可免密码进入">免密码进入</button>
       <button type="button" id="lg-forget" class="hidden danger" title="清除本机密钥与账号记忆（可选远程注销本机钥匙）">忘记此设备…</button>
@@ -155,23 +217,23 @@
         <label class="row" id="wz-l-use" for="wz-r-use"><input type="radio" name="wz-key" id="wz-r-use"><span>使用本机已有密钥（指纹 <span class="mono" id="wz-fp"></span>）</span></label>
         <label class="row" for="wz-r-import"><input type="radio" name="wz-key" id="wz-r-import"><span>导入密钥种子</span></label>
       </div>
-      <label class="field hidden" id="wz-import-box" for="wz-seed" style="margin-top:.5rem"><span>粘贴 64 位十六进制密钥种子（showroom keygen 产物 / 其他设备导出）</span>
+      <label class="field hidden mt-2" id="wz-import-box" for="wz-seed"><span>粘贴 64 位十六进制密钥种子（showroom keygen 产物 / 其他设备导出）</span>
         <textarea id="wz-seed" class="mono" spellcheck="false" placeholder="64 位十六进制字符（32 字节）…" aria-describedby="wz-seed-err"></textarea></label>
-      <p class="ferr hidden" id="wz-seed-err" aria-live="polite" style="margin-top:.3rem"></p>
+      <p class="ferr hidden mt-1" id="wz-seed-err" aria-live="polite"></p>
     </fieldset>
-    <div class="row" style="margin-top:.6rem"><button type="button" id="wz-verify">使用钥匙登录</button></div>
+    <div class="row"><button type="button" id="wz-verify">使用钥匙登录</button></div>
     <!-- 验证：自动签名自测；未登记 → 展示公钥串等待登记，点【重新检测】循环；通过 → 自动进入管理界面 -->
     <div class="wz-pane hidden" id="wz-p3">
       <p class="note">密钥指纹 <span class="mono" id="wz-v-fp"></span></p>
       <p class="fb" id="wz-v-fb" aria-live="polite"></p>
       <div id="wz-pubbox" class="hidden">
         <p class="note">尚未登记：把下方公钥串发给管理员登记（<span class="mono">showroomctl user-add &lt;账号&gt; --pubkey &lt;公钥串&gt;</span>），登记后点【重新检测】。</p>
-        <div class="row" style="align-items:center;gap:.6rem;flex-wrap:nowrap">
+        <div class="row combo">
           <code id="wz-pub" class="pub"></code>
           <button type="button" id="wz-copypub">复制公钥</button>
         </div>
       </div>
-      <div class="row" style="margin-top:.6rem">
+      <div class="row">
         <button type="button" id="wz-recheck">重新检测</button>
       </div>
     </div>
@@ -181,33 +243,51 @@
 
 <!-- ———— 管理壳（模板：惰性，登录成功后才克隆进文档流；SPEC §3「登录成功前不加载管理资源」） ———— -->
 <template id="app-tpl">
-  <header>
-    <div class="row" style="justify-content:space-between">
-      <h1>Showroom 控制台</h1>
-      <span class="row" style="gap:.8rem">
-        <span class="note">账号 <span class="mono" id="hd-user"></span></span>
-        <span class="note">服务器 <span class="mono" id="hd-srv"></span></span>
+  <!-- 三层层级·第一层：顶栏（sticky）——品牌 + 账号徽标（管理员角标）+ 服务器地址 | 平台公钥/修改密码/退出 -->
+  <header class="topbar">
+    <div class="chrome">
+      <div class="brand">
+        <h1>Showroom 控制台</h1>
+        <span class="user-badge"><span class="mono" id="hd-user"></span><span class="admin-mark hidden" id="hd-admin" title="管理员钥匙">管</span></span>
+        <span class="srv">服务器 <span class="mono" id="hd-srv"></span></span>
+      </div>
+      <div class="chrome-actions">
+        <button id="btn-pempub" title="平台公钥 PEM：镜像上传与数据库恢复的加密信封公钥">平台公钥</button>
         <button id="btn-pwchange" title="当前密码校验后替换为新密码（OPAQUE，密码不明文上线）">修改密码</button>
         <button id="btn-logout">退出登录</button>
-      </span>
+      </div>
     </div>
-    <label class="field" for="hd-pempub" style="margin-top:.6rem"><span>平台公钥 PEM（管理员分发的 <span class="mono">platform_rsa.pub</span>；镜像上传与数据库恢复的加密信封公钥，存 localStorage）</span>
-      <textarea id="hd-pempub" class="mono" placeholder="-----BEGIN PUBLIC KEY-----&#10;…&#10;-----END PUBLIC KEY-----…"></textarea>
-    </label>
-    <nav id="tabs" role="tablist" aria-label="控制台功能分区">
-      <button data-tab="proj" class="on" role="tab" id="tabbtn-proj" aria-selected="true" aria-controls="tab-proj">展项管理</button>
-      <button data-tab="db" role="tab" id="tabbtn-db" aria-selected="false" aria-controls="tab-db">数据库</button>
-      <button data-tab="status" role="tab" id="tabbtn-status" aria-selected="false" aria-controls="tab-status">状态监控</button>
-      <button data-tab="help" role="tab" id="tabbtn-help" aria-selected="false" aria-controls="tab-help">帮助</button>
-    </nav>
   </header>
+  <!-- 三层层级·第二层：标签栏（sticky，顶栏正下方）；当前标签实底高亮 -->
+  <nav id="tabs" role="tablist" aria-label="控制台功能分区">
+    <button data-tab="proj" class="on" role="tab" id="tabbtn-proj" aria-selected="true" aria-controls="tab-proj">展项管理</button>
+    <button data-tab="db" role="tab" id="tabbtn-db" aria-selected="false" aria-controls="tab-db">数据库</button>
+    <button data-tab="status" role="tab" id="tabbtn-status" aria-selected="false" aria-controls="tab-status">状态监控</button>
+    <button data-tab="help" role="tab" id="tabbtn-help" aria-selected="false" aria-controls="tab-help">帮助</button>
+  </nav>
+  <!-- 三层层级·第三层：内容区（1200px 居中功能卡片） -->
+
+  <!-- 平台公钥 PEM 对话框（原页首 PEM 区收纳于此；textarea id=hd-pempub 保持不变，localStorage 读写逻辑不动） -->
+  <dialog id="dlg-pempub" aria-labelledby="dlg-pempub-title">
+    <div class="dlg-head">
+      <h2 id="dlg-pempub-title">平台公钥 PEM</h2>
+      <button type="button" id="pempub-close">关闭</button>
+    </div>
+    <p class="note">管理员分发的 <span class="mono">platform_rsa.pub</span>：镜像上传与数据库恢复的加密信封公钥，配置后保存在本机浏览器 localStorage。</p>
+    <label class="field mt-3" for="hd-pempub"><span>平台公钥 PEM（粘贴完整 PEM，含 BEGIN/END 行）</span>
+      <textarea id="hd-pempub" class="mono" rows="9" placeholder="-----BEGIN PUBLIC KEY-----&#10;…&#10;-----END PUBLIC KEY-----…"></textarea>
+    </label>
+    <div class="row">
+      <button type="button" id="pempub-copy">复制 PEM</button>
+    </div>
+  </dialog>
 
   <!-- ———— 标签页 1：展项管理 ———— -->
   <section id="tab-proj" role="tabpanel" aria-labelledby="tabbtn-proj">
     <h2>展项列表</h2>
-    <div class="row" style="margin-bottom:.4rem">
+    <div class="row">
       <button id="btn-refresh">刷新列表</button>
-      <span class="fb" id="proj-fb" aria-live="polite" style="margin:0"></span>
+      <span class="fb" id="proj-fb" aria-live="polite"></span>
     </div>
     <div class="tbl-wrap">
       <table id="proj-tbl">
@@ -225,7 +305,7 @@
     <form id="pub-form">
       <div class="grid">
         <label class="field" for="pub-project"><span>项目（留空自动生成随机 8 位名；也可手输或点「换一个」/从已有项目选择）</span>
-          <span class="row" style="flex-wrap:nowrap">
+          <span class="row combo">
             <input type="text" id="pub-project" list="dl-projects" size="12" pattern="[a-zA-Z0-9][a-zA-Z0-9-]{0,30}" aria-describedby="pub-project-err">
             <button type="button" id="pub-shuffle" title="重新生成随机项目名">换一个</button>
           </span></label>
@@ -246,19 +326,19 @@
     </form>
     <!-- §12.1 一键部署状态条：①压缩 → ②上传 → ③发布 → ④完成（大字 URL + 复制）；任一步失败标红可重试；
          「仅上传」走①②并在成功时把③④标记为跳过（镜像已入库，可稍后从下方部署入口选择） -->
-    <div id="dp-bar" class="hidden" style="margin-top:.6rem">
-      <div class="row" style="gap:.4rem">
+    <div id="dp-bar" class="hidden mt-3">
+      <div class="row">
         <span class="wz-step" id="dp-s1">① 压缩</span>
         <span class="wz-step" id="dp-s2">② 上传</span>
         <span class="wz-step" id="dp-s3">③ 发布</span>
         <span class="wz-step" id="dp-s4">④ 完成</span>
         <button type="button" id="dp-retry" class="hidden">重试</button>
       </div>
-      <div style="margin-top:.5rem">
+      <div class="mt-2">
         <progress id="dp-prog" max="1" value="0"></progress>
         <div id="dp-text" class="note" aria-live="polite">（未开始）</div>
-        <div id="dp-done" class="hidden" style="margin-top:.4rem">
-          <div class="row" style="align-items:center;gap:.6rem;flex-wrap:nowrap">
+        <div id="dp-done" class="hidden mt-2">
+          <div class="row combo">
             <a id="dp-url" class="dp-url" target="_blank" rel="noopener"></a>
             <button type="button" id="dp-copy">复制地址</button>
           </div>
@@ -273,26 +353,26 @@
       未选择文件时「一键部署」直接发布（要求镜像已在 registry 中）；镜像 tar 上传前自动经 <span class="mono">zstd-19</span> 压缩再加密（已是 <span class="mono">.tar.zst</span> 则原样上传）。
     </p>
 
-    <fieldset style="margin-top:.8rem">
+    <fieldset>
       <legend>部署（§13.1 第三入口：从镜像库选择 · 旧版本单独部署走这里）</legend>
       <div class="row">
         <label class="field" for="dep-image"><span>镜像（ComboBox：输入前缀过滤；清单来自 <span class="mono">/_api/images</span>，进入本页时自动加载，可点「刷新镜像清单」重取）</span>
-          <span class="row" style="flex-wrap:nowrap">
+          <span class="row combo">
             <input type="text" id="dep-image" list="dl-images" size="34" class="mono" placeholder="输入前缀过滤，如 alice/demo:…" aria-describedby="dep-image-err">
             <button type="button" id="dep-images-refresh">刷新镜像清单</button>
           </span></label>
-        <span class="fb" id="dep-images-fb" aria-live="polite" style="margin:0"></span>
+        <span class="fb" id="dep-images-fb" aria-live="polite"></span>
       </div>
       <p class="ferr" id="dep-image-err" aria-live="polite"></p>
       <datalist id="dl-images"></datalist>
       <!-- §14.3 镜像清单：与部署 ComboBox 同源 /_api/images 数据；每行「删除」走 POST /_api/image-rm（内联 GC，秒级回收磁盘） -->
-      <div class="tbl-wrap" style="max-height:22vh">
+      <div class="tbl-wrap tbl-low">
         <table id="img-list">
           <thead><tr><th>镜像（同上方下拉清单 · 可删除旧镜像释放磁盘）</th><th>操作</th></tr></thead>
           <tbody><tr><td colspan="2" class="note">未加载</td></tr></tbody>
         </table>
       </div>
-      <form id="dep-form" class="grid" style="margin-top:.5rem">
+      <form id="dep-form" class="grid mt-2">
         <label class="field" for="dep-project"><span>项目（选中镜像后自动带出，可改）</span>
           <input type="text" id="dep-project" size="12" pattern="[a-zA-Z0-9][a-zA-Z0-9-]{0,30}" aria-describedby="dep-project-err"></label>
         <label class="field" for="dep-tag"><span>镜像标签（选中镜像后自动带出，可改）</span>
@@ -309,7 +389,7 @@
       <p class="note">默认仅列出您名下的镜像；管理员钥匙可见全部账号的镜像并标注「管理员视图」。选中镜像后项目与标签自动带出（仍可修改），填写内存需求与监听端口后即可发布——旧版本单独部署、或对「仅上传」入库的镜像择时部署都从此入口。清单中每行可删除不再使用的旧镜像：删除即触发回收（秒级释放磁盘），正在运行的展项不受影响，但其回滚/重建将失效。</p>
     </fieldset>
 
-    <fieldset style="margin-top:.8rem">
+    <fieldset>
       <legend>镜像分片上传（压缩后 8MB/片逐片加密 · 服务端拼接解密导入 · 断点续传）</legend>
       <div class="row">
         <button id="btn-resume">恢复 / 查询上传状态</button>
@@ -318,11 +398,11 @@
         <datalist id="up-ids"></datalist>
       </div>
       <!-- §14.1 空间条：常显「可用空间（已扣预留）」；进入本区 / import-end 成功 / 删除镜像后自动刷新，亦可手动刷新 -->
-      <div class="row" style="margin-top:.6rem;gap:.5rem">
-        <div id="space-note" class="note" style="margin:0" aria-live="polite">可用空间（已扣预留）：…</div>
+      <div class="row">
+        <div id="space-note" class="note" aria-live="polite">可用空间（已扣预留）：…</div>
         <button type="button" id="space-refresh" title="重新查询磁盘可用空间">刷新空间</button>
       </div>
-      <div style="margin-top:.6rem">
+      <div class="mt-3">
         <progress id="up-prog" max="1" value="0"></progress>
         <div id="up-status" class="note" aria-live="polite">等待上传</div>
       </div>
@@ -362,7 +442,7 @@
     <h2>SQL 编辑器</h2>
     <label class="field" for="db-sql"><span>SQL 语句（多行；服务端以 psql 执行，语句失败即停止）</span>
       <textarea id="db-sql" class="mono" spellcheck="false" placeholder="SELECT * FROM …"></textarea></label>
-    <div class="row" style="margin-top:.4rem"><button id="btn-db-sql">执行 SQL</button></div>
+    <div class="row"><button id="btn-db-sql">执行 SQL</button></div>
     <p class="note">含 <span class="mono">DROP / TRUNCATE / DELETE</span> 的语句会先弹出本地确认，确认后才携带确认标记提交。</p>
 
     <div class="sep"></div>
@@ -374,7 +454,7 @@
       <button id="btn-db-restore" class="danger">恢复上传（覆盖当前数据）</button>
       <button id="btn-db-reset" class="danger">重置数据库</button>
     </div>
-    <div style="margin-top:.5rem">
+    <div class="mt-2">
       <progress id="db-prog" max="1" value="0"></progress>
       <div id="db-prog-txt" class="note" aria-live="polite">（备份进度：等待发起）</div>
     </div>
@@ -392,18 +472,18 @@
   <!-- ———— 标签页 3：状态监控 ———— -->
   <section id="tab-status" class="hidden" role="tabpanel" aria-labelledby="tabbtn-status">
     <h2>实时事件（平台容器启停）</h2>
-    <div class="row" style="margin-bottom:.3rem">
+    <div class="row">
       <span class="note">连接状态：<span class="mono" id="ev-state" aria-live="polite">未连接</span></span>
       <span class="note">仅显示 <span class="mono">sr-</span> 开头的展项容器（时间 / 动作 / 容器名，最近 20 条）；心跳行忽略；事件到达后自动刷新下方健康列表（2 秒去抖）。</span>
     </div>
-    <pre class="out mono" id="st-events" aria-live="polite" style="min-height:3em;max-height:9em">（暂无事件）</pre>
+    <pre class="out mono" id="st-events" aria-live="polite">（暂无事件）</pre>
 
     <div class="sep"></div>
     <h2>展项健康</h2>
-    <div class="row" style="margin-bottom:.4rem">
+    <div class="row">
       <button id="st-refresh">立即刷新</button>
-      <label class="row" for="st-auto" style="gap:.35rem"><input type="checkbox" id="st-auto">每 10 秒自动刷新</label>
-      <span class="fb" id="st-fb" aria-live="polite" style="margin:0"></span>
+      <label class="row" for="st-auto"><input type="checkbox" id="st-auto">每 10 秒自动刷新</label>
+      <span class="fb" id="st-fb" aria-live="polite"></span>
     </div>
     <div class="tbl-wrap">
       <table id="st-tbl">
@@ -414,31 +494,31 @@
 
     <div class="sep"></div>
     <h2>日志（实时跟随，保留最近 1000 行）</h2>
-    <div class="row" style="margin-bottom:.4rem">
+    <div class="row">
       <span class="note">当前：<span class="mono" id="st-logs-target">（未选择）</span></span>
-      <label class="row" for="st-logs-live" style="gap:.35rem"><input type="checkbox" id="st-logs-live" checked>实时跟随（断线 5 秒自动重连）</label>
-      <span class="fb warn" id="st-logs-fb" aria-live="polite" style="margin:0"></span>
+      <label class="row" for="st-logs-live"><input type="checkbox" id="st-logs-live" checked>实时跟随（断线 5 秒自动重连）</label>
+      <span class="fb warn" id="st-logs-fb" aria-live="polite"></span>
     </div>
-    <pre class="out mono" id="st-logs" aria-live="polite" style="min-height:10em">（未选择展项）</pre>
+    <pre class="out mono" id="st-logs" aria-live="polite">（未选择展项）</pre>
 
     <div class="sep"></div>
     <!-- §13.2/13.3：DB 下拉来自 /_api/redis-dbs（服务端按用户过滤；admin 全量标注「管理员视图」）；逻辑库池 256 -->
     <h2>Redis 浏览（仅显示您名下项目的库）</h2>
-    <div class="row" style="margin-bottom:.4rem">
+    <div class="row">
       <label class="field" for="rd-db"><span>逻辑库（DB）<span id="rd-scope" class="badge"></span></span><select id="rd-db"></select></label>
       <label class="field" for="rd-q"><span>key 前缀过滤（回车或点「刷新」）</span>
         <input type="text" id="rd-q" class="mono" placeholder="如 sr_demo_ 或留空…"></label>
       <button id="rd-refresh">刷新 key 列表</button>
-      <span class="note" id="rd-count" aria-live="polite" style="margin:0"></span>
+      <span class="note" id="rd-count" aria-live="polite"></span>
     </div>
-    <div class="row" style="align-items:flex-start;gap:.8rem">
-      <label class="field" for="rd-keys" style="flex:0 0 300px"><span>key 列表（点击查看值）</span>
+    <div class="row rd-panes">
+      <label class="field rd-keys-pane" for="rd-keys"><span>key 列表（点击查看值）</span>
         <select id="rd-keys" size="12" class="mono">
           <option value="">（先刷新 key 列表）</option>
         </select></label>
-      <div class="field" style="flex:1;min-width:0">
+      <div class="field rd-val-pane">
         <span id="rd-meta" aria-live="polite">（点击左侧 key 查看类型 / 剩余生存时间 / 值）</span>
-        <pre class="out mono" id="rd-val" aria-live="polite" style="min-height:10em">（未选择 key）</pre>
+        <pre class="out mono" id="rd-val" aria-live="polite">（未选择 key）</pre>
       </div>
     </div>
     <p class="note">仅显示您名下项目的库（每项目一个逻辑库，编号由平台分配）；管理员钥匙可见全部逻辑库（管理员视图）。仅排障用途：这是界面级/协作级隔离（防误看防误操作）——容器内应用持有原始连接仍可 SELECT 任意库，非安全边界；key 列表单次最多 200 条（可能截断），值超过 4KB 会被服务端截断。</p>
@@ -447,7 +527,7 @@
   <!-- ———— 标签页 4：帮助 ———— -->
   <section id="tab-help" class="hidden" role="tabpanel" aria-labelledby="tabbtn-help">
     <h2>登录与账号</h2>
-    <ul class="note" style="margin:.2rem 0 0;padding-left:1.2rem">
+    <ul class="note help-list">
       <li>控制台用「账号 + 密码」登录：密码只在登录时使用一次，登录后本设备自动保管专用钥匙，此后全部操作自动签名，无需再输密码。</li>
       <li>新设备 / 换浏览器：直接输入账号密码登录即可，平台自动为本设备绑定新钥匙（旧设备钥匙按平台策略自动回收，回收后该设备重新密码登录）。</li>
       <li>忘记密码：请联系管理员重置（控制台无法自助找回；重置不影响各设备已绑定的钥匙，管理员在「管理」页点「补发密码」即生成新的登录初始密码）。</li>
@@ -457,14 +537,14 @@
     </ul>
 
     <h2>专家路径：公钥与机器用户（CLI / CI）</h2>
-    <ul class="note" style="margin:.2rem 0 0;padding-left:1.2rem">
+    <ul class="note help-list">
       <li>CLI 与控制台同一模型：<span class="mono">showroom login &lt;账号&gt;</span> 输一次密码即自动配置本机（含 registry 凭据），此后全部子命令免密码（gh/ssh 模型）；<span class="mono">showroom logout [--purge]</span> 退出（--purge 同时远程注销本机钥匙）。</li>
       <li>机器对机器 / CI：不走密码，由管理员登记公钥（<span class="mono">showroomctl user-add &lt;账号&gt; --pubkey &lt;公钥串&gt;</span>）；此类钥匙不参与密码绑定钥匙的自动回收，生命周期人工管理。</li>
       <li>控制台登录页的「钥匙登录（CLI / 机器用户）」折叠入口即此路径：用本机已有或导入的种子，公钥串交管理员登记。</li>
     </ul>
 
     <h2>镜像规范</h2>
-    <ul class="note" style="margin:.2rem 0 0;padding-left:1.2rem">
+    <ul class="note help-list">
       <li>Demo 服务须监听容器内 <span class="mono">8080</span> 端口（其他端口在发布表单「Demo 服务监听端口（容器内）」如实填写）。</li>
       <li>展项经子路径对外发布：访问地址恒为 <span class="mono">/&lt;project&gt;/</span>，读 <span class="mono">SHOWROOM_BASE_PATH</span>（值即该前缀）适配，或页面内一律使用相对 URL。</li>
       <li>建议在 Dockerfile 里配置 <span class="mono">HEALTHCHECK</span>，平台据此判定健康并自愈。</li>
@@ -515,8 +595,10 @@
 
   <!-- 环境变量模态（§6 键值 + 中文说明） -->
   <dialog id="dlg-env" aria-labelledby="dlg-env-title">
-    <h2 style="display:inline" id="dlg-env-title">环境变量</h2>
-    <button type="button" id="dlg-env-close" style="float:right">关闭</button>
+    <div class="dlg-head">
+      <h2 id="dlg-env-title">环境变量</h2>
+      <button type="button" id="dlg-env-close">关闭</button>
+    </div>
     <div class="tbl-wrap"><table id="env-tbl">
       <thead><tr><th>键</th><th>当前值</th><th>用途</th></tr></thead>
       <tbody></tbody>
@@ -526,20 +608,22 @@
   <!-- 修改密码（plan-16 §2.2 pw 三件序列）：当前密码本地校验（复用 OPAQUE login 序列，不产生登录态）
        → pw-begin {user,m1} → 本地 reg finish → pw-commit {user,record}（后两者均 SR-SIG1 常规签名） -->
   <dialog id="dlg-pw" aria-labelledby="dlg-pw-title">
-    <h2 style="display:inline" id="dlg-pw-title">修改密码</h2>
-    <button type="button" id="pw-close" style="float:right">关闭</button>
+    <div class="dlg-head">
+      <h2 id="dlg-pw-title">修改密码</h2>
+      <button type="button" id="pw-close">关闭</button>
+    </div>
     <label class="field" for="pw-cur"><span>当前密码（先校验本人旧密码，再替换为新密码）</span>
       <input type="password" id="pw-cur" size="18" autocomplete="current-password" aria-describedby="pw-cur-err"></label>
     <p class="ferr" id="pw-cur-err" aria-live="polite"></p>
-    <label class="field" style="margin-top:.4rem" for="pw-new"><span>新密码</span>
+    <label class="field mt-2" for="pw-new"><span>新密码</span>
       <input type="password" id="pw-new" size="18" autocomplete="new-password" aria-describedby="pw-new-err"></label>
     <p class="ferr" id="pw-new-err" aria-live="polite"></p>
-    <label class="field" style="margin-top:.4rem" for="pw-new2"><span>确认新密码（再输入一遍）</span>
+    <label class="field mt-2" for="pw-new2"><span>确认新密码（再输入一遍）</span>
       <input type="password" id="pw-new2" size="18" autocomplete="new-password" aria-describedby="pw-new2-err"></label>
     <p class="ferr" id="pw-new2-err" aria-live="polite"></p>
-    <div class="row" style="margin-top:.6rem">
+    <div class="row">
       <button type="button" id="pw-submit">确认修改</button>
-      <span class="fb" id="pw-fb" aria-live="polite" style="margin:0"></span>
+      <span class="fb" id="pw-fb" aria-live="polite"></span>
     </div>
     <p class="note">修改成功后请用新密码重新登录（本机钥匙不受影响，仍可点【免密码进入】继续使用）。新旧密码均只在本机参与 OPAQUE 盲化，全程不明文上线。</p>
   </dialog>
@@ -550,10 +634,10 @@
   <div id="admin-root">
     <section id="tab-admin" class="hidden" role="tabpanel" aria-labelledby="tabbtn-admin">
       <h2>账号与钥匙</h2>
-      <div class="row" style="margin-bottom:.4rem">
+      <div class="row">
         <button id="ad-refresh">刷新</button>
         <button id="ad-user-add">发放新账号</button>
-        <span class="fb" id="ad-fb" aria-live="polite" style="margin:0"></span>
+        <span class="fb" id="ad-fb" aria-live="polite"></span>
       </div>
       <div class="tbl-wrap">
         <table id="ad-users-tbl">
@@ -565,31 +649,31 @@
 
       <div class="sep"></div>
       <h2>平台状态</h2>
-      <div class="row" style="margin-bottom:.4rem">
+      <div class="row">
         <button id="ad-st-refresh">立即刷新</button>
-        <label class="row" for="ad-st-auto" style="gap:.35rem"><input type="checkbox" id="ad-st-auto">每 30 秒自动刷新</label>
-        <span class="note" id="ad-st-fb" aria-live="polite" style="margin:0"></span>
+        <label class="row" for="ad-st-auto"><input type="checkbox" id="ad-st-auto">每 30 秒自动刷新</label>
+        <span class="note" id="ad-st-fb" aria-live="polite"></span>
       </div>
       <div id="ad-status" class="note" aria-live="polite">（未加载）</div>
 
       <div class="sep"></div>
       <!-- §15 主机编排：期望状态展示（host.env/policy/漂移/Redis 池）+ 两段式变更 + 扩容流入口 -->
       <h2>主机编排（期望状态 · 两段式变更）</h2>
-      <div class="row" style="margin-bottom:.4rem">
+      <div class="row">
         <button id="hs-refresh">刷新期望状态</button>
-        <span class="fb" id="hs-fb" aria-live="polite" style="margin:0"></span>
+        <span class="fb" id="hs-fb" aria-live="polite"></span>
       </div>
 
       <h3>中间件集合（host.env MIDDLEWARE）</h3>
-      <div class="row" style="gap:1rem">
-        <label class="row" for="hs-mw-postgres" style="gap:.35rem"><input type="checkbox" id="hs-mw-postgres"><span>postgres <span class="badge hidden" id="hs-mw-postgres-badge">已启用</span></span></label>
-        <label class="row" for="hs-mw-redis" style="gap:.35rem"><input type="checkbox" id="hs-mw-redis"><span>redis <span class="badge hidden" id="hs-mw-redis-badge">已启用</span></span></label>
-        <label class="row" for="hs-mw-registry" style="gap:.35rem"><input type="checkbox" id="hs-mw-registry"><span>registry <span class="badge hidden" id="hs-mw-registry-badge">已启用</span></span></label>
+      <div class="row">
+        <label class="row" for="hs-mw-postgres"><input type="checkbox" id="hs-mw-postgres"><span>postgres <span class="badge hidden" id="hs-mw-postgres-badge">已启用</span></span></label>
+        <label class="row" for="hs-mw-redis"><input type="checkbox" id="hs-mw-redis"><span>redis <span class="badge hidden" id="hs-mw-redis-badge">已启用</span></span></label>
+        <label class="row" for="hs-mw-registry"><input type="checkbox" id="hs-mw-registry"><span>registry <span class="badge hidden" id="hs-mw-registry-badge">已启用</span></span></label>
       </div>
       <p class="note">取消勾选即「禁用该中间件」：查看变更会列出受影响项目（有项目在用时红色警示 + 二次确认）；禁用后对应环境变量组（如 REDIS_*）不再注入新发布。重新勾选即启用。</p>
 
       <h3>主机开关与 FRP（host.env 其余键 · 通用键值展示）</h3>
-      <div class="tbl-wrap" style="max-height:22vh"><table id="hs-kv-tbl">
+      <div class="tbl-wrap tbl-low"><table id="hs-kv-tbl">
         <thead><tr><th>键</th><th>当前值</th></tr></thead>
         <tbody><tr><td colspan="2" class="note">未加载</td></tr></tbody>
       </table></div>
@@ -607,13 +691,13 @@
       </div>
 
       <h3>漂移清单与 Redis 池</h3>
-      <div id="hs-drift" aria-live="polite"><p class="note" style="margin:0">（未加载）</p></div>
-      <div id="hs-pool" style="margin-top:.6rem" aria-live="polite">
+      <div id="hs-drift" aria-live="polite"><p class="note m-0">（未加载）</p></div>
+      <div id="hs-pool" class="mt-3" aria-live="polite">
         <div id="hs-pool-warn" class="warnbar hidden">
           <span id="hs-pool-warn-txt"></span>
           <button type="button" id="hs-pool-expand">扩容</button>
         </div>
-        <p class="note hidden" id="hs-pool-ok" style="margin:0"></p>
+        <p class="note hidden m-0" id="hs-pool-ok"></p>
       </div>
 
       <div class="sep"></div>
@@ -622,89 +706,95 @@
         <button id="hs-apply">查看变更</button>
         <button id="hs-confirm" class="danger hidden">确认执行</button>
       </div>
-      <div id="hs-review" class="hidden" style="margin-top:.5rem">
+      <div id="hs-review" class="hidden mt-2">
         <div id="hs-review-sum" class="note" aria-live="polite"></div>
-        <div class="tbl-wrap" style="max-height:26vh"><table id="hs-actions-tbl">
+        <div class="tbl-wrap tbl-mid"><table id="hs-actions-tbl">
           <thead><tr><th>动作</th><th>目标</th><th>说明</th></tr></thead>
           <tbody><tr><td colspan="3" class="note">（空）</td></tr></tbody>
         </table></div>
         <div id="hs-impact"></div>
       </div>
-      <div id="hs-report" class="hidden" style="margin-top:.5rem" aria-live="polite"></div>
+      <div id="hs-report" class="hidden mt-2" aria-live="polite"></div>
     </section>
 
     <!-- 发放新账号（plan-16 §1.4/§1.5 收口）：主路径=账号 + 自动生成登录初始密码（crypto 随机 16 位）
          → user-add {user,password}；结果两行一次性密码（登录初始 + registry）。公钥直登记收进底部
          折叠「专家路径」（CLI/CI 用户：user-add {user,pubkey}，旧公钥发卡表单保底） -->
     <dialog id="dlg-user-add" aria-labelledby="dlg-user-add-title">
-      <h2 style="display:inline" id="dlg-user-add-title">发放新账号</h2>
-      <button type="button" id="ad-na-close" style="float:right">关闭</button>
+      <div class="dlg-head">
+        <h2 id="dlg-user-add-title">发放新账号</h2>
+        <button type="button" id="ad-na-close">关闭</button>
+      </div>
       <label class="field" for="ad-na-user"><span>账号名（<span class="mono">^[a-z0-9][a-z0-9-]{0,30}$</span>）</span>
         <input type="text" id="ad-na-user" size="14" pattern="[a-z0-9][a-z0-9\-]{0,30}" aria-describedby="ad-na-user-err"></label>
       <p class="ferr" id="ad-na-user-err" aria-live="polite"></p>
-      <div class="row" style="margin-top:.5rem">
+      <div class="row">
         <button type="button" id="ad-na-gen">自动生成强密码</button>
-        <span class="fb" id="ad-na-fb" aria-live="polite" style="margin:0"></span>
+        <span class="fb" id="ad-na-fb" aria-live="polite"></span>
       </div>
       <p class="ferr" id="ad-na-gen-err" aria-live="polite"></p>
-      <div id="ad-na-gen-box" class="hidden" style="margin-top:.3rem">
-        <p class="note" style="color:#e8c37f;margin:.2rem 0 0">已生成登录初始密码——点「发放」后将与 registry 密码一起再次展示（均仅显示一次），请即时交予发布者。</p>
-        <div class="row" style="align-items:center;gap:.6rem;flex-wrap:nowrap">
-          <code id="ad-na-gen-pw" class="pub mono" style="font-size:16px;letter-spacing:.4px;user-select:all"></code>
+      <div id="ad-na-gen-box" class="hidden mt-1">
+        <p class="note note-warn mt-1">已生成登录初始密码——点「发放」后将与 registry 密码一起再次展示（均仅显示一次），请即时交予发布者。</p>
+        <div class="row combo">
+          <code id="ad-na-gen-pw" class="pub mono"></code>
           <button type="button" id="ad-na-copy-gen">复制密码</button>
         </div>
       </div>
-      <label class="row" for="ad-na-admin" style="gap:.35rem;margin-top:.6rem"><input type="checkbox" id="ad-na-admin"><span>同时授予管理员（可管理账号、钥匙与平台状态）</span></label>
-      <div class="row" style="margin-top:.6rem">
+      <label class="row mt-3" for="ad-na-admin"><input type="checkbox" id="ad-na-admin"><span>同时授予管理员（可管理账号、钥匙与平台状态）</span></label>
+      <div class="row">
         <button type="button" id="ad-na-submit">发放</button>
       </div>
-      <div id="ad-na-result" class="hidden" style="margin-top:.6rem" aria-live="polite">
-        <p class="note" style="color:#e8c37f">发放成功：以下密码均<b>仅显示一次</b>，请立即交予发布者妥善保存，关闭后无法再查。</p>
-        <div class="row" id="ad-na-login-row" style="align-items:center;gap:.6rem;flex-wrap:nowrap">
-          <span class="note" style="white-space:nowrap">登录初始密码（登录控制台 / CLI）</span>
-          <code id="ad-na-login-pw" class="pub mono" style="font-size:16px;letter-spacing:.4px;user-select:all"></code>
+      <div id="ad-na-result" class="hidden mt-3" aria-live="polite">
+        <p class="note note-warn">发放成功：以下密码均<b>仅显示一次</b>，请立即交予发布者妥善保存，关闭后无法再查。</p>
+        <div class="row combo" id="ad-na-login-row">
+          <span class="note nowrap">登录初始密码（登录控制台 / CLI）</span>
+          <code id="ad-na-login-pw" class="pub mono"></code>
           <button type="button" id="ad-na-copy-login">复制</button>
         </div>
-        <div class="row" style="align-items:center;gap:.6rem;flex-wrap:nowrap;margin-top:.3rem">
-          <span class="note" style="white-space:nowrap">registry 密码（docker push 用）</span>
-          <code id="ad-na-pw" class="pub mono" style="font-size:16px;letter-spacing:.4px;user-select:all"></code>
+        <div class="row combo mt-1">
+          <span class="note nowrap">registry 密码（docker push 用）</span>
+          <code id="ad-na-pw" class="pub mono"></code>
           <button type="button" id="ad-na-copy">复制密码</button>
         </div>
-        <p class="note" id="ad-na-kid-note" style="margin:.3rem 0 0"></p>
+        <p class="note mt-1" id="ad-na-kid-note"></p>
       </div>
-      <details id="ad-na-expert" style="margin-top:.9rem;border-top:1px dashed #2a2f39;padding-top:.5rem">
+      <details id="ad-na-expert" class="expert-fold">
         <summary>专家路径：直接登记公钥（CLI 用户）</summary>
-        <p class="note" style="margin:.4rem 0 0">跳过登录密码：直接登记 <span class="mono">showroom keygen</span> 公钥串（机器对机器钥匙不受密码绑定钥匙的自动回收，生命周期人工管理）；登记后仍可在账号表用「补发密码」增设登录密码。</p>
-        <label class="field" style="margin-top:.4rem" for="ad-na-pub"><span>公钥串（粘贴 <span class="mono">showroom keygen</span> 产物，<span class="mono">ed25519:…</span>）</span>
+        <p class="note mt-2">跳过登录密码：直接登记 <span class="mono">showroom keygen</span> 公钥串（机器对机器钥匙不受密码绑定钥匙的自动回收，生命周期人工管理）；登记后仍可在账号表用「补发密码」增设登录密码。</p>
+        <label class="field mt-2" for="ad-na-pub"><span>公钥串（粘贴 <span class="mono">showroom keygen</span> 产物，<span class="mono">ed25519:…</span>）</span>
           <textarea id="ad-na-pub" class="mono" spellcheck="false" placeholder="ed25519:…" aria-describedby="ad-na-pub-err"></textarea></label>
         <p class="ferr" id="ad-na-pub-err" aria-live="polite"></p>
-        <div class="row" style="margin-top:.4rem"><button type="button" id="ad-na-pubsubmit">登记公钥发放</button></div>
+        <div class="row"><button type="button" id="ad-na-pubsubmit">登记公钥发放</button></div>
       </details>
     </dialog>
 
     <!-- 补发登录密码（plan-16 §1.5 passwd-set）：confirm → 生成新密码一次性展示（旧密码即刻失效，不动既有钥匙） -->
     <dialog id="dlg-passwd-set" aria-labelledby="dlg-passwd-set-title">
-      <h2 style="display:inline" id="dlg-passwd-set-title">补发登录密码</h2>
-      <button type="button" id="ad-ps-close" style="float:right">关闭</button>
-      <p class="note" style="color:#e8c37f;margin:.6rem 0 0">已为账号 <span class="mono" id="ad-ps-user"></span> 生成新的登录初始密码——<b>仅显示一次</b>，请立即交予发布者妥善保存；原密码即刻失效，各设备已绑定的钥匙不受影响。</p>
-      <div class="row" style="align-items:center;gap:.6rem;flex-wrap:nowrap;margin-top:.5rem">
-        <code id="ad-ps-pw" class="pub mono" style="font-size:16px;letter-spacing:.4px;user-select:all"></code>
+      <div class="dlg-head">
+        <h2 id="dlg-passwd-set-title">补发登录密码</h2>
+        <button type="button" id="ad-ps-close">关闭</button>
+      </div>
+      <p class="note note-warn mt-3">已为账号 <span class="mono" id="ad-ps-user"></span> 生成新的登录初始密码——<b>仅显示一次</b>，请立即交予发布者妥善保存；原密码即刻失效，各设备已绑定的钥匙不受影响。</p>
+      <div class="row combo mt-2">
+        <code id="ad-ps-pw" class="pub mono"></code>
         <button type="button" id="ad-ps-copy">复制密码</button>
       </div>
     </dialog>
 
     <!-- §15.3 Redis 逻辑库扩容对话框：输入新 databases 值 → 服务端提示原文（重启约 3 秒/AOF 持久/自动重连）→ 我已了解，执行扩容 → 结果回报 -->
     <dialog id="dlg-redis-x" aria-labelledby="dlg-redis-x-title">
-      <h2 style="display:inline" id="dlg-redis-x-title">Redis 逻辑库扩容</h2>
-      <button type="button" id="hs-rx-close" style="float:right">关闭</button>
+      <div class="dlg-head">
+        <h2 id="dlg-redis-x-title">Redis 逻辑库扩容</h2>
+        <button type="button" id="hs-rx-close">关闭</button>
+      </div>
       <label class="field" for="hs-rx-n"><span>新的 databases 值（16–256 的整数，且需大于当前已分配的最大库编号，否则会截断在用库）</span>
         <input type="number" id="hs-rx-n" min="16" max="256" step="1" class="mono" placeholder="如 256…" aria-describedby="hs-rx-n-err"></label>
       <p class="ferr" id="hs-rx-n-err" aria-live="polite"></p>
-      <div class="row" style="margin-top:.5rem">
+      <div class="row">
         <button type="button" id="hs-rx-preview">获取确认提示</button>
         <button type="button" id="hs-rx-run" class="danger hidden">我已了解，执行扩容</button>
       </div>
-      <pre id="hs-rx-prompt" class="hidden" aria-live="polite" style="margin-top:.5rem"></pre>
+      <pre id="hs-rx-prompt" class="hidden mt-2" aria-live="polite"></pre>
       <p class="fb" id="hs-rx-fb" aria-live="polite"></p>
     </dialog>
   </div>
@@ -827,6 +917,10 @@ const fmtTime = (unixSec) => {
   try {
     return new Intl.DateTimeFormat('zh-CN', {month:'2-digit',day:'2-digit',hour:'2-digit',minute:'2-digit'}).format(new Date(unixSec * 1000));
   } catch { return '\u2014'; } // 非法输入（服务端形状为 unix 秒）防御：不因单行时间戳中断整表渲染
+};
+const fmtGB = (n) => { // admin/status 磁盘字节（df -B1）→ 人读；非数字原样回显（前向兼容字符串单位）
+  const v = Number(n);
+  return Number.isFinite(v) ? `${(v / 1024 ** 3).toFixed(1)} GB` : String(n ?? '—');
 };
 const esc = (s) => String(s ?? '').replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
 const STATUS_CN = { running: '运行中', exited: '已退出', paused: '已暂停', restarting: '重启中', created: '已创建', dead: '异常终止', missing: '未部署' };
@@ -1354,6 +1448,11 @@ function buildApp() {
   $('hd-srv').textContent = location.origin + '/_api';
   $('hd-pempub').value = localStorage.getItem('sr.pempub') || '';
   $('hd-pempub').addEventListener('input', () => localStorage.setItem('sr.pempub', $('hd-pempub').value));
+  // 平台公钥对话框（原页首 PEM 区收纳于此）：textarea id=hd-pempub 不变，上方 localStorage 读写逻辑不动
+  $('btn-pempub').addEventListener('click', () => $('dlg-pempub').showModal());
+  $('pempub-close').addEventListener('click', () => $('dlg-pempub').close());
+  $('pempub-copy').addEventListener('click', () => copyText($('hd-pempub').value.trim(), '平台公钥 PEM'));
+  refreshAdminBadge(); // 顶栏账号徽标的管理员角标（密码登录继承的 admin 此刻已可知）
   $('btn-logout').addEventListener('click', logout);
   // 修改密码（plan-16 §2.2）：顶部入口 + 对话框（密码框 autocomplete、字段内联错误、busy）
   $('btn-pwchange').addEventListener('click', openPwDlg);
@@ -1368,6 +1467,11 @@ function buildApp() {
   wireTabs(); wireProjTab(); wireDbTab(); wireStatusTab();
 }
 const platformPem = () => $('hd-pempub').value.trim();
+/** 顶栏账号徽标的管理员角标（纯呈现）：boundAdmin=密码登录继承；admin=whoami 结论。 */
+function refreshAdminBadge() {
+  const m = $('hd-admin');
+  if (m) m.classList.toggle('hidden', !(state.admin || state.boundAdmin));
+}
 
 // —— 标签页导航（role=tablist/tab/tabpanel：aria-selected 同步 + 左右方向键切换） ——
 function activateTab(name) {
@@ -1420,6 +1524,7 @@ async function syncAdmin() {
     isAdmin = !!j.admin;
   } catch (e) { apiFail('身份查询（whoami）', e); }
   state.admin = isAdmin; // §13.1/§13.2：镜像清单与 Redis 浏览据此标注「管理员视图」
+  refreshAdminBadge(); // whoami 落定后同步顶栏角标（纯呈现）
   if (isAdmin && imagesLoaded) ensureImages(true); // whoami 晚于首次清单加载时重取，刷新管理员视图标注
   if (isAdmin && !adminBuilt) { buildAdminTab(); adminBuilt = true; }
   else if (!isAdmin && adminBuilt) { // 权限被收回：拆除管理 DOM 并回到普通标签
@@ -1608,8 +1713,8 @@ async function refreshAdminStatus() { // 平台状态面板：服务状态灯 / 
   try {
     const j = await api('GET', '/_api/admin/status');
     const svcs = Object.entries(j.services || {});
-    const disks = Object.entries(j.disks || {}).map(([p, d]) =>
-      `<tr><td class="mono">${esc(p)}</td><td class="mono">${esc(typeof d === 'object' && d ? `${d.avail ?? '?'} 可用 / 共 ${d.total ?? '?'}` : String(d))}</td></tr>`).join('');
+    const disks = Object.entries(j.disk ?? j.disks ?? {}).map(([p, d]) =>
+      `<tr><td class="mono">${esc(p)}</td><td class="mono">${esc(typeof d === 'object' && d ? `${fmtGB(d.used)} 已用 / 共 ${fmtGB(d.total)}` : String(d))}</td></tr>`).join('');
     const mem = j.mem?.available_mb ?? j.mem_available_mb;
     const ctrs = (j.containers || []).map((c) => (typeof c === 'string' ? { name: c, status: '' } : c));
     const timers = (j.timers || []).map((t) => (typeof t === 'string' ? { timer: t } : t));
@@ -1943,7 +2048,7 @@ function renderProjects() {
       <td class="mono">${esc(p.project)}</td>
       <td class="mono">${esc(p.tag)}</td>
       <td class="${statusCls(p.status)}">${esc(statusCn(p.status))}</td>
-      <td class="wrap"><a href="${esc(p.url)}" target="_blank" rel="noopener">${esc(p.url)}</a></td>
+      <td class="wrap"><a href="/${esc(p.project)}/" target="_blank" rel="noopener">/${esc(p.project)}/</a></td>
       <td class="mono">${esc(fmtTime(p.updated))}</td>
       <td>
         <button class="act" data-act="start" data-p="${esc(p.project)}">启动</button>
