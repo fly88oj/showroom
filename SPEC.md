@@ -301,7 +301,7 @@ C→S GET  /_api/reg-cred [SR-SIG1] → {"user","registry_password"}  # 暴露�
 - 三级封顶：顶栏→标签→卡片；卡片=标题+状态副题（「已加载 N 项 · HH:MM:SS」整段可点重取）+内容；卡片内禁嵌 fieldset。
 ### 17.2 数据自动加载（显式刷新按钮全站归零）
 登录即 4 路并发 `Promise.allSettled`（projects/images/space/whoami）；进页即订阅事件流（展项页可见时；`document.hidden`/离页退订）。
-- projects：TTL 30s；publish/start/stop/rm/rollback 成功后与事件流 sr-* 2s 去抖强制失效；失败=表格内联「加载失败 · 原因 + 重试」+3s 自动重试 1 次。
+- projects：TTL 30s；publish/start/stop/rm/rollback 成功后与事件流 sr-* 2s 去抖强制失效；失败=表格内联「加载失败 · 原因 + 重试」+3s 自动重试 1 次，此后每 10s 慢速兜底重试直至恢复（验收 8 恢复后免刷新自动补齐；images/space 同机制）。
 - images：TTL 300s；import-end/image-rm 后失效；whoami admin 后重取（副题标注「管理员视图」）。
 - space：TTL 60s；切镜像库页强制校准；失败静默「空间信息不可用」。
 - whoami（+`platform_pem`，§12.2）：失败徽标「?」60s 周期重试。
