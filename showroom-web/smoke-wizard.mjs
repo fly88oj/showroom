@@ -242,7 +242,7 @@ const sealedTotal = (n) => WRAP + n + Math.ceil(n / SEG) * (NONCE + TAG);
 
 // —— fetch 垫片：wasm 服务真实字节；/_api 按 mode 返回（unregistered → 404 E_AUTH） ——
 const resp = (status, obj) => ({ ok: status < 400, status, text: async () => JSON.stringify(obj) });
-const PROJECTS = { projects: [{ project: 'demo', user: 'alice', tag: 'v1', url: '/demo/', status: 'running', port: 8100, mem: '256m', cpu: 0, updated: '2026-10-10T12:00:00' }] };
+const PROJECTS = { projects: [{ project: 'demo', user: 'alice', tag: 'v1', url: '/demo/', status: 'running', port: 8100, mem: '256m', cpu: 0, updated: 1760107200 }] };
 let mode = 'unregistered'; // unregistered | ok（key-bind 成功 → ok）
 // —— plan-16 §2.2 auth 端点族 mock（与页面 MOCK 垫片同一 toy 协议：ke2 内嵌验证因子，
 //    错密码/未知用户在客户端本地 finish 即失败——行为契约与真 OPAQUE 一致：无第三请求） ——
