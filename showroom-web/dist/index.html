@@ -130,7 +130,7 @@
   <!-- 主路径：一步登录（OPAQUE → 绑定本机钥匙 → 进入控制台，plan-16 §2.2 报文序列） -->
   <form id="lg-form" style="margin-top:.6rem">
     <label class="field" for="lg-user"><span>账号（发布者账号）</span>
-      <input type="text" id="lg-user" placeholder="如 alice…" size="14" pattern="[a-z0-9][a-z0-9-]{0,30}" autocomplete="username" aria-describedby="lg-user-err"></label>
+      <input type="text" id="lg-user" placeholder="如 alice…" size="14" pattern="[a-z0-9][a-z0-9\-]{0,30}" autocomplete="username" aria-describedby="lg-user-err"></label>
     <p class="ferr" id="lg-user-err" aria-live="polite"></p>
     <label class="field" for="lg-pass" style="margin-top:.4rem"><span>密码（管理员发放；与 docker push 用的 registry 密码是两把不同密码）</span>
       <input type="password" id="lg-pass" placeholder="输入账号密码…" size="14" autocomplete="current-password" aria-describedby="lg-pass-err"></label>
@@ -642,7 +642,7 @@
       <h2 style="display:inline" id="dlg-user-add-title">发放新账号</h2>
       <button type="button" id="ad-na-close" style="float:right">关闭</button>
       <label class="field" for="ad-na-user"><span>账号名（<span class="mono">^[a-z0-9][a-z0-9-]{0,30}$</span>）</span>
-        <input type="text" id="ad-na-user" size="14" pattern="[a-z0-9][a-z0-9-]{0,30}" aria-describedby="ad-na-user-err"></label>
+        <input type="text" id="ad-na-user" size="14" pattern="[a-z0-9][a-z0-9\-]{0,30}" aria-describedby="ad-na-user-err"></label>
       <p class="ferr" id="ad-na-user-err" aria-live="polite"></p>
       <div class="row" style="margin-top:.5rem">
         <button type="button" id="ad-na-gen">自动生成强密码</button>
@@ -974,14 +974,15 @@ async function passwordLogin(user, pass) {
   ensureSeed();               // 无感：无本地钥匙即刻生成（key-bind 的候选钥匙）
   state.user = user;
   state.boundAdmin = false;
+  if (!user) throw { error: 'E_STATE', msg: '账号为空，请重新输入' };
   const st = opaqueStart(user, pass);                                    // ① ke1（未签名）
   let r;
-  try { r = await postAuthJson('/_api/auth/login-begin', { user, ke1: st.ke1 }); }
+  try { r = await postAuthJson('/_api/auth/login-begin', { user: user, ke1: st.ke1 }); }
   catch (e) { opaqueEnd(st.sid); throw e; }
   let ke3;
   try { ke3 = opaqueFinish(st.sid, pass, r.ke2); }                            // ② 本地 finish（错密码即败）
   finally { opaqueEnd(st.sid); }
-  const r2 = await postAuthJson('/_api/auth/login-finish', { user, ke3 }); // ③ ke3 → bind_token（60s 单次）
+  const r2 = await postAuthJson('/_api/auth/login-finish', { user: user, ke3: ke3 }); // ③ ke3 → bind_token（60s 单次）
   const kb = await apiBind(user, state.pub, r2.bind_token);                // ④ 绑定（幂等：同钥匙重绑=ok）
   state.kid = kb.kid || '';
   state.boundAdmin = !!kb.admin; // §2.2：账号持 admin 钥匙 → 密码绑定的新钥匙继承 admin（显式提示）
