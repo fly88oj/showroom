@@ -19,7 +19,7 @@ showroom deploy v1          # 推镜像 + 发布 + 打印 URL，一步到位
 | OPAQUE 密码登录 | 控制台一步登录（账号+密码）、CLI `showroom login` 一次后全命令免密码（gh/ssh 模型）；密码经 OPRF 盲化**永不上线**（RFC 9380 / Ristretto255），登录自动绑定本机钥匙并配好 registry 凭据；密钥生成/登记全程无感 |
 | 安全模型 | 所有管理请求经 **SR-SIG1**（Ed25519 请求签名）认证；镜像与数据库备份以**加密信封**（RSA-3072-OAEP 包裹 AES-256-GCM 密钥）在明文链路上端到端加密；管理员钥匙分层（admin key）。详见 [docs/security.md](docs/security.md) |
 | 零信息暴露 | 未认证请求对 `/_api/*` 一律返回 `404 {"error":"E_AUTH"}`——不泄露路径存在性、项目名、版本等任何管理侧信息 |
-| 一键部署 | `showroom deploy`（push + publish --wait + URL 横幅一步到位）与控制台「一键部署 / 仅上传 / 部署」三入口并存；部署入口可从镜像 ComboBox 直接选已有镜像发旧版本 |
+| 一键发布 | `showroom deploy`（push + publish --wait + URL 横幅一步到位）与控制台发布页**单表单双镜像源**（本地 tar 文件 / 镜像库下拉选已有镜像发旧版本；「仅上传」为次要按钮） |
 | 自愈 | systemd timer 驱动 `reconcile`（状态比对、幂等重建）与 `autoheal`（退出拉起、unhealthy 重启）；容器 `--restart unless-stopped` 兜底 |
 | 多通道发布 | 内网走 registry 直推（快通道），公网走加密 import 通道（大文件分片断点续传）；CLI 自动探测、失败自动回落 |
 | 磁盘准入与镜像管理 | 上传前按 `膨胀因子×密封体积 ≤ 可用−预留` 准入（`showroom space` 三数可见）；`showroom rm-image` 删除即内联 GC **立即**回收空间，闭环「上传不够→删除→立即可传」 |
@@ -78,9 +78,9 @@ showroom deploy demo v1                          # push + publish --wait + 打�
 # ══════════════════════════════
 ```
 
-不想装 CLI？打开 `http://<your-host>/_console/` 用账号+密码登录，同样能发布（一键部署/仅上传/选镜像部署三入口）、看日志、管数据库、浏览 Redis：
+不想装 CLI？打开 `http://<your-host>/_console/` 用账号+密码登录：登录即见展项列表（自动加载、中文状态、可点对外 URL），「发布」页单表单双镜像源一键发布，展项行内看实时日志（行抽屉）、管数据库、浏览 Redis——显式刷新按钮零残留，数据全部自动加载：
 
-<!-- 控制台截图位：docs/assets/console-overview.png（待补） -->
+<!-- 控制台截图位：docs/assets/console-overview.png（待补；§17 五标签布局：我的展项/发布/镜像库/数据/帮助） -->
 
 命令逐条说明（含 `login`/`db` 全家、退出码）见 **[docs/cli-reference.md](docs/cli-reference.md)**。
 

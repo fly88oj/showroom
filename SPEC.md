@@ -116,11 +116,12 @@ POST /_api/import-end?upload=<id>             → 拼接后走单发 import 同�
 | POST /_api/db-restore | query `?project=&confirm=` body=信封（客户端用平台公钥 seal 的 -Fc dump） | 验签→解密到 _tmp→`pg_restore --clean --if-exists`→删临时；走 import 同管道与大帽 |
 | POST /_api/db-reset | `{project,confirm}` | DROP DATABASE WITH (FORCE)+重建+重发凭据（env 文件密码不变） |
 CLI 对应：`showroom db sql|tables|preview|dump|restore|reset`。公网全可用（签名+加密），无需内网。
-### 9.1 控制台（登录后四区，全中文，免装 CLI）
+### 9.1 控制台（v1.2 原始四区描述；UI 现状由 §17 取代）
 - **展项**：列表（不含项目端口等内部细节）+ 发布（项目=Input 预填随机 8 位、带「换一个」按钮，可改为已有名；tag=Input(必填)、内存=ComboBox(128m/256m/512m/1g)、Demo 监听端口=数字 Input 默认 8080、镜像 tar 上传=文件选择；§11 起无槽位字段）。
 - **数据库**：表清单 ComboBox→预览表格；SQL 编辑器（唯一自由文本，多行）；备份下载（自动生成一次性密钥对）；恢复上传（confirm 二次确认）；重置（confirm）。
 - **状态**：展项健康列表 + 日志查看（自动刷新开关）。
 - **帮助**：镜像规范/环境变量清单（§6）/CLI 对照/常见错误表。登录前仅登录界面（零管理信息）。
+- **§17 修订**：四区重组为五标签（我的展项/发布/镜像库/数据/帮助），健康表与手动刷新由展项列表+行抽屉+事件流取代；发布表单收敛为单表单双镜像源——详见 §17。
 ### 9.2 行为修订（对 §7）
 - 根路径 `/` 与未匹配路径：一律 404，不再 302（零信息暴露）。
 - publish 供给 DB：库不存在才建（CREATE DATABASE 不存在时）；不再幂等重建。
@@ -178,11 +179,12 @@ CLI 对应：`showroom db sql|tables|preview|dump|restore|reset`。公网全可�
 - 安全语义：管理员钥匙遗失=平台最高权限泄露，user-key-rm 单独吊销；whoami 用当前请求的 kid 判定。
 
 ## 13. v1.6：部署入口并存 + 镜像选择 + Redis 浏览隔离
-### 13.1 发布入口三存（一键不取代分步）
+### 13.1 发布入口三存（v1.6 原始描述；UI 现状由 §17 单表单取代，端点与 CLI 三命令不变）
 - 「一键部署」：tar→压缩→上传→立即发布（快捷路径）。
 - 「仅上传」：只入 registry，不入库部署（发布者择时部署）。
 - 「部署」：独立表单——**镜像 ComboBox**（datalist 搜索）列当前可选镜像，默认仅当前用户的（admin 可看全部）；选中后填内存需求/端口→发布（旧版本单独部署即从此入口）。
 - 新端点 `GET /_api/images`（签名）→ `{"images":["<user>/<project>:<tag>",...]}`：registry catalog+tags 合并；按签名用户 user 前缀过滤；admin 钥匙不过滤。
+- **§17 修订**：三入口在 UI 上收敛为发布页**单表单双镜像源**（本地 tar 文件 / 镜像库下拉；镜像库源=原「部署」入口，仅上传=提交旁次要按钮）；`GET /_api/images` 与 CLI `showroom deploy|push|publish` 三命令不变。
 ### 13.2 Redis 浏览按用户隔离（低成本实现，不动 Redis 本体）
 - 隔离单位=Redis 逻辑库：`state` 已按项目分配 redisdb（0-15）。`/_api/redis-dbs|keys|get` 增加校验：请求 db ∈ 当前用户名下项目的 redisdb 集合；admin 钥匙放开全量。控制台 DB 下拉仅列自己的（admin 全量，标注「管理员视图」）。
 - 诚实边界（文档注明）：容器内应用持有原始连接仍可 SELECT 任意库——这是**界面级/协作级隔离**（防误看防误操作），非安全边界；应用级强隔离需独实例或 Redis ACL+rewrite，成本过高不做。
@@ -290,3 +292,41 @@ C→S GET  /_api/reg-cred [SR-SIG1] → {"user","registry_password"}  # 暴露�
   login-finish 并在 key-bind 登记自己的公钥接管账号（缓解：公网站点 B 经 Caddy TLS；LAN 不可信
   时用 CLI 钥匙路径）；UnknownUser 假记录在响应长度/时序上有统计残差（枚举成本从一次请求升到
   时序分析）；限流按 user 计（代理后取不到可信 IP），全局桶+rwd 计算成本抬高单价。
+
+## 17. v2.0：控制台信息架构重设计（plan-17 定稿）
+取代 §9.1「四区」与 §13.1「三入口并存」的控制台侧 UI 描述（两节的端点与 CLI 语义不变）；零框架/零构建/零外部资源不变，登录前零信息暴露不变（管理壳仍走 template 惰性克隆）。
+### 17.1 导航与层级
+- 顶栏单行（≤56px sticky）：账号徽标 + 角色徽标（发布者/管理员/?，随 whoami）+「+ 发布」唯一常驻 CTA + 设置 + 退出。
+- 五标签（role=tablist 方向键）：**我的展项**（默认落地）/**发布**/**镜像库**/**数据**（DB+Redis 合并）/**帮助**；「管理」标签仅 whoami admin=true 渲染（docker events 原始流降为管理员工具并入管理页）。
+- 三级封顶：顶栏→标签→卡片；卡片=标题+状态副题（「已加载 N 项 · HH:MM:SS」整段可点重取）+内容；卡片内禁嵌 fieldset。
+### 17.2 数据自动加载（显式刷新按钮全站归零）
+登录即 4 路并发 `Promise.allSettled`（projects/images/space/whoami）；进页即订阅事件流（展项页可见时；`document.hidden`/离页退订）。
+- projects：TTL 30s；publish/start/stop/rm/rollback 成功后与事件流 sr-* 2s 去抖强制失效；失败=表格内联「加载失败 · 原因 + 重试」+3s 自动重试 1 次。
+- images：TTL 300s；import-end/image-rm 后失效；whoami admin 后重取（副题标注「管理员视图」）。
+- space：TTL 60s；切镜像库页强制校准；失败静默「空间信息不可用」。
+- whoami（+`platform_pem`，§12.2）：失败徽标「?」60s 周期重试。
+- redis-dbs：数据页 Redis 区首次展开惰性；行抽屉日志流展开即订阅、收起/换行即断。
+- 数据库页项目下拉、发布页项目/镜像下拉直读已加载 `state.projects`/images——独立加载动作归零。
+### 17.3 展项 7 态状态机（显示层只出 7 词；「未部署」「missing」原词不进 UI）
+| 状态 | 表现 | 可执行动作 | 来源 |
+|---|---|---|---|
+| 运行中 | 绿● | 打开·更新·日志·停止·更多▾(回滚/环境变量/数据/删除) | `status=running` |
+| 已停止 | 黄●（tooltip=后端原词 exited/paused/created） | 启动·更新·日志·更多▾ | exited/paused/created |
+| 重建中 | 黄●呼吸（reduced-motion 静止） | 日志 | restarting，或发布成功后 60s 滚动窗口 |
+| 异常 | 红●（tooltip=dead） | 日志·更新·删除 | dead，或本地发布失败终态 |
+| 待部署 | 灰●（tooltip「仅镜像无容器：从发布页选择镜像即可拉起」） | 部署（→发布页预填）·删除 | missing（conf 在、容器无） |
+| 上传中 | 行内「上传中 x%」（dp 状态条为主显示） | 等待；失败断点续传 | 本地 deploy 在途 |
+| 发布中 | 黄●发布中… | 等待 | 本地 publish 在途 |
+状态标识=●+文字双通道（非仅颜色）；行操作固定序「打开·更新·日志·启动/停止·更多▾」行尾。
+### 17.4 发布单表单与参数单源（取代三入口）
+- 发布页单表单 5 字段：项目（留空自动随机 8 位）+ 镜像源 radio（**本地 tar 文件**/**镜像库**下拉）+ 标签 + 内存需求 + 监听端口；「仅上传」为提交旁次要按钮（tar 源可用）。
+- 镜像库源=原「部署」入口：选中镜像自动带出项目/标签，①压缩②上传跳过直接 publish；tar 源=原「一键部署」。
+- 预填：项目命中已有行 → 内存=服务端 conf（GET /_api/projects 权威）、标签/端口=本机 `sr.conf.*` 记忆（publish 成功写 `{tag,cport,ts}`）+ 注记「沿用上次发布参数（MM-DD），可修改」；行「更新」跳发布页预填同一套。
+### 17.5 URL 展示策略
+主链接一律 `externalUrl()=base+/<project>/`：base ① 设置 `sr.publicBase`（设置对话框「对外访问域名」）→ ② `location.origin`（host 非私网）→ ③ 兜底 origin+列表「正在用内网地址展示 URL」提示条。服务端登记 `p.url` 永不作主链接，仅 tooltip。
+### 17.6 设置对话框（#dlg-settings）
+对外访问域名（校验 http(s)、去尾斜杠、清空回退）+ 平台公钥 PEM（whoami `platform_pem` 自动取+缓存 `sr.pempub`，手工粘贴兜底；未配置时发布内联引导「去设置」）+ 修改密码/忘记此设备入口聚合。
+### 17.7 关键交互契约
+- 删除展项 confirm 必含「数据库将一并删除，如需保留请先在数据页备份下载 .dump」。
+- 登录成功焦点引导：已有展项→首行「打开」；空账号→「+ 发布」CTA；空态卡「暂无展项——点顶栏 + 发布 发布新 Demo」。
+- 视觉 token：间距 4/8/12/16/24/32；页面题 18、卡片题 15/600、正文 14、辅助 13、注释/时间 12（mono+tabular-nums，时间列右对齐）；绿=可用/黄=过渡/红=故障/灰=不存在。
