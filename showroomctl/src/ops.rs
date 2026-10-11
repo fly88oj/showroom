@@ -943,7 +943,6 @@ mod tests {
     // user_add（上收公共函数）：admin 标记、htpasswd/reg.cred、密码只此一次返回。
     // plan-16：InitPw 三态 + pubkey 可选（至少其一）；login_password 只此一次返回。
     #[test]
-    #[test]
     fn password_only_admin_pending_flow() {
         let root = troot("admin_pending");
         fs::create_dir_all(root.join("state")).unwrap();
@@ -971,6 +970,7 @@ mod tests {
         assert!(!root.join("state/users/carol/admin.pending").exists(), "pubkey 路径 admin 落在钥匙上，不应有 pending");
     }
 
+    #[test]
     fn user_add_with_admin_flag() {
         let root = troot("user-add");
         let k = showroom_common::UserKey::generate();

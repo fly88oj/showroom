@@ -314,13 +314,13 @@ pub fn render_caddyfile(mw: &BTreeSet<String>, lan: &str, public: &str) -> Strin
          }\n",
     );
     if !public.is_empty() {
-        s.push_str(&format!(
+        s.push_str(
             "\n# ————— site B：公网面（frp 等公网隧道流量命中的站点）—————\n\
              # 公网发布走加密 import 通道，不放 /v2；/_bootstrap 返回 404。\n\
-             http://:8080 {{\n\
+             http://:8080 {\n\
              \timport showroom-app\n\
-             }}\n"
-        ));
+             }\n",
+        );
     }
     s
 }
