@@ -95,11 +95,12 @@ pub fn rollback(root: &Path, p: &str) -> R<PublishOut> {
 
 /// ps / GET /_api/projects 的数据源：conf 全量 + docker 实况。
 pub fn ps(root: &Path) -> Vec<(String, Conf, String)> {
+    let statuses = dockerops::all_container_status(); // 一次 docker ps，N+1→1（P1 性能修复）
     state::all_confs(root)
         .into_iter()
         .map(|(p, c)| {
-            let st = dockerops::container_status(&publish::container_name(&p))
-                .unwrap_or_else(|| "missing".into());
+            let name = publish::container_name(&p);
+            let st = statuses.get(&name).cloned().unwrap_or_else(|| "missing".into());
             (p, c, st)
         })
         .collect()

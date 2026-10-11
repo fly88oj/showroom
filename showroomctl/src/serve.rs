@@ -42,6 +42,9 @@ pub struct AppState {
     pub pending_logins: Mutex<HashMap<String, PendingLogin>>,
     /// 一次性 bind_token（plan-16 §2.2）：token → (user, 过期时刻)；key-bind 消费即删。
     pub bind_tokens: Mutex<HashMap<String, (String, u64)>>,
+    /// 钥匙缓存（P1 性能：auth 热路径免每请求读盘）；key=user → (kid, VerifyingKey, mtime_sec)
+    /// 写路径（key_bind/key-rm/user-revoke/owner-add）调用 invalidate_user/invalidate_all
+    pub key_cache: Mutex<HashMap<String, Arc<Vec<(String, showroom_common::ed25519_dalek::VerifyingKey)>>>>,
     /// pw-begin 在途注册（plan-16 §2.2）：user → 过期时刻；pw-commit 一次性消费（60s）。
     pub pending_pw: Mutex<HashMap<String, u64>>,
 }
@@ -131,6 +134,7 @@ pub async fn run(root: PathBuf) -> R<()> {
         login_rate: Mutex::new(LoginRate::new()),
         pending_logins: Mutex::new(HashMap::new()),
         bind_tokens: Mutex::new(HashMap::new()),
+            key_cache: Mutex::new(HashMap::new()),
         pending_pw: Mutex::new(HashMap::new()),
     });
     let app = Router::new().fallback(api).with_state(st);
@@ -929,7 +933,18 @@ async fn auth(s: &S, method: &str, uri: &str, body_sha: &str, headers: &HeaderMa
         .ok_or_else(|| ApiError::new("E_AUTH", "missing Authorization"))?;
     let user = authv.strip_prefix("SR-SIG1 ").and_then(|r| r.split(':').next()).unwrap_or("");
     // 钥匙带 kid（kid 由公钥内容派生，与 tokens/<user>/<kid>.pub 文件名约定一致）
-    let keys = if user.is_empty() { vec![] } else { state::user_keys_with_kid(&s.root, user) };
+    let keys_arc = if user.is_empty() {
+        Arc::new(vec![])
+    } else {
+        // P1 性能：缓存命中免读盘（invalidate 由 key_bind/key-rm 等写路径触发）
+        let mut cache = s.key_cache.lock().unwrap();
+        if !cache.contains_key(user) {
+            let ks = state::user_keys_with_kid(&s.root, user);
+            cache.insert(user.to_string(), Arc::new(ks));
+        }
+        cache.get(user).unwrap().clone()
+    };
+    let keys: Vec<_> = keys_arc.iter().map(|(k, v)| (k.clone(), *v)).collect();
     let pubkeys: Vec<_> = keys.iter().map(|(_, vk)| *vk).collect();
     let v = common::verify_with_hash(authv, &pubkeys, method, uri, body_sha, now).map_err(|e| {
         eprintln!("showroomctl: auth fail: {e:?} {method} {uri}");

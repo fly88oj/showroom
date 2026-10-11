@@ -3,6 +3,7 @@
 
 use std::io::{Read, Write};
 use std::net::TcpStream;
+use std::collections::HashMap;
 use std::path::Path;
 use std::process::{Command, Output, Stdio};
 use std::time::Duration;
@@ -159,6 +160,18 @@ pub fn db_exists(db: &str) -> R<bool> {
 }
 
 /// 容器状态（docker inspect .State.Status）；容器不存在 → None。
+/// 批量取全部容器名→状态（一次 docker ps 替代 N 次 docker inspect；P1 性能修复）
+pub fn all_container_status() -> HashMap<String, String> {
+    let out = docker(&["ps", "-a", "--format", "{{.Names}}\t{{.State.Status}}"])
+        .unwrap_or_default();
+    out.lines()
+        .filter_map(|l| {
+            l.split_once('\t')
+                .map(|(n, st)| (n.to_string(), st.to_string()))
+        })
+        .collect()
+}
+
 pub fn container_status(name: &str) -> Option<String> {
     let out = Command::new("docker")
         .args(["inspect", "-f", "{{.State.Status}}", name])
