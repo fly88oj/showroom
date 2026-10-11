@@ -147,36 +147,7 @@
 
   <!-- 专家路径（plan-16 §3）：钥匙登录收进折叠——CLI / 机器用户用本机已有或导入种子，
        公钥串交管理员登记（user-add --pubkey：机器对机器钥匙不受密码绑定钥匙的自动回收） -->
-  <details id="lg-expert">
-    <summary>钥匙登录（CLI / 机器用户 · 专家路径）</summary>
-    <fieldset style="margin-top:.6rem">
-      <legend>为账号（上方「账号」输入框）选择本机密钥</legend>
-      <div id="wz-key-choices">
-        <label class="row" id="wz-l-use" for="wz-r-use" style="gap:.4rem"><input type="radio" name="wz-key" id="wz-r-use"><span>使用本机已有密钥（指纹 <span class="mono" id="wz-fp"></span>）</span></label>
-        <label class="row" for="wz-r-import" style="gap:.4rem"><input type="radio" name="wz-key" id="wz-r-import"><span>导入密钥种子</span></label>
-      </div>
-      <label class="field hidden" id="wz-import-box" for="wz-seed" style="margin-top:.5rem"><span>粘贴 64 位十六进制密钥种子（showroom keygen 产物 / 其他设备导出）</span>
-        <textarea id="wz-seed" class="mono" spellcheck="false" placeholder="64 位十六进制字符（32 字节）…" aria-describedby="wz-seed-err"></textarea></label>
-      <p class="ferr hidden" id="wz-seed-err" aria-live="polite" style="margin-top:.3rem"></p>
-    </fieldset>
-    <div class="row" style="margin-top:.6rem"><button type="button" id="wz-verify">使用钥匙登录</button></div>
-    <!-- 验证：自动签名自测；未登记 → 展示公钥串等待登记，点【重新检测】循环；通过 → 自动进入管理界面 -->
-    <div class="wz-pane hidden" id="wz-p3">
-      <p class="note">密钥指纹 <span class="mono" id="wz-v-fp"></span></p>
-      <p class="fb" id="wz-v-fb" aria-live="polite"></p>
-      <div id="wz-pubbox" class="hidden">
-        <p class="note">尚未登记：把下方公钥串发给管理员登记（<span class="mono">showroomctl user-add &lt;账号&gt; --pubkey &lt;公钥串&gt;</span>），登记后点【重新检测】。</p>
-        <div class="row" style="align-items:center;gap:.6rem;flex-wrap:nowrap">
-          <code id="wz-pub" class="pub"></code>
-          <button type="button" id="wz-copypub">复制公钥</button>
-        </div>
-      </div>
-      <div class="row" style="margin-top:.6rem">
-        <button type="button" id="wz-recheck">重新检测</button>
-      </div>
-    </div>
-    <p class="note">密钥即身份：32 字节 seed 以十六进制存于浏览器 localStorage——<b>属试验性存储</b>，换设备/清缓存即失效；正式场景请用 CLI <span class="mono">showroom login &lt;账号&gt;</span>（密码一次、密钥常驻）。</p>
-  </details>
+  
 </section>
 
 <!-- ———— 管理壳（模板：惰性，登录成功后才克隆进文档流；SPEC §3「登录成功前不加载管理资源」） ———— -->
@@ -457,6 +428,37 @@
     </ul>
 
     <h2>专家路径：公钥与机器用户（CLI / CI）</h2>
+<details id="lg-expert" open>
+    <summary>钥匙登录（CLI / 机器用户 · 专家路径）</summary>
+    <fieldset style="margin-top:.6rem">
+      <legend>为账号（上方「账号」输入框）选择本机密钥</legend>
+      <div id="wz-key-choices">
+        <label class="row" id="wz-l-use" for="wz-r-use" style="gap:.4rem"><input type="radio" name="wz-key" id="wz-r-use"><span>使用本机已有密钥（指纹 <span class="mono" id="wz-fp"></span>）</span></label>
+        <label class="row" for="wz-r-import" style="gap:.4rem"><input type="radio" name="wz-key" id="wz-r-import"><span>导入密钥种子</span></label>
+      </div>
+      <label class="field hidden" id="wz-import-box" for="wz-seed" style="margin-top:.5rem"><span>粘贴 64 位十六进制密钥种子（showroom keygen 产物 / 其他设备导出）</span>
+        <textarea id="wz-seed" class="mono" spellcheck="false" placeholder="64 位十六进制字符（32 字节）…" aria-describedby="wz-seed-err"></textarea></label>
+      <p class="ferr hidden" id="wz-seed-err" aria-live="polite" style="margin-top:.3rem"></p>
+    </fieldset>
+    <div class="row" style="margin-top:.6rem"><button type="button" id="wz-verify">使用钥匙登录</button></div>
+    <!-- 验证：自动签名自测；未登记 → 展示公钥串等待登记，点【重新检测】循环；通过 → 自动进入管理界面 -->
+    <div class="wz-pane hidden" id="wz-p3">
+      <p class="note">密钥指纹 <span class="mono" id="wz-v-fp"></span></p>
+      <p class="fb" id="wz-v-fb" aria-live="polite"></p>
+      <div id="wz-pubbox" class="hidden">
+        <p class="note">尚未登记：把下方公钥串发给管理员登记（<span class="mono">showroomctl user-add &lt;账号&gt; --pubkey &lt;公钥串&gt;</span>），登记后点【重新检测】。</p>
+        <div class="row" style="align-items:center;gap:.6rem;flex-wrap:nowrap">
+          <code id="wz-pub" class="pub"></code>
+          <button type="button" id="wz-copypub">复制公钥</button>
+        </div>
+      </div>
+      <div class="row" style="margin-top:.6rem">
+        <button type="button" id="wz-recheck">重新检测</button>
+      </div>
+    </div>
+    <p class="note">密钥即身份：32 字节 seed 以十六进制存于浏览器 localStorage——<b>属试验性存储</b>，换设备/清缓存即失效；正式场景请用 CLI <span class="mono">showroom login &lt;账号&gt;</span>（密码一次、密钥常驻）。</p>
+  </details>
+
     <ul class="note" style="margin:.2rem 0 0;padding-left:1.2rem">
       <li>CLI 与控制台同一模型：<span class="mono">showroom login &lt;账号&gt;</span> 输一次密码即自动配置本机（含 registry 凭据），此后全部子命令免密码（gh/ssh 模型）；<span class="mono">showroom logout [--purge]</span> 退出（--purge 同时远程注销本机钥匙）。</li>
       <li>机器对机器 / CI：不走密码，由管理员登记公钥（<span class="mono">showroomctl user-add &lt;账号&gt; --pubkey &lt;公钥串&gt;</span>）；此类钥匙不参与密码绑定钥匙的自动回收，生命周期人工管理。</li>
