@@ -290,6 +290,11 @@ pub fn render_caddyfile(mw: &BTreeSet<String>, lan: &str, public: &str) -> Strin
          \t}\n\
          \t# 展项路由（showroomctl 按项目生成到 state/routes/<project>.caddy 并 reload）\n\
          \timport /srv/showroom/state/routes/*.caddy\n\
+             \t# /_bootstrap：CLI / Skill 分发（R8：移入共用片段——公网隧道用户同样可下载，公开产物无泄露面）\n\
+             \thandle_path /_bootstrap/* {\n\
+             \t\troot * /srv/showroom/_bootstrap\n\
+             \t\tfile_server\n\
+             \t}\n\
          \t# 根路径与未匹配路径一律 404（零信息暴露：不重定向、不暴露站点信息）\n\
          }\n\
          \n\
@@ -304,18 +309,11 @@ pub fn render_caddyfile(mw: &BTreeSet<String>, lan: &str, public: &str) -> Strin
              \t}\n",
         );
     }
-    s.push_str(
-        "\t# /_bootstrap：CLI / Skill 分发（仅内网面提供，公网面 404）\n\
-         \thandle_path /_bootstrap/* {\n\
-         \t\troot * /srv/showroom/_bootstrap\n\
-         \t\tfile_server\n\
-         \t}\n\
-         }\n",
-    );
+    s.push_str("}\n"); // R8：/_bootstrap 移入共用片段，site A 无私有块
     if !public.is_empty() {
         s.push_str(
             "\n# ————— site B：公网面（frp 等公网隧道流量命中的站点）—————\n\
-             # 公网发布走加密 import 通道，不放 /v2；/_bootstrap 返回 404。\n\
+             # 公网发布走加密 import 通道，不放 /v2。\n\
              http://:8080, :8081 {\n\
              \timport showroom-app\n\
              }\n",
@@ -1491,6 +1489,11 @@ mod tests {
              \t}\n\
              \t# 展项路由（showroomctl 按项目生成到 state/routes/<project>.caddy 并 reload）\n\
              \timport /srv/showroom/state/routes/*.caddy\n\
+             \t# /_bootstrap：CLI / Skill 分发（R8：移入共用片段——公网隧道用户同样可下载，公开产物无泄露面）\n\
+             \thandle_path /_bootstrap/* {\n\
+             \t\troot * /srv/showroom/_bootstrap\n\
+             \t\tfile_server\n\
+             \t}\n\
              \t# 根路径与未匹配路径一律 404（零信息暴露：不重定向、不暴露站点信息）\n\
              }\n\
              \n\
@@ -1501,15 +1504,10 @@ mod tests {
              \thandle /v2/* {\n\
              \t\treverse_proxy 127.0.0.1:5000\n\
              \t}\n\
-             \t# /_bootstrap：CLI / Skill 分发（仅内网面提供，公网面 404）\n\
-             \thandle_path /_bootstrap/* {\n\
-             \t\troot * /srv/showroom/_bootstrap\n\
-             \t\tfile_server\n\
-             \t}\n\
              }\n\
              \n\
              # ————— site B：公网面（frp 等公网隧道流量命中的站点）—————\n\
-             # 公网发布走加密 import 通道，不放 /v2；/_bootstrap 返回 404。\n\
+             # 公网发布走加密 import 通道，不放 /v2。\n\
              http://:8080, :8081 {\n\
              \timport showroom-app\n\
              }\n"
