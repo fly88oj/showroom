@@ -21,7 +21,7 @@ export function ensureSeed() {
   if (state.seed) return;
   const sp = alloc(32);
   try {
-    if (ex.sr_generate(sp) !== 0) throw { error: 'E_NET', msg: '密钥生成失败（垫片错误）' };
+    if (ex.sr_generate(sp) !== 0) throw { error: 'E_NET', msg: '本机登录组件初始化失败，请刷新重试' };
     localStorage.setItem('sr.seed', toHex(mem().slice(sp, sp + 32)));
   } finally { unput(sp, 32); }
   loadSeed();

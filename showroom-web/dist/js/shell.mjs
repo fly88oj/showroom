@@ -8,6 +8,7 @@ import { ensureImages, imagesLoaded, apiFail, refreshSpace } from './img.mjs';
 import { drawerRow, wireProjTab, activateTab, updatePubUrl, logsLive, logsRender, refreshProjects, renderProjects, closeDrawer, stopEventsStream } from './proj.mjs';
 import { wireDbTab } from './db.mjs';
 import { adminBuilt, setAdminBuilt, stopAdTimer, buildAdminTab, teardownAdmin, loadAdminUsers, refreshAdminStatus } from './admin.mjs';
+import { evLive } from './proj.mjs'; // R7：事件流指示器（仅 admin 模板克隆后补写用）
 // —— 帮助页·工具下载（/_api/tool/*，签名 GET → Blob → a.download）——
 // 三件：CLI 二进制（Linux x86_64）/ Agent Skill（SKILL.md）/ 平台公钥（PEM）。
 // 大小不预取（简化）：首次下载从 Content-Length / blob.size 回填大小列。
@@ -247,7 +248,12 @@ export async function syncAdmin() {
   for (const el of document.querySelectorAll('#app .admin-only')) el.classList.toggle('hidden', !isAdmin);
   refreshAdminBadge(); // whoami 落定后同步顶栏角标（纯呈现；管理员与否只看「管」角标，无第三徽标——R4 用户裁决去冗余）
   if (isAdmin && imagesLoaded) ensureImages(true); // whoami 晚于首次清单加载时重取（admin 全量视角）
-  if (isAdmin && !adminBuilt) { buildAdminTab(); setAdminBuilt(true); }
+  if (isAdmin && !adminBuilt) {
+    buildAdminTab(); setAdminBuilt(true);
+    // R7：enterApp 的 startEventsStream 先于管理模板克隆执行，「已连接」写入落空且流已
+    // 建立不会重写（对 ac 非空早退）——模板进文档后按流实况补一次指示器（第四轮终扫阻塞项）
+    const evst = $('ev-state'); if (evst && evLive.ac) evst.textContent = '已连接';
+  }
   else if (!isAdmin && adminBuilt) { // 权限被收回：拆除管理 DOM 并回到普通标签
     teardownAdmin(); setAdminBuilt(false);
     if (state.loggedIn) activateTab('proj');
