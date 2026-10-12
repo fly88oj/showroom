@@ -18,7 +18,7 @@
   <h1>Showroom 控制台</h1>
 
   <!-- 主路径：一步登录（OPAQUE → 进入控制台，plan-16 §2.2 报文序列） -->
-  <form id="lg-form" class="mt-3">
+  <form id="lg-form" class="mt-3" novalidate>
     <label class="field" for="lg-user"><span>账号（发布者账号）</span>
       <input type="text" id="lg-user" placeholder="如 alice…" size="14" autocomplete="username" aria-describedby="lg-user-err"></label>
     <p class="ferr" id="lg-user-err" aria-live="polite"></p>
@@ -100,7 +100,7 @@
   <section id="tab-pub" class="hidden" role="tabpanel" aria-labelledby="tabbtn-pub">
     <!-- plan-17 §5：发布表单=全站唯一参数输入处。单表单双镜像源：tar→压缩+上传+发布；镜像库→①②skip 直接发布 -->
     <h2>发布</h2>
-    <form id="pub-form">
+    <form id="pub-form" novalidate>
       <div class="grid">
         <label class="field" for="pub-project"><span>项目<span class="q" title="可随意修改，或从已有项目选择；清空后发布将自动生成随机名">&#63;</span></span>
           <span class="row combo">
@@ -205,7 +205,7 @@
       </div>
       <div class="mt-3">
         <progress id="up-prog" max="1" value="0"></progress>
-        <div id="up-status" class="note" aria-live="polite">尚未开始上传：到「发布」页选「本地 tar 文件」点「发布」或「仅上传」即可开始。</div>
+        <div id="up-status" class="note" aria-live="polite"></div>
       </div>
     </div>
   </section>
@@ -542,7 +542,7 @@
         <h2 id="dlg-user-add-title">发放新账号</h2>
         <button type="button" id="ad-na-close">关闭</button>
       </div>
-      <label class="field" for="ad-na-user"><span>账号名（<span class="mono">^[a-z0-9][a-z0-9-]{0,30}$</span>）</span>
+      <label class="field" for="ad-na-user"><span>账号名<span class="q" title="仅限小写字母、数字与连字符">?</span></span>
         <input type="text" id="ad-na-user" size="14" aria-describedby="ad-na-user-err"></label>
       <p class="ferr" id="ad-na-user-err" aria-live="polite"></p>
       <div class="row">
