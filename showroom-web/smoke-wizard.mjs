@@ -455,7 +455,9 @@ globalThis.fetch = async (url, init = {}) => {
     imagesRemoved.add(body.image);
     return resp(200, { freed_est_mb: 512 });
   }
-  if (u.includes('/_api/redis-dbs')) return resp(200, { dbs: [0, 1, 2, 3], admin_view: whoamiAdmin });
+  if (u.includes('/_api/redis-dbs')) return resp(200, { dbs: [0, 1, 2, 3], admin_view: whoamiAdmin, entries: [
+    { db: 0, project: 'demo' }, { db: 1, project: 'demo2' }, { db: 2, project: null }, { db: 3, project: null },
+  ] });
   if (u.includes('/_api/redis-keys')) return resp(200, { keys: ['sr_demo'] });
   if (u.includes('/_api/redis-get')) return resp(200, { type: 'string', ttl_ms: -1, value: 'x'.repeat(5000) });
   // —— §10.4 流式端点 ——
@@ -685,7 +687,7 @@ ok(!els.has('tab-admin') && !els.has('ad-users-tbl') && !els.has('dlg-user-add')
 $s('rd-db').value = '3'; $s('rd-q').value = 'sr_';
 fire($s('rd-q'), 'keydown', { key: 'Enter', preventDefault() {} }); // A1 后：查询入口=回车（#rd-refresh 已随 c3b0558 删除）
 await sleep(60);
-ok(($s('rd-db').innerHTML || '').includes('<option value="0">'), 'redis-dbs：填充 DB 下拉');
+ok(($s('rd-db').innerHTML || '').includes('<option value="0">demo</option>') && ($s('rd-db').innerHTML || '').includes('未分配'), 'redis-dbs：下拉显示项目名（R8 裁决；未分配库占位，value=库号）');
 ok(($s('rd-keys').innerHTML || '').includes('sr_demo'), 'redis-keys：键列表渲染（前缀过滤请求）');
 ok($s('rd-count').textContent === '共 1 个键', '「共 N 个键」提示（C2：Redis 文案统一「键」；「可能截断」只留在静态说明）');
 ok(!els.has('rd-scope'), '§13.2 R4 裁决：管理员视图徽章已删（顶栏「管」角标唯一，同一信息只出现一次）');
@@ -1396,8 +1398,8 @@ ok($s('dlg-redis-x').open === false, '扩容对话框关闭');
 // —— §13.2 Redis 浏览管理员视图（S2：Redis 已迁数据页；服务端 admin_view 标注路径） ——
 clickTab('db');
 await sleep(80);
-ok(($s('rd-db').innerHTML || '').includes('<option value="3">'),
-  'admin 钥匙：Redis DB 下拉全量（含 dbs 0-3；R4 裁决后无徽章，全量视角由数据本身体现）');
+ok(($s('rd-db').innerHTML || '').includes('<option value="3">未分配</option>'),
+  'admin：Redis 下拉全量（dbs 0-3 含未分配；R8：显示项目名，全量视角由数据本身体现）');
 clickTab('proj');
 whoamiAdmin = false;
 
@@ -1806,7 +1808,7 @@ ok(!html.includes('zstd-${ZSTD_LEVEL}') && !html.includes('加密分片失败') 
   && !html.includes('分片下载中') && !html.includes('保留已传分片') && !html.includes('未配置密钥或账号')
   && !html.includes('分片总长不一致') && !html.includes('分片长度异常') && !html.includes('分片上传中'),
   'F9：旧机制词组零残留（用户可见面）');
-ok(html.includes('id="rd-admin-clause"') && html.includes('；管理员可见全部逻辑库'),
+ok(html.includes('id="rd-admin-clause"') && html.includes('；管理员可见全部项目的键空间'),
   'F11：Redis 静态句管理员半句拆分（默认隐藏，refreshAdminBadge 按 admin||boundAdmin 拼入）');
 ok((html.match(/尚未完成安全配置/g) || []).length === 4
   && !html.includes('请先在「设置」中配置平台公钥') && !html.includes('恢复需先配置平台公钥'),

@@ -267,7 +267,7 @@
     <!-- §13.2/13.3（plan-17 S2 自状态页迁入）：DB 下拉来自 /_api/redis-dbs（服务端按用户过滤；admin 全量） -->
     <h2>Redis 浏览</h2>
     <div class="row">
-      <label class="field" for="rd-db"><span>逻辑库（DB）</span><select id="rd-db"></select></label>
+      <label class="field" for="rd-db"><span>项目</span><select id="rd-db"></select></label>
       <label class="field" for="rd-q"><span>键前缀过滤（回车查询）</span>
         <input type="text" id="rd-q" class="mono" placeholder="如 sr_demo_ 或留空…"></label>
       <!-- 自动加载（选库/输入前缀后回车自动查询 -->
@@ -278,7 +278,7 @@
       <div class="field rd-keys-pane">
         <span>键列表</span>
         <select id="rd-keys" size="12" class="mono" aria-label="键列表">
-          <option value="">（选择逻辑库后自动加载）</option>
+          <option value="">（选择项目后自动加载）</option>
         </select>
       </div>
       <div class="field rd-val-pane">
@@ -286,7 +286,7 @@
         <pre class="out mono" id="rd-val" aria-live="polite">（未选择键）</pre>
       </div>
     </div>
-    <p class="note">每项目一个逻辑库，编号由平台分配<span class="hidden" id="rd-admin-clause">；管理员可见全部逻辑库</span>。键列表单次最多 200 条（可能截断），值超过 4KB 会被服务端截断。</p>
+    <p class="note">每个项目一个独立的键空间<span class="hidden" id="rd-admin-clause">；管理员可见全部项目的键空间</span>。键列表单次最多 200 条（可能截断），值超过 4KB 会被服务端截断。</p>
   </section>
 
   <!-- ———— 标签页 4：帮助 ———— -->

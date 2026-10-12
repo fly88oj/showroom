@@ -264,15 +264,17 @@ export async function ensureRedisDbs() {
   if (rdDbsLoaded) return;
   try {
     const j = await api('GET', '/_api/redis-dbs'); // 服务端已按用户过滤（§13.2：请求 db ∈ 名下项目集合）
-    const dbs = (j.dbs ?? []).map(Number).filter(Number.isInteger);
-    if (!dbs.length) {
+    const entries = (j.entries ?? []).filter((e) => Number.isInteger(e.db));
+    if (!entries.length) {
       $('rd-db').innerHTML = '';
-      $('rd-count').textContent = '您名下暂无可浏览的逻辑库（发布项目后自动分配）';
+      $('rd-count').textContent = '您名下暂无可浏览的项目（发布项目后自动出现）';
       return;
     }
-    $('rd-db').innerHTML = dbs.map((n) => `<option value="${n}">${n}</option>`).join('');
+    // R8 用户裁决：下拉显示项目名而非库号（value 仍为库号供查询）；管理员未分配库显示占位
+    $('rd-db').innerHTML = entries.map((e) =>
+      `<option value="${e.db}">${esc(e.project ?? '未分配')}</option>`).join('');
     rdDbsLoaded = true; // 管理员全量标注已随 R4 裁决移除（顶栏「管」角标唯一）
-  } catch (e) { apiFail('Redis 库编号获取', e); }
+  } catch (e) { apiFail('Redis 项目列表获取', e); }
 }
 
 async function refreshRedisKeys() {

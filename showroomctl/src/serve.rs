@@ -694,14 +694,24 @@ async fn dispatch(
         ("GET", "/_api/redis-dbs", _) => {
             let policy = state::Policy::load(&s.root);
             let admin = state::user_is_admin(&s.root, &user);
+            // R8 用户裁决：下拉显示项目名而非库号——附 db→项目映射（管理员全池，未分配库 project=null）
+            let own: Vec<(String, u16)> = state::all_confs(&s.root)
+                .into_iter()
+                .filter(|(_, c)| admin || c.user == user)
+                .map(|(p, c)| (p, c.redisdb as u16))
+                .collect();
             let dbs: Vec<u16> = if admin {
                 (0..policy.redis_pool_cap()).collect()
             } else {
                 state::user_redis_dbs(&s.root, &user)
             };
-            let mut v = json!({"dbs": dbs});
+            let entries: Vec<_> = dbs.iter().map(|db| {
+                let project = own.iter().find(|(_, d)| d == db).map(|(p, _)| p.clone());
+                json!({"db": db, "project": project})
+            }).collect();
+            let mut v = json!({"dbs": dbs, "entries": entries});
             if admin {
-                v["admin_view"] = json!(true); // 控制台据此标注「管理员视图」
+                v["admin_view"] = json!(true);
             }
             Ok(Json(v))
         }
