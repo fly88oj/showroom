@@ -211,7 +211,7 @@
   .st-wait { color: var(--fg-dim); }
   .st-breath { animation: st-pulse 1.6s ease-in-out infinite; }
   @keyframes st-pulse { 50% { opacity: .4; } }
-  /* §12.1 一键部署状态条：四段步骤 / 失败标红 / 完成大字 URL；§12.2 管理标签 */
+  /* §12.1 一键发布状态条：四段步骤 / 失败标红 / 完成大字 URL；§12.2 管理标签 */
   .wz-step.done { background: var(--ok-bg); border-color: var(--ok-bd); color: var(--ok-fg); }
   .wz-step.err { background: var(--bad-bg); border-color: var(--bad-bd); color: var(--bad-fg); }
   .wz-step.skip { opacity: .45; }
@@ -248,7 +248,7 @@
   #st-logs { min-height: 10em; }
   /* plan-17 S2：行抽屉（日志跟随）——插在展项行后，data-drawer 标注所属项目 */
   .drawer-row > td { background: var(--bg-input); }
-  /* plan-17 S6：卡片副题「已加载 N 项 · HH:MM:SS」——整段可点重取（无手动刷新按钮） */
+  /* 卡片副题 .sub：纯状态文本（成功时不写计数——表格即数据；失败时显示「加载失败（将自动重试）」） */
   .sub { background: none; border: none; color: var(--fg-dim); font-size: 12px; font-weight: 400; padding: 2px 0; height: auto; line-height: inherit; }
   /* R4 用户裁决：副题是纯状态文本（自动刷新兜底），无可点性——非业务操作越少越好 */
   /* plan-17 S4：行内「更多 ▾」菜单（回滚/环境变量/数据/删除） */
@@ -293,7 +293,7 @@
        seed/公钥串；签名自测通过前只渲染本区块，不渲染任何管理 UI） ———— -->
 <section id="login">
   <h1>Showroom 控制台</h1>
-  <p class="note">服务器（同源代理，签名调用）：<span class="mono" id="lg-srv"></span></p>
+  <p class="note">服务器：<span class="mono" id="lg-srv"></span></p>
 
   <!-- 主路径：一步登录（OPAQUE → 绑定本机钥匙 → 进入控制台，plan-16 §2.2 报文序列） -->
   <form id="lg-form" class="mt-3">
@@ -305,7 +305,6 @@
     <p class="ferr" id="lg-pass-err" aria-live="polite"></p>
     <div class="row">
       <button type="submit" id="lg-submit">登录</button>
-      <button type="button" id="lg-reenter" class="hidden" title="本机钥匙自测通过即可免密码进入">免密码进入</button>
       <span class="fb" id="lg-fb" aria-live="polite"></span>
     </div>
   </form>
@@ -324,7 +323,7 @@
         <span class="srv">服务器 <span class="mono" id="hd-srv"></span></span>
       </div>
       <div class="chrome-actions">
-        <button id="btn-new-pub" title="发布新 Demo（跳转发布页）">+ 发布</button>
+        <button id="btn-new-pub" title="发布新展项（跳转发布页）">+ 发布</button>
         <button id="btn-settings" title="对外访问域名 / 平台公钥 PEM / 修改密码">设置</button>
         <button id="btn-logout">退出登录</button>
       </div>
@@ -388,10 +387,9 @@
     <h2>发布新版本</h2>
     <form id="pub-form">
       <div class="grid">
-        <label class="field" for="pub-project"><span>项目（留空自动生成随机 8 位名；也可手输或点「换一个」/从已有项目选择）</span>
+        <label class="field" for="pub-project"><span>项目（留空自动生成随机 8 位名；也可手输或从已有项目选择）</span>
           <span class="row combo">
             <input type="text" id="pub-project" list="dl-projects" size="12" pattern="[a-zA-Z0-9][a-zA-Z0-9-]{0,30}" aria-describedby="pub-project-err">
-            <button type="button" id="pub-shuffle" title="重新生成随机项目名">换一个</button>
           </span></label>
       </div>
       <!-- 视觉QA P1-3：镜像源 radio 与其余字段同列栅格（原独立成行脱离列轴，左移 90px） -->
@@ -419,12 +417,12 @@
           <input type="text" id="pub-tag" required size="10" aria-describedby="pub-tag-err"></label>
         <label class="field" for="pub-mem"><span>内存需求（MiB）</span>
           <input type="text" id="pub-mem" value="256" list="dl-mem" size="6" placeholder="单位 MiB，如 256…"></label>
-        <label class="field" for="pub-cport"><span>演示服务端口（容器内）</span>
+        <label class="field" for="pub-cport"><span>展项端口（容器内）</span>
           <input type="number" id="pub-cport" value="8080" min="1" max="65535" size="5"></label>
         <!-- 视觉QA P2-3：「发布」「仅上传」同一行排列（row 包组，不再随栅格换行分离） -->
         <span class="row" id="pub-actions">
           <button type="submit" id="pub-submit">发布</button>
-          <button type="button" id="btn-upload-only" title="同一 tar：只压缩上传入库，不部署；稍后到本页选「镜像库」源发布">仅上传</button>
+          <button type="button" id="btn-upload-only" title="同一 tar：只压缩上传入库，不发布；稍后到本页选「镜像库」源发布">仅上传</button>
         </span>
       </div>
       <!-- 第1轮UI审查P1：空间条在发布页可见（镜像 tar 上传发生在本页；与镜像库页 #space-note 同数据同刷新） -->
@@ -437,8 +435,8 @@
     </form>
     <!-- plan-17 验收 6：未配置 PEM 时选 tar 发布 → 内联引导「去设置」（whoami 自动带回后永不出现） -->
     <p class="warnbar hidden" id="pub-pem-hint">尚未配置平台公钥 PEM（镜像上传的加密信封公钥）：<button type="button" id="btn-go-settings" class="act">去设置</button>（whoami 自动带回后无需手工粘贴）</p>
-    <!-- §12.1 一键部署状态条：①压缩 → ②上传 → ③发布 → ④完成（大字 URL + 复制）；任一步失败标红可重试；
-         「仅上传」走①②并在成功时把③④标记为跳过（镜像已入库，可稍后从下方部署入口选择） -->
+    <!-- §12.1 一键发布状态条：①压缩 → ②上传 → ③发布 → ④完成（大字 URL + 复制）；任一步失败标红可重试；
+         「仅上传」走①②并在成功时把③④标记为跳过（镜像已入库，可稍后从下方发布入口选择） -->
     <div id="dp-bar" class="hidden mt-3">
       <div class="row">
         <span class="wz-step" id="dp-s1">① 压缩</span>
@@ -458,7 +456,6 @@
         </div>
       </div>
     </div>
-    <p class="fb" id="pub-fb" aria-live="polite"></p>
     <!-- 视觉QA P1-6：页尾 9-10 行长段拆为 3 步列表；技术细节收进折叠（页面密度 3/10 → 可读） -->
     <div class="fs">
       <h3>发布说明</h3>
@@ -473,7 +470,6 @@
           <li>命名规则：<span class="mono">^[a-zA-Z0-9][a-zA-Z0-9-]{0,30}$</span>（随机名 8 位字母数字，降低被字典遍历发现的门槛；项目留空即自动生成并回填），保留名 <span class="mono">v2 _api _bootstrap _console</span>；项目归属首个创建者。</li>
           <li>命中已有项目时自动沿用上次发布参数（内存取服务端当前配置；标签/端口取本机记忆），可修改。</li>
           <li>未选择文件时「发布」直接发布（要求镜像已入镜像库）；镜像 tar 上传前自动经 <span class="mono">zstd-19</span> 压缩再加密（已是 <span class="mono">.tar.zst</span> 则原样上传）。</li>
-          <li>压缩/分片细节：按 8MB 分片逐片加密上传，每片失败自动重试 3 次；上传失败点「重试」自动从断点续传（保留已传分片，恢复时先重新压缩重建产物），详见镜像库页「上传机制说明」。</li>
         </ul>
       </details>
     </div>
@@ -493,21 +489,21 @@
     <!-- §14.3 镜像清单：与发布表单「镜像库」下拉同源 /_api/images 数据；每行「删除」走 POST /_api/image-rm（内联 GC，秒级回收磁盘） -->
     <div class="tbl-wrap tbl-low mt-3"><!-- 视觉QA P1-7：介绍段→表头 3px → 12px -->
       <table id="img-list">
-        <thead><tr><th>镜像（同发布页下拉清单 · 可删除旧镜像释放磁盘）</th><th>操作</th></tr></thead>
+        <thead><tr><th>镜像</th><th>操作</th></tr></thead>
         <tbody><tr><td colspan="2" class="note">正在加载…</td></tr></tbody>
       </table>
     </div>
     <datalist id="dl-images"></datalist>
 
     <div class="fs">
-      <h3>镜像分片上传（压缩后 8MB/片逐片加密 · 服务端拼接解密导入 · 断点续传）</h3>
+      <h3>镜像分片上传</h3>
       <div class="row">
-        <button id="btn-resume">恢复 / 查询上传状态</button>
+        <button id="btn-resume">恢复上传</button>
         <label class="field" for="up-id"><span>续传编号（中断的上传凭此恢复）</span>
           <input type="text" id="up-id" list="up-ids" size="34" class="mono" placeholder="中断后填入或从列表选择…"></label>
         <datalist id="up-ids"></datalist>
       </div>
-      <!-- §14.1 空间条：常显「可用空间（已扣预留）」；进入本区 / import-end 成功 / 删除镜像后自动刷新，亦可手动刷新 -->
+      <!-- §14.1 空间条：常显「可用空间（已扣预留）」；进入本区 / import-end 成功 / 删除镜像后自动刷新 -->
       <div class="row">
         <div id="space-note" class="note" aria-live="polite">可用空间（已扣预留）：…</div>
       </div>
@@ -524,12 +520,12 @@
 
   <!-- ———— 标签页 2：数据库（SPEC §9） ———— -->
   <section id="tab-db" class="hidden" role="tabpanel" aria-labelledby="tabbtn-db">
-    <h2>目标库</h2>
+    <h2>目标项目</h2>
     <div class="grid">
       <label class="field grow" for="db-project"><span>项目</span>
         <input type="text" id="db-project" list="dl-projects" required size="12" pattern="[a-zA-Z0-9][a-zA-Z0-9-]{0,30}"></label>
     </div>
-    <p class="note">只能操作本人名下项目对应的数据库；全部操作有签名与审计。</p>
+    <p class="note">只能操作本人名下项目对应的数据库；全部操作受安全校验并留存操作记录。</p>
 
     <div class="sep"></div>
     <h2>表清单与预览</h2>
@@ -551,7 +547,7 @@
     <label class="field" for="db-sql"><span>SQL 语句（多行；服务端直接执行，语句失败即停止）</span>
       <textarea id="db-sql" class="mono" spellcheck="false" placeholder="SELECT * FROM …"></textarea></label>
     <div class="row"><button id="btn-db-sql">执行 SQL</button></div>
-    <p class="note">含 <span class="mono">DROP / TRUNCATE / DELETE</span> 的语句会先弹出本地确认，确认后才携带确认标记提交。</p>
+    <p class="note">含 <span class="mono">DROP / TRUNCATE / DELETE</span> 的语句会先弹出确认框，确认后才会执行。</p>
 
     <div class="sep"></div>
     <h2>备份与恢复（端到端加密信封 · 三段式分片下载）</h2>
@@ -598,8 +594,8 @@
     <!-- 视觉QA P2-10：key 栏与值面板同构（div.field flex column + 顶部 label 行），双栏对齐 -->
     <div class="row rd-panes">
       <div class="field rd-keys-pane">
-        <span>键列表（点击查看值）</span>
-        <select id="rd-keys" size="12" class="mono" aria-label="键列表（点击查看值）">
+        <span>键列表</span>
+        <select id="rd-keys" size="12" class="mono" aria-label="键列表">
           <option value="">（选择逻辑库后自动加载）</option>
         </select>
       </div>
@@ -608,7 +604,7 @@
         <pre class="out mono" id="rd-val" aria-live="polite">（未选择键）</pre>
       </div>
     </div>
-    <p class="note">仅显示您名下项目的库（每项目一个逻辑库，编号由平台分配）；管理员钥匙可见全部逻辑库（管理员视图）。仅排障用途：这是界面级/协作级隔离（防误看防误操作）——容器内应用持有原始连接仍可 SELECT 任意库，非安全边界；键列表单次最多 200 条（可能截断），值超过 4KB 会被服务端截断。</p>
+    <p class="note">每项目一个逻辑库，编号由平台分配；管理员钥匙可见全部逻辑库（管理员视图）。仅排障用途：这是界面级/协作级隔离（防误看防误操作）——容器内应用持有原始连接仍可 SELECT 任意库，非安全边界；键列表单次最多 200 条（可能截断），值超过 4KB 会被服务端截断。</p>
   </section>
 
   <!-- ———— 标签页 4：帮助 ———— -->
@@ -618,7 +614,7 @@
       <li>控制台用「账号 + 密码」登录：密码只在登录时使用一次，登录后本设备自动保管专用钥匙，此后全部操作自动签名，无需再输密码。</li>
       <li>新设备 / 换浏览器：直接输入账号密码登录即可，平台自动为本设备绑定新钥匙（旧设备钥匙按平台策略自动回收，回收后该设备重新密码登录）。</li>
       <li>忘记密码：请联系管理员重置（控制台无法自助找回；重置不影响各设备已绑定的钥匙，管理员在「管理」页点「补发密码」即生成新的登录初始密码）。</li>
-      <li>修改密码：登录后点顶部「修改密码」自助更换——需先输入当前密码校验，新密码经 OPAQUE 盲化上线、全程不明文；改完请用新密码重新登录（本机钥匙不受影响）。</li>
+      <li>修改密码：登录后在「设置 → 修改密码」自助更换——需先输入当前密码校验，新密码经 OPAQUE 盲化上线、全程不明文；改完请用新密码重新登录（本机钥匙不受影响）。</li>
       <li>登录密码与镜像库密码是两把独立发放的密码：前者登录控制台 / CLI，后者在 docker push 推送镜像时使用。</li>
       <li>本设备钥匙由浏览器自动生成并保存在 localStorage（属试验性存储）：清除浏览器数据即失效，届时重新密码登录即可。</li>
     </ul>
@@ -631,7 +627,7 @@
 
     <h2>镜像规范</h2>
     <ul class="note help-list">
-      <li>演示服务须监听容器内 <span class="mono">8080</span> 端口（其他端口在发布表单的端口字段如实填写）。</li>
+      <li>展项须监听容器内 <span class="mono">8080</span> 端口（其他端口在发布表单的端口字段如实填写）。</li>
       <li>展项经子路径对外发布：访问地址恒为 <span class="mono">/&lt;project&gt;/</span>，读 <span class="mono">SHOWROOM_BASE_PATH</span>（值即该前缀）适配，或页面内一律使用相对 URL。</li>
       <li>建议在 Dockerfile 里配置 <span class="mono">HEALTHCHECK</span>，平台据此判定健康并自愈。</li>
       <li>镜像内配置文件替换推荐 <span class="mono">envsubst &lt; config.tpl &gt; config</span> 模式（占位符由注入的环境变量填充）。</li>
@@ -668,7 +664,7 @@
         </tr>
       </tbody>
     </table></div>
-    <p class="note">下载走与控制台其余操作相同的签名鉴权通道；文件大小在首次下载后显示。CLI 首次使用：<span class="mono">./showroom login &lt;账号&gt;</span> 输一次密码即自动配置本机。</p>
+    <p class="note">下载走与控制台其余操作相同的签名鉴权通道；文件大小在首次下载后显示。CLI 首次配置见上「CLI 使用」一节。</p>
 
     <h2>CLI 命令对照</h2>
     <div class="tbl-wrap"><table>
@@ -676,7 +672,7 @@
       <tbody>
         <tr><td>账号密码登录（自动绑定本机）</td><td class="mono">showroom login &lt;账号&gt;</td></tr>
         <tr><td>退出登录</td><td class="mono">showroom logout</td></tr>
-        <tr><td>修改密码（登录态自助）</td><td class="wrap">控制台顶部「修改密码」入口（CLI 暂无；管理员可代为重置，见下）</td></tr>
+        <tr><td>修改密码（登录态自助）</td><td class="wrap">控制台「设置 → 修改密码」入口（CLI 暂无；管理员可代为重置，见下）</td></tr>
         <tr><td>生成/重置本机签名密钥（调试用）</td><td class="mono">showroom keygen</td></tr>
         <tr class="admin-only hidden"><td>发放新账号（初始密码 / 管理员）</td><td class="mono">showroomctl user-add &lt;账号&gt; --gen-password [--admin]</td></tr>
         <tr class="admin-only hidden"><td>补发 / 重置密码（管理员）</td><td class="mono">showroomctl user-passwd &lt;账号&gt; --gen-password</td></tr>
@@ -747,7 +743,7 @@
       <h2>实时事件（平台容器启停 · 管理员工具）</h2>
       <div class="row">
         <span class="note">连接状态：<span class="mono" id="ev-state" aria-live="polite">未连接</span></span>
-        <span class="note">仅显示 <span class="mono">sr-</span> 开头的展项容器（时间 / 动作 / 容器名，最近 20 条）；心跳行忽略；事件同时驱动展项列表自动刷新（2 秒去抖）。</span>
+        <span class="note">仅显示 <span class="mono">sr-</span> 开头的展项容器（时间 / 动作 / 容器名，最近 20 条）；事件同时驱动展项列表自动刷新。</span>
       </div>
       <pre class="out mono" id="st-events" aria-live="polite">（暂无事件）</pre>
 
@@ -768,25 +764,21 @@
 
       <div class="sep"></div>
       <h2>平台状态</h2>
-      <div class="row">
-        <!-- R4 用户裁决：30 秒自动刷新恒开，无开关 UI -->
-        <span class="note" id="ad-st-fb" aria-live="polite"></span>
-      </div>
+      <!-- R4 用户裁决：30 秒自动刷新恒开，无开关 UI（加载失败走顶部条） -->
       <div id="ad-status" class="note" aria-live="polite">（正在加载…）</div>
 
       <div class="sep"></div>
       <!-- §15 主机编排：期望状态展示（host.env/policy/漂移/Redis 池）+ 两段式变更 + 扩容流入口 -->
       <h2>主机编排（期望状态 · 两段式变更）</h2>
       <div class="row">
-        <button id="hs-refresh">刷新期望状态</button>
         <span class="fb" id="hs-fb" aria-live="polite"></span>
       </div>
 
       <h3>中间件集合（host.env MIDDLEWARE）</h3>
       <div class="row">
-        <label class="row" for="hs-mw-postgres"><input type="checkbox" id="hs-mw-postgres"><span>postgres <span class="badge hidden" id="hs-mw-postgres-badge">已启用</span></span></label>
-        <label class="row" for="hs-mw-redis"><input type="checkbox" id="hs-mw-redis"><span>redis <span class="badge hidden" id="hs-mw-redis-badge">已启用</span></span></label>
-        <label class="row" for="hs-mw-registry"><input type="checkbox" id="hs-mw-registry"><span>registry <span class="badge hidden" id="hs-mw-registry-badge">已启用</span></span></label>
+        <label class="row" for="hs-mw-postgres"><input type="checkbox" id="hs-mw-postgres"><span>postgres</span></label>
+        <label class="row" for="hs-mw-redis"><input type="checkbox" id="hs-mw-redis"><span>redis</span></label>
+        <label class="row" for="hs-mw-registry"><input type="checkbox" id="hs-mw-registry"><span>registry</span></label>
       </div>
       <p class="note">取消勾选即「禁用该中间件」：查看变更会列出受影响项目（有项目在用时红色警示 + 二次确认）；禁用后对应环境变量组（如 REDIS_*）不再注入新发布。重新勾选即启用。</p>
 
@@ -835,9 +827,9 @@
       <div id="hs-report" class="hidden mt-2" aria-live="polite"></div>
     </section>
 
-    <!-- 发放新账号（plan-16 §1.4/§1.5 + B7 统一账号密码认证）：主路径=账号 + 自动生成登录
-         初始密码（crypto 随机 16 位）→ user-add {user,password[,admin]}；结果两行一次性密码
-         （登录初始 + registry）；公钥直登记路径已删除（发卡恒设密码） -->
+    <!-- 发放新账号（plan-16 §1.4/§1.5 + B7 统一账号密码认证）：主路径=账号 + 自动生成的登录
+         初始密码（打开对话框即客户端 crypto 随机 16 位生成并暂存，不展示）→ user-add
+         {user,password[,admin]}；结果两行一次性密码（登录初始 + registry）；公钥直登记路径已删除（发卡恒设密码） -->
     <dialog id="dlg-user-add" aria-labelledby="dlg-user-add-title">
       <div class="dlg-head">
         <h2 id="dlg-user-add-title">发放新账号</h2>
@@ -847,16 +839,7 @@
         <input type="text" id="ad-na-user" size="14" pattern="[a-z0-9][a-z0-9\-]{0,30}" aria-describedby="ad-na-user-err"></label>
       <p class="ferr" id="ad-na-user-err" aria-live="polite"></p>
       <div class="row">
-        <button type="button" id="ad-na-gen">自动生成强密码</button>
         <span class="fb" id="ad-na-fb" aria-live="polite"></span>
-      </div>
-      <p class="ferr" id="ad-na-gen-err" aria-live="polite"></p>
-      <div id="ad-na-gen-box" class="hidden mt-1">
-        <p class="note note-warn mt-1">已生成登录初始密码——点「发放」后将与镜像库密码一起再次展示（均仅显示一次），请即时交予发布者。</p>
-        <div class="row combo">
-          <code id="ad-na-gen-pw" class="pub mono"></code>
-          <button type="button" id="ad-na-copy-gen">复制密码</button>
-        </div>
       </div>
       <label class="row mt-3" for="ad-na-admin"><input type="checkbox" id="ad-na-admin"><span>同时授予管理员（可管理账号、钥匙与平台状态）</span></label>
       <div class="row">
@@ -867,7 +850,7 @@
         <div class="row combo" id="ad-na-login-row">
           <span class="note nowrap">登录初始密码（登录控制台 / CLI）</span>
           <code id="ad-na-login-pw" class="pub mono"></code>
-          <button type="button" id="ad-na-copy-login">复制</button>
+          <button type="button" id="ad-na-copy-login">复制密码</button>
         </div>
         <div class="row combo mt-1">
           <span class="note nowrap">镜像库密码（docker push 推送用）</span>
@@ -878,10 +861,10 @@
       </div>
     </dialog>
 
-    <!-- 补发登录密码（plan-16 §1.5 passwd-set）：confirm → 生成新密码一次性展示（旧密码即刻失效，不动既有钥匙） -->
+    <!-- 补发密码（plan-16 §1.5 passwd-set）：confirm → 生成新密码一次性展示（旧密码即刻失效，不动既有钥匙） -->
     <dialog id="dlg-passwd-set" aria-labelledby="dlg-passwd-set-title">
       <div class="dlg-head">
-        <h2 id="dlg-passwd-set-title">补发登录密码</h2>
+        <h2 id="dlg-passwd-set-title">补发密码</h2>
         <button type="button" id="ad-ps-close">关闭</button>
       </div>
       <p class="note note-warn mt-3">已为账号 <span class="mono" id="ad-ps-user"></span> 生成新的登录初始密码——<b>仅显示一次</b>，请立即交予发布者妥善保存；原密码即刻失效，各设备已绑定的钥匙不受影响。</p>
@@ -1005,7 +988,7 @@ const apiFail = (what, e) => {
   // §14.2/§14.3：磁盘空间不足的 E_QUOTA（msg 含「磁盘空间不足」）→ 顶部条追加删除引导并刷新空间条（内存类 E_QUOTA 不追加）
   if (e && e.error === 'E_QUOTA' && (e.msg || '').includes('磁盘空间不足')) {
     if ($('space-note')) refreshSpace(true);
-    return showMsg(`${what} 失败 — ${errText(e)}；可到部署区删除旧镜像后重试`); // 第2轮xiaozhi P3：what 与「失败」间补空格（CJK/西文混排间距）
+    return showMsg(`${what} 失败 — ${errText(e)}；可到镜像库删除旧镜像后重试`); // 第2轮xiaozhi P3：what 与「失败」间补空格（CJK/西文混排间距）
   }
   showMsg(`${what} 失败 — ${errText(e)}`);
 };
@@ -1054,21 +1037,21 @@ function projState(p) {
   const q = p.project;
   const now = Date.now();
   if (localState.publishing.has(q))
-    return { label: '发布中…', cls: 'st-wait', breath: false, tip: '发布请求进行中（本地在途）：行操作已禁用，请稍候', act: { update: 0, logs: 0, ss: null, more: 0 } };
+    return { label: '发布中…', cls: 'st-wait', breath: false, tip: '发布请求进行中（本地在途）：行操作已禁用，请稍候', act: { update: 0, ss: null, more: 0 } };
   if (deploy.phase === 'upload' && deploy.project === q)
-    return { label: `上传中${deploy.upPct != null ? ` ${deploy.upPct}%` : ''}`, cls: 'st-wait', breath: false,
-      tip: '镜像分片上传中（本地在途）：完成状态条见发布页；失败可断点续传', act: { update: 0, logs: 0, ss: null, more: 0 } };
+    return { label: '上传中', cls: 'st-wait', breath: false,
+      tip: '镜像分片上传中（本地在途）：完成状态条见发布页；失败可断点续传', act: { update: 0, ss: null, more: 0 } };
   if (raw === 'running')
-    return { label: '运行中', cls: 'status-ok', breath: false, tip: raw, act: { update: 1, logs: 1, ss: 'stop', more: 1 } };
+    return { label: '运行中', cls: 'status-ok', breath: false, tip: raw, act: { update: 1, ss: 'stop', more: 1 } };
   if (raw === 'exited' || raw === 'paused' || raw === 'created')
-    return { label: '已停止', cls: 'status-mid', breath: false, tip: raw, act: { update: 1, logs: 1, ss: 'start', more: 1 } };
+    return { label: '已停止', cls: 'status-mid', breath: false, tip: raw, act: { update: 1, ss: 'start', more: 1 } };
   if (raw === 'restarting' || (localState.rebuiltUntil.get(q) || 0) > now)
-    return { label: '重建中', cls: 'status-mid', breath: true, tip: `${raw || 'publish:ok(本地)'}：更新发布成功后的滚动窗口`, act: { update: 0, logs: 1, ss: null, more: 0 } };
+    return { label: '重建中', cls: 'status-mid', breath: true, tip: `${raw || 'publish:ok(本地)'}：更新发布成功后的滚动窗口`, act: { update: 0, ss: null, more: 0 } };
   if (raw === 'dead' || (localState.failedUntil.get(q) || 0) > now)
-    return { label: '异常', cls: 'status-bad', breath: false, tip: `${raw || 'publish:fail(本地)'}：可看日志排查，或点「发新版本」重新发布`, act: { update: 1, logs: 1, ss: null, more: 0, rmOnly: 1 } };
+    return { label: '异常', cls: 'status-bad', breath: false, tip: `${raw || 'publish:fail(本地)'}：可看日志排查，或点「发新版本」重新发布`, act: { update: 1, ss: null, more: 0, rmOnly: 1 } };
   if (raw === 'missing')
-    return { label: '待部署', cls: 'st-wait', breath: false, tip: '仅镜像无容器：从发布页选择镜像即可拉起', act: { update: 0, logs: 0, ss: null, more: 0, deploy: 1 } };
-  return { label: '已停止', cls: 'status-mid', breath: false, tip: raw, act: { update: 1, logs: 1, ss: 'start', more: 1 } }; // 未知原词回落已停止（原词进 tooltip）
+    return { label: '待部署', cls: 'st-wait', breath: false, tip: '仅镜像无容器：从发布页选择镜像即可拉起', act: { update: 0, ss: null, more: 0, deploy: 1 } };
+  return { label: '已停止', cls: 'status-mid', breath: false, tip: raw, act: { update: 1, ss: 'start', more: 1 } }; // 未知原词回落已停止（原词进 tooltip）
 }
 /** 行操作区按状态机渲染（§4 可执行动作表）；●+文字双通道（色盲可辨，单色打印可分）。 */
 function rowStatusHtml(p) {
@@ -1085,11 +1068,10 @@ function rowActionsHtml(p) {
   const open = `<a class="act" href="${esc(externalUrl(p))}" target="_blank" rel="noopener" title="新标签打开 ${q}">打开</a>`;
   if (notMine(p)) // 展项对外可看（保留「打开」）；管理操作仅所有者与管理员可执行
     return `${open}<span class="not-mine" title="仅项目所有者与管理员可发新版本/停止/删除">非本人项目</span>`;
-  if (st.act.deploy) // 待部署：部署（→发布页预填项目名）·删除；日志禁用占位（§4）
-    return `${open}${b('deploy-row', '部署', ' title="到发布页预填该项目并选择镜像拉起"')}${b('logs', '日志', ' disabled')}${b('rm', '删除')}`;
+  if (st.act.deploy) // 待部署：部署（→发布页预填项目名）·删除；日志经详情列 ▾ 打开抽屉
+    return `${open}${b('deploy-row', '部署', ' title="到发布页预填该项目并选择镜像拉起"')}${b('rm', '删除')}`;
   let html = open
-    + (st.act.update ? b('update', '发新版本') : b('update', '发新版本', ' disabled'))
-    + (st.act.logs ? b('logs', '日志') : b('logs', '日志', ' disabled'));
+    + (st.act.update ? b('update', '发新版本') : b('update', '发新版本', ' disabled'));
   // B1：停止为危险操作——danger variant（红）+ 二次确认（见 onProjAction），与删除/重置同档警示
   if (st.act.ss) html += st.act.ss === 'stop'
     ? `<button class="act danger" data-act="stop" data-p="${q}">停止</button>`
@@ -1300,7 +1282,6 @@ async function onLoginSubmit(ev) {
   const pass = $('lg-pass').value;
   if (!pass) return fieldErr('lg-pass', '请输入密码；忘记密码请联系管理员重置');
   busy($('lg-submit'), true, '登录中…');
-  $('lg-fb').textContent = '正在登录…';
   try {
     await passwordLogin(user, pass);
     $('lg-pass').value = ''; // 用后即清，不留在 DOM
@@ -1315,7 +1296,7 @@ async function onLoginSubmit(ev) {
     } else if (e && e.error === 'E_AUTH') {
       fieldErr('lg-pass', '登录被服务端拒绝（可能为限流或服务暂不可用），请稍后重试；忘记密码请联系管理员重置');
     } else {
-      apiFail('登录', e);
+      // 单通道：行内提示已含下一步动作，不再另发顶部条（与同函数其他分支一致）
       fieldErr('lg-pass', `登录失败（${e && e.msg ? e.msg : '网络异常或服务不可用'}），请稍后重试`);
     }
   } finally { busy($('lg-submit'), false); }
@@ -1344,13 +1325,7 @@ $('lg-srv').textContent = location.origin; // C3：只显示主机地址（/_api
 $('lg-form').addEventListener('submit', onLoginSubmit);
 $('lg-user').addEventListener('input', () => fieldErr('lg-user', ''));
 $('lg-pass').addEventListener('input', () => fieldErr('lg-pass', ''));
-$('lg-reenter').addEventListener('click', async () => { // 退出登录后：本机钥匙仍有效，免密码重进
-  busy($('lg-reenter'), true, '进入中…');
-  $('lg-fb').textContent = '正在验证本机钥匙…';
-  await bootSelfTest();
-  busy($('lg-reenter'), false);
-  if (!state.loggedIn && !$('lg-fb').textContent) $('lg-fb').textContent = '本机钥匙未通过自测：请输入账号密码重新登录。';
-});
+// 「免密码进入」入口已删（两态铁律：登录态=控制台 / 登出或钥匙失效=登录窗，无第三态）
 /** 复制到剪贴板（优先 Clipboard API，降级 execCommand；均失败提示手动复制）。 */
 async function copyText(text, what) {
   try {
@@ -1527,12 +1502,12 @@ function startAutoRefresh() {
   clearInterval(autoRefreshTimer);
   autoRefreshTimer = setInterval(async () => {
     if (!state.loggedIn) return;
-    const tab = document.querySelector('#tabs button[aria-selected="true"]')?.dataset?.tab || currentTab;
+    const tab = document.querySelector('#tabs button[aria-selected="true"]')?.dataset?.tab;
     try {
       switch (tab) {
         case 'proj': await refreshProjects(true); break;
         case 'img': await ensureImages(true); await refreshSpace(); break;
-        case 'data': await refreshSpace(); break;
+        case 'db': await refreshSpace(); break;
         case 'admin': await loadAdminUsers(); await refreshAdminStatus(); break;
       }
     } catch (e) { /* 静默重试下轮 */ }
@@ -1586,12 +1561,12 @@ function logout() {
   if ($('dlg-pw')?.open) $('dlg-pw').close(); // 改密对话框随登录态收尾
   closeDrawer();                    // 行抽屉随登录态收起（内部停日志流）
   logsLive.lines = [];
-  $('st-logs-target').textContent = '（未选择）'; logsRender();
+  logsRender();
   stopEventsStream();               // 平台事件流同上
   $('app').classList.add('hidden');
   $('login').classList.remove('hidden');
   // B2 登出语义：上方已清本机钥匙（localStorage）并远程吊销（key-selfrm）——无密可免，
-  // 不再显示「免密码进入」；提示如实说明钥匙已回收，引导密码重登
+  // 登录卡只引导密码重登；提示如实说明钥匙已回收
   $('lg-pass').value = '';
   $('lg-fb').textContent = '已退出登录，本机钥匙已回收。请输入账号密码重新登录。';
 }
@@ -1614,7 +1589,6 @@ async function onPwChange() {
   if (nw !== nw2) return fieldErr('pw-new2', '两次输入的新密码不一致，请重新输入');
   if (nw === cur) return fieldErr('pw-new', '新密码与当前密码相同，请换一个');
   busy($('pw-submit'), true, '修改中…');
-  $('pw-fb').textContent = '正在校验当前密码…';
   try {
     // ① 当前密码校验：完整 login-begin + 本地 finish（错密码本地即败），不产生登录态
     const st = opaqueStart(state.user, cur);
@@ -1625,7 +1599,6 @@ async function onPwChange() {
     catch (e) { if (e && e.error === 'E_PW_LOCAL') throw { error: 'E_PW_CUR', msg: '' }; throw e; }
     finally { opaqueEnd(st.sid); }
     // ② pw 三件序列（服务端 §16：签名即会话证明，旧密码不再上线；60s 在途注册态一次性消费）
-    $('pw-fb').textContent = '当前密码已校验，正在替换…';
     const rs = opaqueRegStart(state.user, nw); // ②-1 m1
     let m2;
     try { m2 = (await api('POST', '/_api/auth/pw-begin', { user: state.user, m1: rs.m1 })).m2; }
@@ -1701,7 +1674,7 @@ function buildApp() {
   $('help-env-tbl').querySelector('tbody').innerHTML = Object.entries(ENV_DESC)
     .map(([k, d]) => `<tr><td class="mono">${esc(k)}</td><td class="wrap">${esc(d)}</td></tr>`).join('');
   wireHelpTab();
-  $('pub-project').value = randomProject(); // 页面加载（建壳）时预填一次随机名；「换一个」随时重随机
+  $('pub-project').value = randomProject(); // 页面加载（建壳）时预填一次随机名（留空提交时自动生成兜底，无需手动重随机入口）
   updatePubUrl();
   // 行抽屉（S2）：先挂入文档（hidden）再接线——getElementById 只寻址文档内元素
   $('proj-tbl').querySelector('tbody')?.append?.(drawerRow);
@@ -1842,29 +1815,20 @@ function teardownAdmin() {
   $('admin-root')?.remove?.();
 }
 function wireAdminTab() {
-  // 根因清理：#ad-refresh/#ad-st-refresh 按钮已随 c3b0558 删除（30s 自动刷新取代）；
-  // R4 用户裁决：自动刷新恒开无开关，进管理页即启动状态面板定时器
-  if (!adTimer) adTimer = setInterval(refreshAdminStatus, 30000);
+  // 根因清理：#ad-refresh/#ad-st-refresh/#hs-refresh 手动刷新按钮已随自动刷新删除（30s 定时取代）；
+  // R4 用户裁决：自动刷新恒开无开关，进管理页即启动状态面板定时器（平台状态 + 主机期望状态）
+  if (!adTimer) adTimer = setInterval(() => { refreshAdminStatus(); refreshHost(); }, 30000);
   $('ad-user-add').addEventListener('click', () => { // 发卡对话框（打开即聚焦首字段；Esc/关闭焦点自动归还）
     $('ad-na-user').value = '';
     $('ad-na-admin').checked = false;
-    naGenPw = ''; // 上轮生成未发放的密码不跨轮残留
-    $('ad-na-gen-box').classList.add('hidden');
-    $('ad-na-gen-pw').textContent = '';
+    naGenPw = randomPassword(); // 打开即客户端生成并暂存（不展示）；发放成功后在结果区一次性展示
     $('ad-na-result').classList.add('hidden');
     $('ad-na-login-pw').textContent = ''; $('ad-na-pw').textContent = '';
-    clearErrs('ad-na-user', 'ad-na-gen');
+    clearErrs('ad-na-user');
     $('dlg-user-add').showModal();
     $('ad-na-user').focus();
   });
   $('ad-na-close').addEventListener('click', () => $('dlg-user-add').close());
-  $('ad-na-gen').addEventListener('click', () => { // 自动生成强密码：展示一次（发放成功即被结果区接管）
-    naGenPw = randomPassword();
-    $('ad-na-gen-pw').textContent = naGenPw;
-    $('ad-na-gen-box').classList.remove('hidden');
-    fieldErr('ad-na-gen', '');
-  });
-  $('ad-na-copy-gen').addEventListener('click', () => copyText($('ad-na-gen-pw').textContent, '登录初始密码'));
   $('ad-na-submit').addEventListener('click', onUserAdd);
   $('ad-na-user').addEventListener('input', () => fieldErr('ad-na-user', ''));
   $('ad-na-copy-login').addEventListener('click', () => copyText($('ad-na-login-pw').textContent, '登录初始密码'));
@@ -1873,8 +1837,7 @@ function wireAdminTab() {
   $('ad-ps-close').addEventListener('click', () => $('dlg-passwd-set').close());
   $('ad-ps-copy').addEventListener('click', () => copyText($('ad-ps-pw').textContent, '登录初始密码'));
   $('ad-users-tbl').addEventListener('click', onAdminKeyAction);
-  // §15 主机编排：期望状态刷新 / 两段式（预演→确认）/ Redis 扩容对话框
-  $('hs-refresh').addEventListener('click', () => refreshHost());
+  // §15 主机编排：期望状态随 30s 定时与进页自动刷新（手动刷新按钮已删）/ 两段式（预演→确认）/ Redis 扩容对话框
   $('hs-apply').addEventListener('click', onHostApply);
   $('hs-confirm').addEventListener('click', onHostConfirmRun);
   $('hs-pool-expand').addEventListener('click', openRedisX);
@@ -1910,7 +1873,7 @@ async function loadAdminUsers() { // 账号与钥匙表（§12.2：账号/钥匙
             <button class="act danger" data-act="keyrm" data-user="${esc(o.user)}" data-kid="${esc(k.kid)}">删除钥匙</button></td>
         </tr>`).join('') || '<tr><td colspan="4" class="note">（该账号没有钥匙）</td></tr>');
     }).join('') : '<tr><td colspan="4" class="note">暂无账号</td></tr>';
-    $('ad-fb').textContent = `已加载 ${users.length} 个账号（${new Date().toLocaleTimeString([], { hour12: false })}）`;
+    $('ad-fb').textContent = ''; // 成功不写计数回执（表格即数据）；本区保留操作反馈用途
   } catch (e) { tb.innerHTML = '<tr><td colspan="4" class="note">加载失败 · <button type="button" class="act" data-act="retry-users">重试</button></td></tr>'; apiFail('账号与钥匙加载', e); } // D2：失败行内「重试」可点（非管理员 404 E_AUTH 也走顶部条）
 }
 // 管理动作：全部中文 confirm 写明影响（§12.2）
@@ -1944,14 +1907,14 @@ async function onAdminKeyAction(ev) {
 /** 补发/重置登录密码（plan-16 §1.5）：confirm → passwd-set {user,password}（客户端 crypto 生成）→
  *  新密码一次性展示（对话框）；旧密码即刻失效，不动既有钥匙 → 表刷新（徽标翻转）。 */
 async function onAdminPasswdSet(user) {
-  if (!confirm(`确认为账号 ${user} 补发登录密码？将生成新的登录初始密码（仅显示一次），原密码即刻失效；各设备已绑定的钥匙不受影响。`)) return;
+  if (!confirm(`确认为账号 ${user} 补发密码？将生成新的登录初始密码，原密码即刻失效；各设备已绑定的钥匙不受影响。`)) return;
   const pw = randomPassword();
   try {
     const j = await api('POST', '/_api/admin/passwd-set', { user, password: pw });
     $('ad-ps-user').textContent = user;
     $('ad-ps-pw').textContent = j.password || pw; // 服务端一次性回显；异常缺失回落本地生成值
     $('dlg-passwd-set').showModal();
-    $('ad-fb').textContent = `已补发登录密码（${user}，新密码仅显示一次）`;
+    $('ad-fb').textContent = `已补发密码（${user}）`;
     loadAdminUsers();
   } catch (e) { apiFail(`补发密码（${user}）`, e); }
 }
@@ -1965,17 +1928,15 @@ async function issueUser(body) {
   $('ad-na-fb').textContent = `已发放账号 ${body.user}${body.admin ? '（含管理员）' : ''}`;
   loadAdminUsers();
 }
-async function onUserAdd() { // 主路径（plan-16 §1.5 + B7）：账号 + 自动生成的初始密码 → user-add {user,password}
+async function onUserAdd() { // 主路径（plan-16 §1.5 + B7）：账号 + 打开对话框时自动生成的初始密码 → user-add {user,password}
   const user = $('ad-na-user').value.trim();
   if (!NAME_RE.test(user)) return fieldErr('ad-na-user', `账号名「${user}」不合法（须匹配 ^[a-z0-9][a-z0-9-]{0,30}$），请修改后重试`);
-  if (!naGenPw) return fieldErr('ad-na-gen', '请先点「自动生成强密码」生成登录初始密码（发放即生效，仅显示一次）');
   const body = { user, password: naGenPw };
   if ($('ad-na-admin').checked) body.admin = true; // 「同时授予管理员」勾选才携带
   busy($('ad-na-submit'), true, '发放中…');
   try {
     await issueUser(body);
-    naGenPw = ''; // 发放即失效：结果区已接管展示，防止旧密码误发二次
-    $('ad-na-gen-box').classList.add('hidden');
+    naGenPw = randomPassword(); // 本轮密码已在结果区一次性展示；就地补生成，同一对话框连续发放不复用旧密码
   } catch (e) { apiFail('发放新账号', e); }
   busy($('ad-na-submit'), false);
 }
@@ -2012,8 +1973,7 @@ async function refreshAdminStatus() { // 平台状态面板：服务状态灯 / 
         <thead><tr><th>timer</th><th>下次触发</th></tr></thead><tbody>${timers.length ? timers.map((t) =>
           `<tr><td class="mono">${esc(t.timer ?? t.name ?? '')}</td><td class="mono">${esc(t.next ?? t.next_elapse ?? '—')}</td></tr>`).join('')
           : '<tr><td colspan="2" class="note">（无定时器）</td></tr>'}</tbody></table></div>`;
-    $('ad-st-fb').textContent = `已刷新（${new Date().toLocaleTimeString([], { hour12: false })}）`;
-  } catch (e) { el.textContent = ''; apiFail('平台状态加载', e); }
+  } catch (e) { el.textContent = ''; apiFail('平台状态加载', e); } // 自动刷新：成功不播报（面板即状态），失败走顶部条
 }
 
 // ================ §15 主机编排（期望状态 / 两段式变更 / Redis 扩容流；仅管理员） ================
@@ -2026,7 +1986,7 @@ const KIND_CN = {
 };
 const kindCn = (k) => KIND_CN[k] || k || '动作';
 let hostState = null, hostImpact = null; // 最近一次 GET /_api/admin/host 与预演 impact
-/** 拉取期望状态并渲染（进入管理页 / 手动刷新 / 执行后收敛核对共用）。 */
+/** 拉取期望状态并渲染（进入管理页 / 30s 定时 / 执行后收敛核对共用）。 */
 async function refreshHost() {
   // 新一轮加载先收起上一轮预演/报告（避免陈旧清单误导编辑）
   $('hs-review').classList.add('hidden');
@@ -2041,16 +2001,12 @@ async function refreshHost() {
     $('hs-fb').textContent = `已刷新（${new Date().toLocaleTimeString([], { hour12: false })}）`;
   } catch (e) { $('hs-fb').textContent = ''; apiFail('主机期望状态加载', e); }
 }
-/** 期望状态渲染：中间件开关/徽标、host.env 其余键通用键值（含 FRP，不特判）、参数当前值、漂移黄条、池两态。 */
+/** 期望状态渲染：中间件开关勾选态、host.env 其余键通用键值（含 FRP，不特判）、参数当前值、漂移黄条、池两态。 */
 function renderHostState(j) {
   const he = j.host_env || {};
   const mw = new Set(Array.isArray(he.MIDDLEWARE) ? he.MIDDLEWARE : String(he.MIDDLEWARE ?? '').split(/\s+/).filter(Boolean));
-  for (const n of MW_NAMES) { // 中间件集合：开关 + 启用徽标（仅启用的显示徽标）
-    const on = mw.has(n);
-    $(`hs-mw-${n}`).checked = on;
-    const badge = $(`hs-mw-${n}-badge`);
-    badge.textContent = '已启用';
-    badge.classList.toggle('hidden', !on);
+  for (const n of MW_NAMES) { // 中间件集合：开关勾选态即启用态（「已启用」徽标已删——与勾选同源重复）
+    $(`hs-mw-${n}`).checked = mw.has(n);
   }
   const kv = Object.entries(he).filter(([k]) => k !== 'MIDDLEWARE');
   $('hs-kv-tbl').querySelector('tbody').innerHTML = kv.length ? kv.map(([k, v]) =>
@@ -2099,7 +2055,7 @@ function hostPostBody(confirm) {
 }
 /** 两段式第一步「查看变更」：confirm=false 写盘前预演，服务端返回 actions+impact（人读行）；不落盘。 */
 async function onHostApply() {
-  if (!hostState) return showMsg('期望状态尚未加载，请先点「刷新期望状态」');
+  if (!hostState) return showMsg('期望状态尚未加载（自动加载失败或仍在进行），请稍后重试');
   busy($('hs-apply'), true, '预演中…');
   $('hs-fb').textContent = '正在生成变更清单（写盘前预演，未执行）…';
   try {
@@ -2202,7 +2158,7 @@ function wireProjTab() {
   $('proj-tbl').addEventListener('click', onProjAction);
   $('img-list').addEventListener('click', onImageRm);                       // §14.3：镜像清单行删除（事件委托）
   $('pub-form').addEventListener('submit', onDeploy); // 单表单提交：tar→压缩+上传+发布 / 镜像库→直接发布（plan-17 §5）
-  $('btn-upload-only').addEventListener('click', onUploadOnly); // 次要按钮「仅上传」：同一 tar，只入库不部署
+  $('btn-upload-only').addEventListener('click', onUploadOnly); // 次要按钮「仅上传」：同一 tar，只入库不发布
   for (const r of ['tar', 'registry']) $(`pub-src-${r}`).addEventListener('change', () => pickPubSource(r));
   $('dep-image').addEventListener('input', onImagePick);
   for (const id of ['pub-project', 'pub-tag', 'pub-file']) $(id).addEventListener('input', () => fieldErr(id, ''));
@@ -2221,7 +2177,6 @@ function wireProjTab() {
   });
   $('dp-copy').addEventListener('click', () => copyText($('dp-url').textContent, '访问地址'));
   $('btn-resume').addEventListener('click', onResumeUpload);
-  $('pub-shuffle').addEventListener('click', () => { $('pub-project').value = randomProject(); updatePubUrl(); });
   $('pub-project').addEventListener('input', updatePubUrl);
   refreshUpIds();
 }
@@ -2239,10 +2194,10 @@ async function ensureImages(force = false) {
     dataMark('images');
     const adminView = j.admin_view ?? state.admin; // 服务端标注优先，回退 whoami 结论
     $('img-scope').textContent = adminView ? '管理员视图' : ''; // B4：页标题旁徽章（取代副题文字前缀）
-    $('img-sub').textContent = `已加载 ${images.length} 项 · ${new Date().toLocaleTimeString([], { hour12: false })}`; // 副题可点重取
+    $('img-sub').textContent = ''; // 成功不写「已加载 N 项」计数（清单即数据；自动刷新兜底，无手动重取入口）
     $('dep-images-fb').textContent = '';
   } catch (e) {
-    $('dep-images-fb').textContent = '镜像清单加载失败，可切到镜像库页点副题重试';
+    $('dep-images-fb').textContent = '镜像清单加载失败，可切到镜像库页查看';
     $('img-sub').textContent = '加载失败（将自动重试）'; // 自动刷新兜底，无手动重试入口
     retryOnce('images', () => ensureImages(true)); // §3：3s 自动重试 1 次
   }
@@ -2263,7 +2218,7 @@ async function onImageRm(ev) {
   btn.disabled = true;
   try {
     const j = await api('POST', '/_api/image-rm', { image });
-    alert(`已回收约 ${Number(j.freed_est_mb ?? 0)} MB`);
+    showMsg(`已回收约 ${Number(j.freed_est_mb ?? 0)} MB`, 'ok'); // 原 alert 改顶部条（统一反馈通道）
     dataInvalidate('images', 'space'); // plan-17 §3：写操作强制失效
     ensureImages(true); // 清单重取：被删 tag 即刻消失
     refreshSpace(true);     // 空间数字同步刷新
@@ -2341,12 +2296,12 @@ async function refreshProjects(force = false) {
     state.projects = j.projects || [];
     renderProjects();
     dataMark('projects');
-    $('proj-fb').textContent = `已加载 ${state.projects.length} 项 · ${new Date().toLocaleTimeString([], { hour12: false })}`; // 副题可点重取
+    $('proj-fb').textContent = ''; // 成功不写「已加载 N 项」计数（表格即数据）；本区保留操作反馈用途（启动/停止结果等）
     fillDbTargets();
   } catch (e) {
     // §3 失败表现：表格内联「加载失败 + 重试」（顶部条不打扰）+ 3s 自动重试 1 次
     if (tb) tb.innerHTML = `<tr><td colspan="7" class="note">加载失败 · ${esc(errText(e))}　<button type="button" class="act" data-act="retry-projects">重试</button></td></tr>`;
-    $('proj-fb').textContent = `加载失败 · ${new Date().toLocaleTimeString([], { hour12: false })}`;
+    $('proj-fb').textContent = '加载失败（将自动重试）';
     retryOnce('projects', () => refreshProjects(true));
   }
 }
@@ -2354,7 +2309,7 @@ function renderProjects() {
   const tb = $('proj-tbl').querySelector('tbody');
   // B4 管理员视图标注兑现：管理员且列表含非本人条目 → 页标题旁徽章（与数据页 #rd-scope 同款）
   $('proj-scope').textContent = ((state.admin || state.boundAdmin) && state.projects.some((p) => p.user && p.user !== state.user)) ? '管理员视图' : '';
-  if (!state.projects.length) { tb.innerHTML = '<tr><td colspan="7" class="note">暂无展项——点顶栏「+ 发布」发布新 Demo（选「本地 tar 文件」或「镜像库」源均可）。</td></tr>'; }
+  if (!state.projects.length) { tb.innerHTML = '<tr><td colspan="7" class="note">暂无展项——点顶栏「+ 发布」发布新展项（选「本地 tar 文件」或「镜像库」源均可）。</td></tr>'; }
   else {
     const acts = state.projects.map((p) => {
       const q = esc(p.project);
@@ -2436,8 +2391,8 @@ async function onProjAction(ev) {
   const ACT_BUSY_CN = { start: '启动中…', stop: '停止中…', rollback: '回滚中…', rm: '删除中…' }[act];
   if (ACT_BUSY_CN) busy(btn, true, ACT_BUSY_CN); else btn.disabled = true;
   try {
-    const j = await api('POST', `/_api/${act}`, { project });
-    $('proj-fb').textContent = `已${ACT_CN[act]} ${project}${j.url ? `，访问地址 ${externalUrl({ project })}` : ''}`;
+    await api('POST', `/_api/${act}`, { project });
+    $('proj-fb').textContent = `已${ACT_CN[act]} ${project}`; // 访问地址表格 URL 列已有，不重复播报
     refreshProjects(true); // 写操作强制失效（plan-17 §3）
   } catch (e) { apiFail(`${ACT_CN[act]} ${project}`, e); }
   finally { if (ACT_BUSY_CN) busy(btn, false); else btn.disabled = false; }
@@ -2448,7 +2403,7 @@ function checkProj(project) {
   if (!PROJ_RE.test(project) || RESERVED.has(project)) return `项目「${project}」不合法（须匹配 ^[a-zA-Z0-9][a-zA-Z0-9-]{0,30}$，保留名：${[...RESERVED].join(' ')}）`;
   return null;
 }
-// —— §12.1/§13.1 一键部署与仅上传（同一状态条）：①压缩 → ②分片上传 →（部署）③发布 → ④完成 ——
+// —— §12.1/§13.1 一键发布与仅上传（同一状态条）：①压缩 → ②分片上传 → ③发布 → ④完成 ——
 const deploy = { busy: false, intent: 'deploy', file: null, blob: null, project: '', tag: '', uploadId: null, failAt: null };
 const PHASE_CN = { compress: '压缩', upload: '上传', publish: '发布' };
 function dpSet(i, cls) { // cls：'on' 进行中 / 'done' 完成 / 'err' 失败 / 'skip' 跳过
@@ -2514,7 +2469,6 @@ async function deployRun(mode) {
       if (deploy.intent === 'upload') { // 入口二「仅上传」：到②即完成，不发布（③④ 跳过）
         dpSet(3, 'skip'); dpSet(4, 'skip');
         dpText('② 完成：镜像已入库。可稍后到本页选「镜像库」源发布。');
-        showMsg(`仅上传完成：镜像 ${project}:${tag} 已入库，可稍后到「发布」页选「镜像库」源发布。`, 'ok');
         deploy.failAt = null;
         ensureImages(true); // 清单立刻补上新镜像
         return;
@@ -2529,17 +2483,15 @@ async function deployRun(mode) {
     const body = { project, tag, container_port: parseInt($('pub-cport').value, 10) || 8080 };
     const memv = memFromUi($('pub-mem').value); // C4：裸数字按 MiB 提交（补 m 后缀，服务端字节语义不变）
     if (memv) body.mem = memv;
-    const j = await api('POST', '/_api/publish', body);
+    await api('POST', '/_api/publish', body);
     try { localStorage.setItem('sr.conf.' + project, JSON.stringify({ tag, cport: parseInt($('pub-cport').value, 10) || 8080, ts: Date.now() })); } catch { /* 存储不可写忽略 */ } // plan-17 §5：下次发布/「更新」预填
     markPublishDone(project); // 「重建中」60s 滚动窗口（§4）
-    dpSet(3, 'done'); dpSet(4, 'done'); // ④ 完成：大字 URL + 复制
-    const url = j.url || `/${project}/`;
-    dpText('④ 完成：部署成功。');
+    dpSet(3, 'done'); dpSet(4, 'done'); // ④ 完成：大字 URL + 复制（发布结果以此处为唯一播报，不再另发顶部条）
     const eurl = externalUrl({ project }); // plan-17 §6：完成大字 URL 一律 externalUrl
+    dpText('④ 完成：发布成功。');
     $('dp-url').textContent = eurl;
     $('dp-url').setAttribute?.('href', eurl);
     $('dp-done').classList.remove('hidden');
-    showMsg(`一键部署成功，访问地址：${eurl}`, 'ok');
     refreshProjects(true);
     deploy.failAt = null;
   } catch (e) {
@@ -2549,9 +2501,9 @@ async function deployRun(mode) {
     dpSet(phase === 'compress' ? 1 : phase === 'upload' ? 2 : 3, 'err');
     dpText(`「${PHASE_CN[phase]}」步骤失败：${errText(e)}${phase === 'upload' && deploy.uploadId ? '；点「重试」将从断点续传（保留已传分片）。' : '；可点「重试」再次执行。'}`);
     $('dp-retry').classList.remove('hidden');
-    apiFail(`一键部署（${PHASE_CN[phase]}）`, e);
+    apiFail(`一键发布（${PHASE_CN[phase]}）`, e);
     if (phase === 'compress') deploy.blob = null;
-  } finally { deploy.busy = false; upBusy = false; deploy.phase = null; deploy.upPct = null; renderProjects(); }
+  } finally { deploy.busy = false; upBusy = false; deploy.phase = null; renderProjects(); }
 }
 /** 校验并填充公共发布参数（项目留空自动生成回填；标签必填）；返回 null=校验未过。 */
 function collectPubFields(requireFile) {
@@ -2567,19 +2519,18 @@ function collectPubFields(requireFile) {
   if (badP) { fieldErr('pub-project', badP); return null; }
   if (!tag || /\s|\//.test(tag)) { fieldErr('pub-tag', `镜像标签「${tag}」不合法（非空、无空白/斜杠），请填写后再试`); return null; }
   const file = ($('pub-file').files || [])[0] || null;
-  if (requireFile && !file) { fieldErr('pub-file', '「仅上传」需要选择镜像 tar 文件（不选文件的直发请用「一键部署」，选已有镜像请用「部署」表单）'); return null; }
+  if (requireFile && !file) { fieldErr('pub-file', '「仅上传」需要选择镜像 tar 文件（不选文件的直发请用「一键发布」，已有镜像请改选「镜像库」源）'); return null; }
   return { project, tag, file };
 }
-/** 两入口共用：请求期间互斥禁用对方按钮（各自显示「部署中…/上传中…」）。 */
+/** 两入口共用：请求期间互斥禁用对方按钮（各自显示「发布中…/上传中…」）。 */
 function pubBtnsBusy(on) {
-  busy($('pub-submit'), on, '部署中…');
+  busy($('pub-submit'), on, '发布中…');
   busy($('btn-upload-only'), on, '上传中…');
-  $('pub-shuffle').disabled = on;
 }
-/** 入口一「一键部署」：tar→压缩→上传→立即发布（快捷路径）。 */
+/** 入口一「一键发布」：tar→压缩→上传→立即发布（快捷路径）。 */
 async function onDeploy(ev) {
   ev.preventDefault();
-  if (deploy.busy || upBusy) return showMsg('已有部署或上传进行中，请等待完成');
+  if (deploy.busy || upBusy) return showMsg('已有发布或上传进行中，请等待完成');
   clearErrs('pub-project', 'pub-tag', 'pub-file', 'dep-image');
   let file = null;
   if (pubSrc() === 'registry') { // 镜像库源：①②跳过直接发布；镜像必须已选（选中即带出项目/标签）
@@ -2600,9 +2551,9 @@ async function onDeploy(ev) {
   await deployRun('fresh');
   pubBtnsBusy(false);
 }
-/** 次要按钮「仅上传」（§13.1）：同一 tar 选择，只压缩上传入库，不部署。 */
+/** 次要按钮「仅上传」（§13.1）：同一 tar 选择，只压缩上传入库，不发布。 */
 async function onUploadOnly() {
-  if (deploy.busy || upBusy) return showMsg('已有部署或上传进行中，请等待完成');
+  if (deploy.busy || upBusy) return showMsg('已有发布或上传进行中，请等待完成');
   if (pubSrc() !== 'tar') return showMsg('「仅上传」用于本地 tar 文件：请先选回「本地 tar 文件」镜像源');
   clearErrs('pub-project', 'pub-tag', 'pub-file');
   const f = collectPubFields(true);
@@ -2621,10 +2572,9 @@ async function onUploadOnly() {
 function dpUploadNote(sent, total) {
   upProgress(sent, total);
   $('dp-prog').max = total; $('dp-prog').value = sent;
-  deploy.upPct = total ? Math.floor((sent / total) * 100) : 0; // 行内「上传中 x%」
   dpText(`② 上传中：已传 ${sent} / 压缩后总长 ${total} 字节（${total ? ((sent / total) * 100).toFixed(1) : '0'}%）`);
 }
-/** 全新上传（一键部署②段）：import-begin → 本地会话登记 → 逐片加密上传 → 收尾。 */
+/** 全新上传（一键发布②段）：import-begin → 本地会话登记 → 逐片加密上传 → 收尾。 */
 async function deployUpload(project, tag) {
   const pem = platformPem();
   if (!pem.startsWith('-----BEGIN PUBLIC KEY-----')) throw { error: 'E_STATE', msg: '请先在「设置」中配置平台公钥 PEM（管理员分发的 platform_rsa.pub；whoami 自动带回后无需手工粘贴）' };
@@ -2781,7 +2731,7 @@ async function uploadRest(uploadId, sid, blob, startSeq, sent0, total, note) {
   refreshUpIds();
   dataInvalidate('space'); refreshSpace(true); // §14.1：import-end 成功后刷新空间条
 }
-/** 断点续传核心（手动「恢复」与一键部署重试共用，§8.1）：查已收分片 → 重新压缩重建产物
+/** 断点续传核心（手动「恢复上传」与一键发布重试共用，§8.1）：查已收分片 → 重新压缩重建产物
  *  （压缩确定性 ⇒ 信封逐字节一致）→ 重放已收分片推进加密会话 → 补传剩余 → import-end 收尾。
  *  opts：compNote 压缩进度 / onRec(rec) 已收片数提示 / upNote 上传进度。返回 { pre, zsize }。 */
 async function resumeUploadCore(id, opts = {}) {
@@ -2829,7 +2779,7 @@ async function resumeUploadCore(id, opts = {}) {
   return { pre, zsize: zb.size };
 }
 async function onResumeUpload() {
-  if (upBusy || deploy.busy) return showMsg('已有上传或部署进行中');
+  if (upBusy || deploy.busy) return showMsg('已有上传或发布进行中');
   const id = $('up-id').value.trim();
   if (!id) return showMsg('请填入要恢复的续传编号（开始上传后自动记录）');
   if (!localStorage.getItem('sr.up.' + id)) return showMsg('本地无该会话记录（浏览器数据被清则无法续传，请重新上传）');
@@ -2841,7 +2791,7 @@ async function onResumeUpload() {
       compNote: (done, raw) => { $('up-status').textContent = `重新压缩中 ${done} / ${raw} 字节（恢复续传需先重建压缩产物）…`; },
     });
     $('up-status').textContent = '恢复完成：镜像导入完成。';
-    $('proj-fb').textContent = `镜像续传完成（${r.pre ? '原文已是 zstd' : `压缩后 ${r.zsize} 字节`}），可在上方「一键部署」直接发布。`;
+    $('proj-fb').textContent = `镜像续传完成（${r.pre ? '原文已是 zstd' : `压缩后 ${r.zsize} 字节`}），可到发布页用「一键发布」直接发布。`;
   } catch (e) {
     apiFail('恢复上传', e);
     $('up-status').textContent = `恢复中断：${errText(e)}`;
@@ -2882,7 +2832,7 @@ async function onDbTables() {
     const j = await api('GET', `/_api/db-tables?project=${encodeURIComponent(t.project)}`);
     const tables = j.tables || [];
     $('dl-tables').innerHTML = tables.map((n) => `<option value="${esc(n)}">`).join('');
-    $('db-tbl-fb').textContent = `共 ${tables.length} 张表`;
+    $('db-tbl-fb').textContent = ''; // 成功不写「共 N 张表」计数（db-out 保留原文输出）
     dbOut(j.out || `\\dt：共 ${tables.length} 张表`);
   } catch (e) { $('db-tbl-fb').textContent = ''; apiFail('表清单获取', e); }
 }
@@ -3098,7 +3048,7 @@ async function onDbReset() {
 // ================ 标签页 3：状态监控 ================
 // —— §10.4 日志实时流：ndjson 追加渲染 + 1000 行环形 + 断开 5 秒重连 ——
 const LOGS_MAX = 1000;
-const logsLive = { ac: null, timer: null, project: null, lines: [], want: true }; // want 与 HTML 默认 checked 一致
+const logsLive = { ac: null, timer: null, project: null, lines: [], want: true }; // want 恒 true（跟随开关 UI 已删：抽屉展开即实时跟随）
 const tsCn = (t) => Number.isFinite(t)
   ? new Date(t).toLocaleTimeString('zh-CN', { hour12: false }) : '--:--:--';
 function logsRender() {
@@ -3109,10 +3059,9 @@ function logsAppend(t, l) {
   if (logsLive.lines.length > LOGS_MAX) logsLive.lines.splice(0, logsLive.lines.length - LOGS_MAX); // 超帽丢头部
   logsRender();
 }
-function stopLogsStream(fbText) {
+function stopLogsStream() {
   clearTimeout(logsLive.timer); logsLive.timer = null;
-  if (logsLive.ac) { logsLive.ac.abort(); logsLive.ac = null; } // 开关关闭 → AbortController 停流
-  if (fbText) $('st-logs-fb').textContent = fbText;
+  if (logsLive.ac) { logsLive.ac.abort(); logsLive.ac = null; } // 断流即停（回执由连接状态就地更新，无「已收起」类播报）
 }
 async function startLogsStream() {
   if (!logsLive.want || !logsLive.project || logsLive.ac) return;
@@ -3138,10 +3087,8 @@ function pickLogs(project) {
   logsLive.project = project;
   logsLive.lines = [];
   logsRender();
-  $('st-logs-target').textContent = project;
   stopLogsStream();
-  if (logsLive.want) startLogsStream();
-  else $('st-logs-fb').textContent = '未跟随';
+  startLogsStream(); // want 恒 true（跟随开关已删，无「未跟随」分支）
 }
 
 // —— §10.4 平台事件流：sr- 前缀过滤 + 最近 20 条滚动 + 心跳忽略 + 健康列表去抖刷新 ——
@@ -3200,15 +3147,9 @@ drawerRow.dataset.drawer = ''; // 展开时=所属项目（无全局行 id；st-
 drawerRow.innerHTML = `<td colspan="7">
   <div class="row">
     <button type="button" id="drawer-close" class="act">收起</button>
-    <span class="note">当前：<span class="mono" id="st-logs-target">（未选择）</span></span>
     <span class="fb warn" id="st-logs-fb" aria-live="polite"></span>
   </div>
   <pre class="out mono" id="st-logs" aria-live="polite">（未选择展项）</pre>
-  <div class="row">
-    <button type="button" class="act" data-act="env" data-p="">环境变量</button>
-    <button type="button" class="act" data-act="dblink" data-p="">数据</button>
-    <button type="button" class="act" data-act="rollback" data-p="">回滚到上一版本</button>
-  </div>
 </td>`;
 function openDrawer(project) {
   closeDrawer();
@@ -3217,13 +3158,12 @@ function openDrawer(project) {
   if (row && row.after) row.after(drawerRow); else $('proj-tbl').querySelector('tbody')?.append?.(drawerRow);
   drawerRow.hidden = false;
   drawerRow.dataset.drawer = project;
-  for (const b of drawerRow.querySelectorAll ? drawerRow.querySelectorAll('button[data-act]') : []) b.dataset.p = project; // 抽屉快捷动作绑定当前项目
   pickLogs(project);
 }
-function closeDrawer(fbText) {
+function closeDrawer() {
   drawerRow.hidden = true; // 收起=隐藏挂回 tbody（元素常驻文档，st-logs* 始终可寻址）
   drawerRow.dataset.drawer = '';
-  if (logsLive.project) stopLogsStream(fbText || '已收起抽屉，停止实时跟随'); // 收起即断（§3）
+  if (logsLive.project) stopLogsStream(); // 收起即断（§3）
   logsLive.project = null;
 }
 
@@ -3258,7 +3198,7 @@ async function refreshRedisKeys() {
     $('rd-keys').innerHTML = keys.length
       ? keys.map((k) => `<option value="${esc(k)}">${esc(k)}</option>`).join('')
       : '<option value="">（无匹配键）</option>';
-    $('rd-count').textContent = `共 ${keys.length} 个键（可能截断）`;
+    $('rd-count').textContent = `共 ${keys.length} 个键`; // 「可能截断」只在上方静态说明保留一次
     $('rd-meta').textContent = '（点击左侧键查看类型 / 剩余生存时间 / 值）';
     $('rd-val').textContent = '（未选择键）';
   } catch (e) {

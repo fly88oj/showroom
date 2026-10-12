@@ -7,7 +7,7 @@
 //      login-begin/finish → key-bind（SR-SIG1 候选钥匙签名 + X-Sr-Bind 一次性令牌）→ 进入管理壳；
 //      全部上线请求体无密码明文（OPAQUE 形状级断言，mock 垫片下）
 //   2) 同浏览器再访（钥匙+账号记忆）→ 签名自测直达（零 auth 请求）；§12.2 管理员态；
-//      退出登录不删 seed → 「免密码进入」重进
+//      退出登录=清本机密钥+远程吊销（B2：无密可免，登录卡只引导密码重登）
 //   3) E_AUTH 回落（钥匙被删/GC）→ 密码表单 + 失效提示 → 密码重绑（同钥匙幂等）→ 进入
 //   4) 失败两态之二：服务端 404 E_AUTH（限流/拒绝文案，无后续请求）；未知用户 login-begin
 //      仍 200 且与错密码同文案（防枚举）；换账号密码登录（沿用本机钥匙 + admin 继承显式提示）；
@@ -16,21 +16,21 @@
 //      sr.seed/sr.user → 无感层即刻重生成新候选钥匙 → 干净登录卡
 //   6) 专家路径（钥匙登录折叠）：本机已有默认选中（指纹=公钥载荷前 8 位）/ 导入种子
 //      （非法 seed 字段内联拒绝；合法导入）→ E_AUTH 公钥展示与重检循环 → 登记后进入
-//   7) §11 去版本字段：发布表单随机 8 位项目名 +「换一个」+ URL 恒 /<project>/
+//   7) §11 去版本字段：发布表单随机 8 位项目名预填（留空提交自动生成兜底）+ URL 恒 /<project>/
 //   8) §10.4 流式消费：日志实时流（ndjson 行缓冲/1000 行帽/时间戳/开关停流）、
 //      平台事件流（sr- 过滤/心跳忽略/20 条滚动/2s 去抖刷新/断线 5 秒重连）、
 //      三段式备份下载（begin → status 两轮轮询 → 两个 4MB chunk → wasm 流式解密 → Blob 落地）
 //   9) 上传压缩统一（zstd）：发布表单选普通镜像 tar → 自动 zstd-19 压缩 → import-begin
 //      的 total_bytes 按压缩后长度申报（与独立 wasm 实例同粒度重压缩逐字节对账）；
 //      恢复上传魔数两态（已是 zstd 原样 / 原生 -Fc 压缩后），信封长度按对应载荷核算
-//  10) §12.1 一键部署：状态条①压缩（x%）→②上传（已传/压缩后总长）→③发布→④完成（大字 URL）
+//  10) §12.1 一键发布：状态条①压缩（x%）→②上传（已传/压缩后总长）→③发布→④完成（大字 URL）
 //      四段流转；发布失败标红重试（项目留空自动生成回填）；上传失败断点续传重试
 //  11) §12.2 管理员：whoami 两态（admin=false 管理 DOM 不存在 / true 第五标签渲染）、
 //      账号与钥匙表、发卡对话框提交体校验（registry 密码仅显示一次）、行内管理动作
 //      （key-admin/key-rm/user-revoke + 中文 confirm 文案）、平台状态面板、30s 自动刷新、
 //      admin 接口 404 E_AUTH 顶部条报错、whoami 失败顶部条报错
-//  11b) plan-16 §1.5 发卡收口：主路径「自动生成强密码」（crypto 随机 16 位，展示+复制）→
-//      user-add {user,password}（无 pubkey）→ 结果两行一次性密码（登录初始+registry）；
+//  11b) plan-16 §1.5 发卡收口：主路径=打开对话框即客户端生成并暂存登录初始密码（crypto 随机 16 位，
+//      不展示）→ user-add {user,password}（无 pubkey）→ 结果两行一次性密码（登录初始+registry）；
 //      公钥直登记收进折叠专家路径（{user,pubkey}，结果仅 registry 行+kid）；「同时授予管理员」
 //      勾选带 admin:true；账号表 has_password 徽标（已设/未设）+ 行内「补发密码」
 //      （confirm → passwd-set {user,password} → 新密码一次性展示对话框 → 徽标翻转）
@@ -38,7 +38,7 @@
 //      字段校验（空/不一致/与当前相同）→ 当前密码校验复用 login-begin+本地 finish（错即内联拒绝，
 //      不触达 pw-begin）→ pw-begin {user,m1}（SR-SIG1 签名）→ pw-commit {user,record} → 旧密码
 //      失效/新密码可登录（toy 服务端记录替换）→ 成功提示重新登录并退出会话
-//  12) §13 发布三入口并存：一键部署 / 仅上传（无 publish 调用，③④ skip，镜像已入库提示）/
+//  12) §13 发布三入口并存：一键发布 / 仅上传（无 publish 调用，③④ skip，镜像已入库提示）/
 //      部署表单（/_api/images 惰性加载+刷新+选择自动带出项目标签+发布）；
 //      §13.2 Redis 浏览用户隔离文案 + 管理员视图标注（whoami 两态）
 //  13) 静态断言：「内存上限」「槽位/slot」零残留 / 旧三步向导主路径零残留 /
@@ -47,10 +47,10 @@
 //      占位符 … 结尾/tablist 语义/reduced-motion/overscroll/touch-action/tabular-nums/theme-color）
 //  14) §14 磁盘空间与镜像删除：上传区空间条（/_api/space 常显「可用空间（已扣预留）」一位小数 /
 //      手动刷新 / 拉取失败静默「空间信息不可用」/ import-end 成功后自动刷新）、
-//      镜像清单每行删除（confirm 含镜像名与回滚失效语义 → image-rm 提交体 → alert 回收量 →
+//      镜像清单每行删除（confirm 含镜像名与回滚失效语义 → image-rm 提交体 → 顶部条回收量 →
 //      清单+空间条刷新；confirm 取消不提交；失败走顶部条）、
 //      磁盘 E_QUOTA 顶部条追加删除引导并刷新空间条（内存类 E_QUOTA 不追加）
-//  15) §15 主机编排：期望状态渲染（中间件开关+「已启用」徽标 / host.env 其余键通用键值渲染
+//  15) §15 主机编排：期望状态渲染（中间件开关勾选态 / host.env 其余键通用键值渲染
 //      含 FRP 不特判 / 四参数当前值回填 / 漂移黄条 warn-err 两档）、两段式（无 confirm 仅预演
 //      返回 actions+impact 人读行不落盘；confirm=true 才 POST 执行并渲染报告；禁用中间件
 //      impact 含受影响项目 → 红色警示 + 二次 confirm 取消不提交）、Redis 池黄条两态
@@ -105,10 +105,9 @@ const tabBtn = (name) => ({ dataset: { tab: name }, classList: new Cls(), closes
 const clickTab = (name) => fire($s('tabs'), 'click', { target: tabBtn(name) });
 /** tabs 方向键支持：querySelectorAll 桩返回按钮序列（与页面 #tabs 初始顺序一致）。 */
 const armTabs = () => { $s('tabs').querySelectorAll = () => ['proj', 'pub', 'img', 'db', 'help'].map(tabBtn); }; // plan-17 §1 五标签
-/** 与真实登录 HTML 的初始 class 对齐（惰性元素桩无 class 信息；断言「初始不可见」前先打桩）。 */
-const armLoginInit = () => {
-  for (const id of ['lg-reenter']) $s(id).classList.add('hidden'); // B5/B6 后登录卡仅剩「免密码进入」隐藏桩
-};
+/** 与真实登录 HTML 的初始 class 对齐（惰性元素桩无 class 信息；断言「初始不可见」前先打桩）。
+ *  B5/B6 后登录卡无隐藏按钮，此桩已空（保留调用点便于将来再引入初始 hidden 元素）。 */
+const armLoginInit = () => {};
 /** 模拟浏览器渲染 HTML：给关键按钮桩设置初始文案（busy 恢复断言按真实文字比对）。 */
 const BTN_TEXT = {
   'lg-submit': '登录',
@@ -214,9 +213,7 @@ function sealFor(pubPem, plain) {
 const confirmMsgs = [];
 let confirmRet = true;
 globalThis.confirm = (m) => { confirmMsgs.push(String(m)); return confirmRet; };
-// —— alert 垫片：仅记录文案（§14.3 删除成功「已回收约 N MB」断言用） ——
-const alertMsgs = [];
-globalThis.alert = (m) => { alertMsgs.push(String(m)); };
+// 原原生 alert() 已改 showMsg（IA 审计 39）：页面不再调用 alert，无需垫片
 
 // —— 独立 zstd 压缩（与页面同 wasm 字节的另一实例）：对账页面 compressToBlob 的产物 ——
 function zstdAll(chunks) {
@@ -278,7 +275,7 @@ let dumpEnv = null; // { env: 信封字节 }
 let importBeginBody = null, importEndN = 0, publishN = 0, uploadRec = null;
 const importChunkLens = [];
 const restoreLens = [];
-// 场景 8/9 捕获（§12）：whoami 两态 / 管理接口 / 一键部署状态条快照 / 失败重试
+// 场景 8/9 捕获（§12）：whoami 两态 / 管理接口 / 一键发布状态条快照 / 失败重试
 let whoamiAdmin = false, whoamiFail = false, adminFail404 = false;
 let adminUsersN = 0, adminStatusN = 0, importStatusN = 0, publishAttempts = 0;
 let userAddBody = null, lastPublishBody = null, publishFailOnce = false, chunkFailN = 0;
@@ -588,7 +585,7 @@ els.clear();
 await load(1);
 armTabs(); // tabs 方向键桩
 armBtnText(); // 按钮初始文案（busy 恢复断言用）
-armLoginInit(); // 登录卡初始 hidden 桩（对齐真实 HTML）
+armLoginInit(); // 登录卡初始 hidden 桩（对齐真实 HTML；现无隐藏按钮，空操作）
 await sleep(40);
 ok(shown('login') && !els.has('hd-user'), '登录前：只有登录卡（一步「账号+密码」），管理壳未构建（零管理信息）');
 const seed1 = store.get('sr.seed');
@@ -602,7 +599,7 @@ ok(($s('msg').textContent || '') === '', '无感断言：密钥生成零提示�
   ok(!leaked, '无感断言：任何 DOM 文本不含 seed 十六进制与公钥串');
 }
 ok(els.has('lg-user') && els.has('lg-pass'), '一步登录表单：账号 + 密码两个输入');
-ok(hidden('lg-reenter'), '无记忆账号：「免密码进入」不出现（B5 后设备清除入口不存在）');
+ok(!els.has('lg-reenter'), '无第三态入口：「免密码进入」按钮已删（两态铁律：登录态=控制台 / 未登录=密码表单）');
 // —— 失败态一（本地密码错）：两态文案 + 无第三请求 ——
 const ab1 = authBeginN, af1 = authFinishN, kb1 = keyBindBodies.length;
 $s('lg-user').value = 'alice';
@@ -638,7 +635,11 @@ ok(!wireTexts.some((t) => t.includes('alice-pw') || t.includes('wrong-pw')),
   'OPAQUE 断言：全部上线请求体（含 ke1/ke3 与签名体）均无密码明文（mock 垫片形状级验证）');
 ok(!($s('msg').textContent || '').includes('继承管理员'), '非管理员账号：无 admin 继承提示');
 await sleep(60); // 展项列表异步渲染
-ok(($s('proj-fb').textContent || '').includes('已加载 2 项 · '), '展项列表已请求并渲染（副题「已加载 N 项 · HH:MM:SS」）');
+{
+  const ptbl1 = $s('proj-tbl:q').innerHTML || '';
+  ok(ptbl1.includes('>demo<') && ptbl1.includes('>demo0<'), '展项列表已请求并渲染（表格行渲染）');
+}
+ok(($s('proj-fb').textContent || '') === '', '成功不再写「已加载 N 项」计数副题（proj-fb 仅失败/操作反馈用）');
 {
   const ptbl = $s('proj-tbl:q').innerHTML || '';
   ok(ptbl.includes('>●</span> 运行中') && ptbl.includes('>●</span> 待部署'), 'S5：●+文字双通道状态（运行中/待部署）');
@@ -659,7 +660,7 @@ fire($s('rd-q'), 'keydown', { key: 'Enter', preventDefault() {} }); // A1 后：
 await sleep(60);
 ok(($s('rd-db').innerHTML || '').includes('<option value="0">'), 'redis-dbs：填充 DB 下拉');
 ok(($s('rd-keys').innerHTML || '').includes('sr_demo'), 'redis-keys：键列表渲染（前缀过滤请求）');
-ok($s('rd-count').textContent === '共 1 个键（可能截断）', '「共 N 个键（可能截断）」提示（C2：Redis 文案统一「键」）');
+ok($s('rd-count').textContent === '共 1 个键', '「共 N 个键」提示（C2：Redis 文案统一「键」；「可能截断」只留在静态说明）');
 ok(($s('rd-scope').textContent || '') === '', '§13.2 普通用户：DB 下拉无「管理员视图」标注');
 $s('rd-keys').value = 'sr_demo';
 fire($s('rd-keys'), 'change');
@@ -674,11 +675,11 @@ ok(imagesN === 1, '进入管理壳（发布区）：/_api/images 惰性加载一
 ok(($s('dl-images').innerHTML || '').includes('alice/demo:v1') && ($s('dl-images').innerHTML || '').includes('alice/demo2:v2'),
   '镜像清单填充 ComboBox（datalist）');
 ok(!($s('dl-images').innerHTML || '').includes('bob/other'), '普通用户：清单不含他人镜像（服务端按 user 过滤）');
-ok(($s('img-sub').textContent || '').includes('已加载 2 项'), 'S6：镜像库副题「已加载 N 项 · HH:MM:SS」（普通用户无管理员前缀）');
+ok(($s('img-sub').textContent || '') === '', 'S6：镜像库副题成功时保持空（「已加载 N 项」计数删除；清单以下拉 + 表格呈现）');
 // S3：手动「刷新镜像清单」按钮随部署 fieldset 溶解而删除（plan-17 §0-5：显式刷新归零，TTL+写路径失效取代；
 // 强制重取路径由 whoami admin 后 ensureImages(true) 与镜像删除后重取覆盖）
 
-// —— §14.1/§14.3 空间条（上传区常显）+ 镜像清单删除（部署区）——
+// —— §14.1/§14.3 空间条（上传区常显）+ 镜像清单删除（镜像库页）——
 ok(spaceN >= 1, '进入发布区：/_api/space 已拉取（空间条常显）');
 ok(($s('space-note').textContent || '') === '可用空间（已扣预留）：20.0 GB',
   '空间条：显示 available−reserve（40960−20480 MB → 20.0 GB，一位小数）');
@@ -705,7 +706,7 @@ ok(imageRmBodies.length === 1 && imageRmBodies[0].image === 'alice/demo:v1', '�
 const rmConfirm = confirmMsgs.at(-1) || '';
 ok(rmConfirm.includes('确定删除镜像 alice/demo:v1 吗') && rmConfirm.includes('不受影响') && rmConfirm.includes('回滚/重建将失效'),
   '删除镜像：confirm 文案含镜像名与影响说明（容器继续运行、回滚/重建失效）');
-ok((alertMsgs.at(-1) || '').includes('已回收约 512 MB'), '删除成功：alert「已回收约 N MB」');
+ok(($s('msg').textContent || '').includes('已回收约 512 MB'), '删除成功：顶部条「已回收约 N MB」（原 alert 改 showMsg 统一反馈通道）');
 ilist = $s('img-list:q').innerHTML || '';
 ok(!ilist.includes('alice/demo:v1') && ilist.includes('alice/demo2:v2'), '删除成功：清单刷新（该行消失、其余保留）');
 ok(spaceN > spBase, '删除成功后：空间数字同步刷新');
@@ -731,13 +732,13 @@ await sleep(60);
 let qmsg = $s('msg').textContent || '';
 ok(qmsg.includes('E_QUOTA') && qmsg.includes('磁盘空间不足') && qmsg.includes('膨胀因子'),
   '磁盘 E_QUOTA：顶部条含服务端原文（可用/预留/估算需求/膨胀因子）');
-ok(qmsg.includes('可到部署区删除旧镜像后重试'), '磁盘 E_QUOTA：顶部条追加删除引导');
+ok(qmsg.includes('可到镜像库删除旧镜像后重试'), '磁盘 E_QUOTA：顶部条追加删除引导');
 ok(spaceN > spBase, '磁盘 E_QUOTA：触发空间条刷新');
 publishQuota = { msg: '可用内存不足：可用 512 MB（已预留 1536 MB）＜ 需求 2048 MB' };
 fire($s('pub-form'), 'submit', { preventDefault() {} });
 await sleep(60);
 qmsg = $s('msg').textContent || '';
-ok(qmsg.includes('E_QUOTA') && !qmsg.includes('可到部署区删除旧镜像后重试'), '内存类 E_QUOTA：不追加磁盘删除引导');
+ok(qmsg.includes('E_QUOTA') && !qmsg.includes('可到镜像库删除旧镜像后重试'), '内存类 E_QUOTA：不追加磁盘删除引导');
 $s('pub-project').value = pubProjKeep; // 还原（后续场景复用；含 §11 的随机名断言）
 
 // —— tablist 方向键切换（role=tablist 键盘约定） ——
@@ -746,13 +747,11 @@ ok(!hidden('tab-pub') && hidden('tab-proj'), 'ArrowRight：proj → pub 切换�
 fire($s('tabs'), 'keydown', { key: 'ArrowLeft', preventDefault() {}, target: tabBtn('pub') });
 ok(!hidden('tab-proj') && hidden('tab-pub'), 'ArrowLeft：pub → proj 切回（首尾循环）');
 
-// —— §11 发布表单：随机项目名 + 「换一个」 + URL 恒 /<project>/ ——
+// —— §11 发布表单：随机项目名预填（「换一个」已删：建壳预填 + 留空提交自动生成兜底）+ URL 恒 /<project>/ ——
 const rp1 = $s('pub-project').value;
 ok(/^[a-zA-Z0-9]{8}$/.test(rp1), `发布表单预填随机 8 位项目名（${rp1}）`);
-click('pub-shuffle');
-const rp2 = $s('pub-project').value;
-ok(/^[a-zA-Z0-9]{8}$/.test(rp2) && rp2 !== rp1, `「换一个」重新随机（${rp1} → ${rp2}）`);
-ok(($s('pub-url').textContent || '') === `/${rp2}/`, `URL 提示恒 /<项目名>/（当前 /${rp2}/）`);
+ok(!els.has('pub-shuffle'), '「换一个」按钮已删（预填 + 留空自动生成已全覆盖，无手动重随机入口）');
+ok(($s('pub-url').textContent || '') === `/${rp1}/`, `URL 提示恒 /<项目名>/（当前 /${rp1}/）`);
 $s('pub-project').value = 'demo'; // 手输（用户可清空手输的路径）
 fire($s('pub-project'), 'input');
 ok($s('pub-url').textContent === '/demo/', 'URL 提示随手输联动');
@@ -773,9 +772,9 @@ $s('pub-project').value = 'demo'; // 还原
 {
   const rowHtml = $s('proj-tbl:q').innerHTML || '';
   const idx = (t) => rowHtml.indexOf(t);
-  ok(idx('>打开<') >= 0 && idx('>发新版本<') > idx('>打开<') && idx('>日志<') > idx('>发新版本<')
-    && (idx('>停止<') > idx('>日志<') || idx('>启动<') > idx('>日志<')) && idx('更多') > idx('>日志<'),
-    'S4：行操作固定顺序 打开·发新版本·日志·启动/停止·更多▾（§4；视觉QA P2-6「更新」改「发新版本」）');
+  ok(idx('>打开<') >= 0 && idx('>发新版本<') > idx('>打开<')
+    && (idx('>停止<') > idx('>发新版本<') || idx('>启动<') > idx('>发新版本<')) && idx('更多') > idx('>发新版本<'),
+    'S4：行操作固定顺序 打开·发新版本·启动/停止·更多▾（行内「日志」按钮删除，日志经详情列 ▾ 单入口）');
   ok(idx('回滚到上一版本') > idx('更多') && idx('>环境变量<') > idx('回滚') && idx('>数据<') > idx('>环境变量<') && idx('>删除<') > idx('>数据<'),
     'S4：更多▾菜单项序 回滚·环境变量·数据·删除');
   ok(rowHtml.includes('role="menu"') && rowHtml.includes('aria-haspopup'), 'S4：更多菜单 role=menu/aria-haspopup');
@@ -853,8 +852,9 @@ ok(logTxt.includes('log-0003') && !logTxt.includes('log-0002'), '超帽丢弃头
 ok(/^\d{2}:\d{2}:\d{2} log-/m.test(logTxt), '每行带格式化时间戳前缀');
 ok(logsN === 1, '抽屉展开只发起一次日志流（恒跟随，无开关路径）');
 click('drawer-close');
-ok(($s('st-logs-fb').textContent || '').includes('已收起抽屉'), 'S2：收起抽屉 → 日志流随行断开（§3 离页退订）');
-ok(logsN === 1, '收起抽屉后不再发起日志请求');
+ok(!($s('st-logs-fb').textContent || '').includes('已收起抽屉') && !($s('st-logs-fb').textContent || '').includes('未跟随'),
+  'S2：收起抽屉无「已收起/未跟随」类冗余回执（自动行为不播报；want 恒 true 无死分支）');
+ok(logsN === 1, '收起抽屉 → 日志流随行断开（不再发起日志请求）');
 
 // ═══ 场景 6c：§10.4 三段式备份下载（begin → 轮询两轮 → 两个 chunk → 解密落地） ═══
 blobs.length = 0;
@@ -910,14 +910,14 @@ ok(($s('db-out').textContent || '').includes('三段式下载完成'), 'dbOut �
   const plat = generateKeyPairSync('rsa', { modulusLength: 3072 });
   $s('hd-pempub').value = plat.publicKey.export({ type: 'spki', format: 'pem' }).toString();
 
-  // 7a. 一键部署（§12.1）：状态条四段流转——压缩 2 片 → 上传 2 chunk（数据片+收尾片）→ 发布 → 完成
+  // 7a. 一键发布（§12.1）：状态条四段流转——压缩 2 片 → 上传 2 chunk（数据片+收尾片）→ 发布 → 完成
   $s('pub-project').value = 'demo2';
   $s('pub-tag').value = 'v2';
   $s('pub-file').files = [fakeFile(raw, 'demo-img.tar')];
   dpSnaps.length = 0; compSnaps.length = 0; dpBeginSnap = null; dpPublishSnap = null;
   const spaceBase7a = spaceN;
   fire($s('pub-form'), 'submit', { preventDefault() {} });
-  ok(await waitFor(() => publishN === 1, 30000), '一键部署：压缩 → 分片上传 → 发布全链路完成');
+  ok(await waitFor(() => publishN === 1, 30000), '一键发布：压缩 → 分片上传 → 发布全链路完成');
   ok($s('dp-s1').classList.contains('done') && $s('dp-s2').classList.contains('done')
     && $s('dp-s3').classList.contains('done') && $s('dp-s4').classList.contains('done'), '状态条①压缩②上传③发布④完成四段全部置为完成');
   ok(!$s('dp-bar').classList.contains('err') && hidden('dp-retry'), '成功路径：状态条无标红、无重试按钮');
@@ -938,7 +938,7 @@ ok(($s('db-out').textContent || '').includes('三段式下载完成'), 'dbOut �
   ok(/已传 \d+ \/ 压缩后总长/.test(dpSnaps[1].txt) && dpSnaps[1].v > 0, '②上传段文案「已传 / 压缩后总长」且进度推进');
   ok(dpBeginSnap && dpBeginSnap.txt.includes('② 上传中'), 'import-begin 时已切入②上传段');
   ok(dpPublishSnap && dpPublishSnap.txt.includes('③ 发布中'), 'publish 请求时处于③发布中');
-  ok(($s('dp-text').textContent || '').includes('④ 完成'), '最终文案为④完成');
+  ok(($s('dp-text').textContent || '').includes('④ 完成：发布成功'), '最终文案为④完成（发布成功；发布结果仅在状态条播报，顶部条不重复）');
   click('dp-copy');
   ok(($s('msg').textContent || '').includes('已复制'), '④完成段「复制地址」按钮可用（剪贴板降级路径）');
 
@@ -1087,46 +1087,39 @@ ok(stHtml.includes('3.3 GB') && stHtml.includes('42.0 GB') && stHtml.includes('4
 ok(stHtml.includes('sr-demo') && stHtml.includes('sr-hello') && stHtml.includes('已退出'), '容器列表渲染（状态中文化）');
 ok(stHtml.includes('showroom-snapshot-hourly') && stHtml.includes('13:00'), 'timer 下次触发时间展示');
 const adStBase = adminStatusN;
-ok(html.includes('if (!adTimer) adTimer = setInterval(refreshAdminStatus, 30000);')
+ok(html.includes('adTimer = setInterval(() => { refreshAdminStatus(); refreshHost(); }, 30000);')
   && html.includes("case 'admin': await loadAdminUsers(); await refreshAdminStatus(); break;"),
-  'R4：状态面板 30 秒自动刷新恒开（随管理页构建启动，无开关 UI；全局 30s 轮询亦覆盖管理页数据）');
+  'R4：状态面板与主机期望状态 30 秒自动刷新恒开（无开关 UI；#hs-refresh 手动刷新按钮已删，host 刷新并入定时器）');
 await sleep(60);
 ok(adminStatusN === adStBase, '无开关可触发额外刷新（勾选框 UI 已删）');
 
-// —— 发卡对话框（plan-16 §1.5 主路径）：账号 + 自动生成强密码 → user-add {user,password} ——
+// —— 发卡对话框（plan-16 §1.5 主路径）：账号 + 打开时自动生成并暂存的初始密码 → user-add {user,password} ——
 click('ad-user-add');
-ok($s('dlg-user-add').open === true, '发卡对话框打开');
+ok($s('dlg-user-add').open === true, '发卡对话框打开（打开即客户端生成并暂存初始密码，不展示）');
 click('ad-na-submit'); // 全空 → 账号名校验
 ok(userAddBody === null && ($s('ad-na-user-err').textContent || '').includes('账号名'), '发卡校验：账号名不合法即内联拒绝（未发请求）');
 $s('ad-na-user').value = 'newbie';
-click('ad-na-submit'); // 账号合法但未生成密码 → 生成区错误
-ok(userAddBody === null && ($s('ad-na-gen-err').textContent || '').includes('自动生成强密码'), '发卡校验：未生成初始密码即内联拒绝（未发请求）');
-click('ad-na-gen');
-const genPw1 = $s('ad-na-gen-pw').textContent || '';
-ok(/^[a-zA-Z0-9]{16}$/.test(genPw1), `「自动生成强密码」：crypto 随机 16 位（${genPw1}）`);
-ok(shown('ad-na-gen-box'), '生成后：初始密码展示区出现（醒目 + 复制按钮）');
-click('ad-na-copy-gen');
-ok(($s('msg').textContent || '').includes('已复制'), '初始密码「复制密码」按钮可用（剪贴板降级路径）');
-click('ad-na-gen'); // 再点一次：换新密码（旧值不残留）
-const genPw2 = $s('ad-na-gen-pw').textContent || '';
-ok(genPw2 !== genPw1 && /^[a-zA-Z0-9]{16}$/.test(genPw2), '再次「自动生成强密码」：换新密码（旧值不残留）');
 wireTexts.length = 0;
-click('ad-na-submit');
+click('ad-na-submit'); // 密码已在打开对话框时自动生成：无需任何前置生成步骤
 await sleep(60);
-ok(userAddBody && userAddBody.user === 'newbie' && userAddBody.password === genPw2 && !('pubkey' in userAddBody) && !('admin' in userAddBody),
-  '发卡提交体（主路径）：{user,password}（无 pubkey；未勾选管理员不带 admin）');
-ok(shown('ad-na-result') && $s('ad-na-login-pw').textContent === genPw2 && $s('ad-na-pw').textContent === 'reg-pw-smoke',
-  '发卡结果两行：登录初始密码（回显生成值）+ registry 密码（服务端一次性返回）');
-ok(!wireTexts.filter((t) => !t.includes('/_api/admin/user-add')).some((t) => t.includes(genPw2)),
+ok(userAddBody && userAddBody.user === 'newbie' && /^[a-zA-Z0-9]{16}$/.test(userAddBody.password || '')
+  && !('pubkey' in userAddBody) && !('admin' in userAddBody),
+  `发卡提交体（主路径）：{user, password=打开时自动生成 16 位（${userAddBody?.password?.slice(0, 4)}…）}（无 pubkey；未勾选管理员不带 admin）`);
+const genPw1 = userAddBody.password;
+ok(shown('ad-na-result') && $s('ad-na-login-pw').textContent === genPw1 && $s('ad-na-pw').textContent === 'reg-pw-smoke',
+  '发卡结果两行：登录初始密码（一次性展示）+ registry 密码（服务端一次性返回）');
+ok(!els.has('ad-na-gen') && !els.has('ad-na-gen-box') && !els.has('ad-na-gen-err'),
+  '「自动生成强密码」按钮与生成展示区/前置校验已删（密码仅在发放结果区一次性展示）');
+ok(!wireTexts.filter((t) => !t.includes('/_api/admin/user-add')).some((t) => t.includes(genPw1)),
   '发卡上行：初始密码仅出现在 user-add 管理员签名通道（不进 /_api/auth/* 等其他请求体）');
-ok(hidden('ad-na-gen-box'), '发放成功后：生成区收起（结果区已含登录初始密码，避免重复展示）');
 ok(!$s('ad-na-submit').disabled && $s('ad-na-submit').textContent === '发放', '发卡请求结束：按钮恢复原文与可用');
 $s('ad-na-user').value = 'newbie2';
-click('ad-na-gen');
 $s('ad-na-admin').checked = true;
 click('ad-na-submit');
 await sleep(60);
-ok(userAddBody.admin === true && userAddBody.user === 'newbie2', '勾选「同时授予管理员」→ 提交体 admin:true');
+ok(userAddBody.admin === true && userAddBody.user === 'newbie2'
+  && /^[a-zA-Z0-9]{16}$/.test(userAddBody.password || '') && userAddBody.password !== genPw1,
+  '连续发放：勾选「同时授予管理员」→ admin:true；第二轮自动换新密码（旧密码不残留误发）');
 // B7：原发卡对话框「专家路径：直接登记公钥」折叠（ad-na-pub/pubsubmit/kid-note）已整体删除
 ok(!html.includes('id="ad-na-expert"') && !html.includes('id="ad-na-pub"') && !html.includes('登记公钥发放'),
   'B7：发卡对话框公钥直登记路径零残留（发卡恒设初始密码）');
@@ -1165,8 +1158,8 @@ confirmMsgs.length = 0;
 act('pwset', 'bob');
 await sleep(60);
 const psConfirm = confirmMsgs.at(-1) || '';
-ok(psConfirm.includes('bob') && psConfirm.includes('补发') && psConfirm.includes('仅显示一次'),
-  '补发密码：confirm 中文文案含账号名与一次性/失效语义');
+ok(psConfirm.includes('bob') && psConfirm.includes('补发') && psConfirm.includes('失效') && !psConfirm.includes('仅显示一次'),
+  '补发密码：confirm 中文文案含账号名与失效语义（「仅显示一次」只在对话框内保留一处）');
 ok(passwdSetBodies.length === 1 && passwdSetBodies[0].user === 'bob' && /^[a-zA-Z0-9]{16}$/.test(passwdSetBodies[0].password),
   '补发提交体：{user, password=<crypto 随机 16 位>}');
 ok($s('dlg-passwd-set').open === true && ($s('ad-ps-user').textContent || '') === 'bob'
@@ -1197,7 +1190,7 @@ adminFail404 = false;
 ok(hostGetN >= 1, '进入管理页：/_api/admin/host 自动拉取（期望状态）');
 ok($s('hs-mw-postgres').checked && $s('hs-mw-redis').checked && $s('hs-mw-registry').checked,
   '中间件集合：三开关按 host_env.MIDDLEWARE 勾选');
-ok(!hidden('hs-mw-redis-badge') && ($s('hs-mw-redis-badge').textContent || '') === '已启用', '启用的中间件带「已启用」徽标');
+ok(!els.has('hs-mw-redis-badge'), '中间件「已启用」徽标已删（与 checkbox 勾选态同源重复，勾选即真相）');
 const hsKv = $s('hs-kv-tbl:q').innerHTML || '';
 ok(hsKv.includes('FRP') && hsKv.includes('running'), 'host.env 其余键通用键值渲染（FRP 项原样显示，不特判）');
 ok(hsKv.includes('CADDY') && hsKv.includes('LAN_HOST') && hsKv.includes('sysctl'), 'host.env 键值表含 CADDY/LAN_HOST/TUNING');
@@ -1267,7 +1260,7 @@ ok(hostPostBodies.some((b) => b.confirm === true && b.host_env.MIDDLEWARE === 'p
 
 // 池两态之二：余量 <20% → 黄条 + 「扩容」按钮
 hostResp = { ...HOST_STATE, redis_pool: { used: 250, total: 256, headroom: 6, suggest_expand: true } };
-click('hs-refresh');
+clickTab('admin'); // #hs-refresh 已删：期望状态刷新并入进管理页 + 30s 定时，重进即触发
 await sleep(60);
 ok(!hidden('hs-pool-warn') && hidden('hs-pool-ok'), '池状态二（<20% 余量）：黄条出现、常态行隐藏');
 ok(($s('hs-pool-warn-txt').textContent || '').includes('余量不足') && ($s('hs-pool-warn-txt').textContent || '').includes('6/256'),
@@ -1371,7 +1364,7 @@ click('btn-logout');
 ok(shown('login') && hidden('app'), '退出登录：回到登录卡（管理壳隐藏）');
 ok(!store.has('sr.seed') && !store.has('sr.user') && !store.has('sr.pempub'),
   '密钥生命周期（8bf79ed）：登出清本机 seed/账号记忆/PEM（不留僵尸钥匙）');
-ok(hidden('lg-reenter') && !els.has('lg-forget'), 'B2：钥匙已回收——「免密码进入」不出现（无密可免）；B5 后设备清除入口不存在');
+ok(!els.has('lg-reenter') && !els.has('lg-forget'), 'B2：钥匙已回收——「免密码进入」入口不存在（按钮已删，无密可免）；B5 后设备清除入口不存在');
 ok(($s('lg-fb').textContent || '').includes('已退出登录') && ($s('lg-fb').textContent || '').includes('已回收'),
   'B2 退出提示：「已退出登录，本机钥匙已回收」（如实描述 + 引导密码重登）');
 
@@ -1387,7 +1380,7 @@ await sleep(80);
 ok(shown('login') && !els.has('hd-user'), '钥匙失效：自测失败回落密码表单（不自动进入，管理壳未构建）');
 ok(($s('lg-fb').textContent || '').includes('失效') && ($s('lg-fb').textContent || '').includes('重新登录'),
   '回落提示：凭据失效 → 输账号密码重绑新钥匙（找回/换设备）');
-ok(hidden('lg-reenter'), 'E_AUTH 回落：不出「免密码进入」（本机钥匙已失效）');
+ok(!els.has('lg-reenter'), 'E_AUTH 回落：无「免密码进入」入口（按钮已删，直接密码重登）');
 const kb3 = keyBindBodies.length;
 $s('lg-pass').value = 'alice-pw';
 fire($s('lg-form'), 'submit', { preventDefault() {} });
@@ -1481,12 +1474,12 @@ ok(html.includes('/_api/key-selfrm'), 'plan-16 §2.2：key-selfrm（登出远程
 ok(html.includes('E_PW_LOCAL'), 'plan-16：本地密码错错误态（E_PW_LOCAL，无第三请求）已接线');
 ok(html.includes('密码错误，或该账号尚未设置密码（请联系管理员重置）'), 'plan-16 §3：失败文案两态合一（防枚举一致代价）');
 ok(html.includes('忘记密码') && html.includes('联系管理员重置'), 'plan-16 §3：忘记密码 → 找管理员重置文案');
-for (const s of ['新设备', '自动绑定', '免密码进入']) ok(html.includes(s), `plan-16 §3 文案：${s}`);
+for (const s of ['新设备', '自动绑定']) ok(html.includes(s), `plan-16 §3 文案：${s}`);
 ok(!html.includes('忘记此设备') && !html.includes('id="lg-forget"') && !html.includes('btn-settings-forget'),
   'B5：「忘记此设备」整链路零残留（登录窗/设置弹窗/帮助页/CLI 对照表）');
 ok(!html.includes('id="lg-expert"') && !html.includes('钥匙登录（CLI / 机器用户'),
   'B6：登录窗「钥匙登录（专家路径）」折叠零残留（控制台登录=账号+密码唯一方式）');
-ok(html.includes('id="lg-reenter"'), 'B2：「免密码进入」按钮容器保留（登出即清钥匙后不再显示）');
+ok(!html.includes('lg-reenter'), '两态铁律：#lg-reenter「免密码进入」按钮与监听器零残留（登录窗无第三态残骸）');
 ok(html.includes('登录与账号') && html.includes('两把独立发放的密码') && html.includes('试验性存储'),
   'plan-16 帮助页：登录方式描述（两把密码分开 + 试验性存储告示保留）');
 ok(html.includes('CLI 使用') && html.includes('showroom login') && html.includes('showroomctl user-add &lt;名&gt; --gen-password')
@@ -1532,8 +1525,8 @@ ok(html.includes('data-drawer') || html.includes("drawerRow.dataset.drawer"), 'S
 }
 ok(html.includes('<th>名称</th><th>状态</th><th>对外 URL</th><th>标签</th><th class="num">更新</th><th>操作</th><th>详情</th>'),
   'S4：列序 名称·状态·对外URL·标签·更新·操作·▾（§1）');
-ok(html.includes('visibilitychange') && html.includes('暂无展项——点顶栏「+ 发布」发布新 Demo'),
-  'S4：事件流可见性钩子 + 空态卡引导「+ 发布新 Demo」（验收 16）');
+ok(html.includes('visibilitychange') && html.includes('暂无展项——点顶栏「+ 发布」发布新展项'),
+  'S4：事件流可见性钩子 + 空态卡引导「+ 发布新展项」（验收 16；Demo/演示服务统一为「展项」）');
 ok(html.includes('focusGuided') || html.includes('登录焦点引导'), 'S4/验收 16：登录焦点引导（首行打开 / +发布 CTA）');
 {
   const appTop = html.slice(html.indexOf('<template id="app-tpl">'), html.indexOf('</header>'));
@@ -1550,11 +1543,11 @@ ok(html.includes('focusGuided') || html.includes('登录焦点引导'), 'S4/验�
 ok(html.includes('autocomplete="current-password"') && html.includes('autocomplete="new-password"'),
   '规范：改密密码框 autocomplete（current-password / new-password）');
 ok((html.match(/type="password"/g) || []).length >= 4, '规范：密码输入均 type=password（登录 1 + 改密 3）');
-for (const s of ['自动生成强密码', '登录初始密码', '未设密码', '已设密码', '补发密码', '仅显示一次', '重新登录']) {
+for (const s of ['登录初始密码', '未设密码', '已设密码', '补发密码', '仅显示一次', '重新登录']) {
   ok(html.includes(s), `plan-16 收口文案全中文：${s}`);
 }
-ok(html.includes('id="ad-na-gen"') && html.includes('id="ad-na-gen-pw"') && html.includes('id="ad-na-login-pw"') && html.includes('id="ad-ps-pw"'),
-  '发卡/补发一次性密码展示容器齐备（生成区 + 结果两行 + 补发对话框）');
+ok(html.includes('id="ad-na-login-pw"') && html.includes('id="ad-ps-pw"'),
+  '发卡/补发一次性密码展示容器齐备（结果两行 + 补发对话框；生成展示区已并入「打开即自动生成」）');
 ok(!html.includes('id="ad-na-expert"') && !html.includes('登记公钥发放'), 'B7：发卡对话框无公钥直登记折叠（与场景 2 行为断言互补）');
 for (const id of ['pw-cur', 'pw-new', 'pw-new2']) ok(html.includes(`for="${id}"`), `规范：改密控件 label for="${id}"`);
 ok(!html.includes('op=change'), '改密路径与服务端对齐（pw-begin 无 op 查询参数——按 serve.rs/SPEC §16 实形状）');
@@ -1572,7 +1565,7 @@ ok(!/lg-keygen|lg-importkey|renderLoginState|doLogin\b|gotoStep|enterStep3/.test
 ok(html.includes('compressToBlob') && html.includes('uploadPayload'), '上传压缩助手 compressToBlob/uploadPayload 已接入');
 ok(html.includes('sr_zstd_begin') && html.includes('sr_zstd_push') && html.includes('sr_zstd_end'), 'wasm zstd 压缩会话（sr_zstd_*）已接线');
 ok((html.match(/压缩后上传/g) || []).length >= 1, '上传进度文案标注「压缩后上传」');
-// —— §12.1 一键部署 ——
+// —— §12.1 一键发布 ——
 ok(html.includes('单表单双镜像源') && html.includes('id="pub-src-tar"') && html.includes('id="pub-src-registry"')
   && html.includes('id="pub-src-file-box"') && html.includes('id="pub-src-reg-box"') && html.includes('id="pub-pref-note"'),
   'plan-17 §5：发布单表单双镜像源（radio + 双源容器 + 预填注记）齐备');
@@ -1580,8 +1573,8 @@ ok(!html.includes('id="dep-form"') && !html.includes('id="dep-project"') && !htm
   && !html.includes('id="dep-mem"') && !html.includes('id="dep-cport"') && !html.includes('id="dep-submit"')
   && !html.includes('id="dep-fb"') && !html.includes('id="dep-project-err"') && !html.includes('id="dep-tag-err"'),
   'S3：dep-form 九件全零残留（能力并入发布表单镜像库源）');
-ok((html.match(/内存需求/g) || []).length === 1 && (html.match(/演示服务端口/g) || []).length === 1,
-  'S3/验收 4：「内存需求」「演示服务端口」label 全站各恰好 1 次（C4 更名）');
+ok((html.match(/内存需求/g) || []).length === 1 && (html.match(/展项端口/g) || []).length === 1,
+  'S3/验收 4：「内存需求」「展项端口」label 全站各恰好 1 次（C4 更名 + 演示服务→展项统一）');
 for (const s of ['① 压缩', '② 上传', '③ 发布', '④ 完成']) ok(html.includes(s), `§12.1：状态条分段「${s}」`);
 ok(html.includes('沿用上次发布参数'), '§5：预填注记文案');
 ok(html.includes('压缩后总长') && html.includes('断点续传') && html.includes('复制地址'), '§12.1：②段文案「已传/压缩后总长」+ 断点续传 + 完成段复制按钮');
@@ -1609,11 +1602,11 @@ ok(html.includes('/_api/space') && html.includes('id="space-note"'),
   '§14.1：/_api/space 接线 + 空间条容器（手动刷新按钮按 plan-17 §0-5 归零）');
 ok(html.includes('可用空间（已扣预留）') && html.includes('空间信息不可用'), '§14.1：空间条文案（常显口径 + 失败静默降级）');
 ok(html.includes('id="img-list"') && html.includes('/_api/image-rm'), '§14.3：镜像清单渲染容器 img-list + image-rm 接线');
-ok(html.includes('回滚/重建将失效') && html.includes('已回收约'), '§14.3：删除 confirm 影响文案 + alert 回收量文案');
-ok(html.includes('可到部署区删除旧镜像后重试'), '§14.2：磁盘 E_QUOTA 顶部条删除引导文案');
+ok(html.includes('回滚/重建将失效') && html.includes('已回收约'), '§14.3：删除 confirm 影响文案 + 顶部条回收量文案');
+ok(html.includes('可到镜像库删除旧镜像后重试'), '§14.2：磁盘 E_QUOTA 顶部条删除引导文案（部署区→镜像库更名）');
 // —— §15 主机编排（期望状态 / 两段式 / Redis 扩容流） ——
 ok(html.includes('/_api/admin/host'), '§15.2：/_api/admin/host 已接线（GET 期望状态 + POST 两段式）');
-for (const s of ['主机编排', '中间件集合', '已启用', '查看变更', '确认执行', '两段式', '漂移', 'Redis 逻辑库余量不足',
+for (const s of ['主机编排', '中间件集合', '查看变更', '确认执行', '两段式', '漂移', 'Redis 逻辑库余量不足',
   '扩容', '获取确认提示', '我已了解，执行扩容', '执行报告', '红色警示']) {
   ok(html.includes(s), `§15 新增文案全中文：${s}`);
 }
@@ -1633,7 +1626,7 @@ ok(!html.includes('id="btn-refresh"') && !html.includes('id="btn-db-fill"') && !
 ok(!html.includes('载入项目清单') && !html.includes('刷新镜像清单') && !html.includes('刷新列表'),
   'S6/验收 3：「载入项目清单」「刷新镜像清单」文案零残留');
 ok(html.includes('class="sub"') && html.includes('retryOnce') && html.includes('retry-projects'),
-  'S6/§3：卡片副题可点重取 + 失败内联「重试」+ 3s 自动重试一次');
+  'S6/§3：副题纯状态容器（成功不写计数、失败显示自动重试）+ 失败内联「重试」+ 3s 自动重试一次');
 ok(html.includes('60s 周期重试') || html.includes('60000'), 'S6/§3：whoami 失败 ? 徽标 60s 周期重试');
 ok(html.includes('redis_databases') && html.includes('confirm_required'), '§15.3：扩容第二形态提交体 redis_databases 与 confirm_required 语义已接线');
 // —— 界面规范静态断言（B 部分逐条） ——
