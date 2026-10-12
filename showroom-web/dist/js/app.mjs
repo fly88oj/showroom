@@ -106,11 +106,16 @@ if (typeof window !== 'undefined') window.addEventListener('online', () => {
   evLive.want = true; startEventsStream();
   refreshProjects(true); refreshSpace(true);
 });
-// 事件流可见性钩子（§3）：页签隐藏退订（服务端收尸子进程）、回开项目页自动重订
+// 事件流可见性钩子（§3）：页签隐藏退订（服务端收尸子进程）、回开 proj/admin 页自动重订
+// F4：事件面板在管理页——回开时订阅面 = 项目页 或 管理页（tab-admin 仅管理员存在）
 document.addEventListener?.('visibilitychange', () => {
   if (!state.loggedIn) return;
   if (document.hidden) { evLive.want = false; if (evLive.ac) { evLive.ac.abort(); evLive.ac = null; } const st = $('ev-state'); if (st) st.textContent = '页面隐藏，暂停订阅'; }
-  else if (!$('tab-proj')?.classList?.contains('hidden')) { evLive.want = true; startEventsStream(); }
+  else {
+    const projShown = !$('tab-proj')?.classList?.contains('hidden');
+    const adminShown = !!$('tab-admin') && !$('tab-admin')?.classList?.contains('hidden');
+    if (projShown || adminShown) { evLive.want = true; startEventsStream(); }
+  }
 });
 
 // A3 回归锚点：模块级 let 不上 window——以 getter 暴露两个会话定时器，供无头浏览器断言「心跳/自动刷新已启动」

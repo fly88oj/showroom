@@ -21,7 +21,7 @@ export const ENV_DESC = {
   DATABASE_URL: '完整 PostgreSQL 连接串',
   REDIS_HOST: 'Redis 主机名（平台内置）',
   REDIS_PORT: 'Redis 端口',
-  REDIS_DB: '分配的 Redis 逻辑库编号（每项目一库，池上限见平台 policy）',
+  REDIS_DB: '分配的 Redis 逻辑库编号（每项目一库，由平台统一分配）',
   REDIS_URL: '完整 Redis 连接串',
   SHOWROOM_PROJECT: '项目名',
   SHOWROOM_BASE_PATH: '对外子路径前缀（恒为 /<项目名>/；镜像内应据此适配或使用相对 URL）',
@@ -54,7 +54,7 @@ export function checkProj(project) {
 
 export const platformPem = () => $('hd-pempub').value.trim();
 
-/** PEM 就绪检查（plan-17 验收 6）：未配置 → 展示「去设置」内联引导。
+/** PEM 就绪检查（plan-17 验收 6）：未配置 → 内联引导到「设置」完成安全配置（F12 统一文案）。
  *  whoami 已自动带回 platform_pem 时本检查恒过，永不需手工粘贴。 */
 export function pemReady() {
   if (platformPem().startsWith('-----BEGIN PUBLIC KEY-----')) return true;

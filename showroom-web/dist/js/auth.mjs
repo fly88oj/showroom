@@ -148,7 +148,7 @@ export async function passwordLogin(user, pass) {
   const kb = await apiBind(user, state.pub, r2.bind_token);                // ④ 绑定（幂等：同钥匙重绑=ok）
   state.kid = kb.kid || '';
   state.boundAdmin = !!kb.admin; // §2.2：账号持 admin 钥匙 → 密码绑定的新钥匙继承 admin（显式提示）
-  localStorage.setItem('sr.user', user); // 账号与钥匙一起记忆：下次自测直达（免密码）
+  localStorage.setItem('sr.user', user); // 账号一并记忆：下次自测直达（免密码）
 }
 
 export let heartbeatTimer = null;

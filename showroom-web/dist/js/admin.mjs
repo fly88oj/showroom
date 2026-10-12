@@ -105,7 +105,7 @@ function onHostEditedAfterPreview() {
   $('hs-fb').textContent = '配置已修改，请重新预演。';
 }
 
-export async function loadAdminUsers() { // 账号与钥匙表（D1：管理员为账号级——账号行徽标+设/免按钮；钥匙行无级）
+export async function loadAdminUsers() { // 账号表（账号行 + 设备行；D1：管理员为账号级——账号行徽标+设/免按钮；设备行无级）
   const tb = $('ad-users-tbl').querySelector('tbody');
   tb.innerHTML = '<tr><td colspan="3" class="note">加载中…</td></tr>';
   try {
@@ -117,24 +117,24 @@ export async function loadAdminUsers() { // 账号与钥匙表（D1：管理员�
       const pwCell = o.has_password
         ? '<span class="badge">已设密码</span>'
         : `<span class="badge">未设密码</span> <button class="act" data-act="pwset" data-user="${esc(o.user)}">补发密码</button>`;
-      // D1：管理员徽标 + 设/免按钮上收到账号行（POST /_api/admin/user-admin；钥匙行无级）
+      // D1：管理员徽标 + 设/免按钮上收到账号行（POST /_api/admin/user-admin；设备行无级）
       const adminCell = o.admin
         ? `<span class="status-ok">管理员</span> <button class="act" data-act="userunadmin" data-user="${esc(o.user)}">取消管理员</button>`
         : `<button class="act" data-act="useradmin" data-user="${esc(o.user)}">设为管理员</button>`;
       return `<tr class="ad-user-row"><td colspan="3">
           <span class="mono">${esc(o.user)}</span>
-          <span class="note">· 项目数 ${esc(String(o.projects ?? '—'))} · 钥匙 ${keys.length} 把</span>
+          <span class="note">· 项目数 ${esc(String(o.projects ?? '—'))} · 设备 ${keys.length} 台</span>
           ${pwCell}
           ${adminCell}
           <button class="act danger" data-act="revoke" data-user="${esc(o.user)}" style="margin-left:.4rem">吊销整个账号</button>
         </td></tr>` + (keys.map((k) => `<tr>
           <td class="mono wrap">${esc(k.kid)}</td>
           <td class="mono">${esc(fmtTime(k.since))}</td>
-          <td><button class="act danger" data-act="keyrm" data-user="${esc(o.user)}" data-kid="${esc(k.kid)}">删除钥匙</button></td>
-        </tr>`).join('') || '<tr><td colspan="3" class="note">（该账号没有钥匙）</td></tr>');
+          <td><button class="act danger" data-act="keyrm" data-user="${esc(o.user)}" data-kid="${esc(k.kid)}">移除此设备</button></td>
+        </tr>`).join('') || '<tr><td colspan="3" class="note">（该账号暂无设备）</td></tr>');
     }).join('') : '<tr><td colspan="3" class="note">暂无账号</td></tr>';
     $('ad-fb').textContent = ''; // 成功不写计数回执（表格即数据）；本区保留操作反馈用途
-  } catch (e) { tb.innerHTML = '<tr><td colspan="3" class="note">加载失败 · <button type="button" class="act" data-act="retry-users">重试</button></td></tr>'; apiFail('账号与钥匙加载', e); } // D2：失败行内「重试」可点（非管理员 404 E_AUTH 也走顶部条）
+  } catch (e) { tb.innerHTML = '<tr><td colspan="3" class="note">加载失败 · <button type="button" class="act" data-act="retry-users">重试</button></td></tr>'; apiFail('账号加载', e); } // D2：失败行内「重试」可点（非管理员 404 E_AUTH 也走顶部条）
 }
 
 // —— E3：全部项目面板（跨用户项目表；GET /_api/admin/projects 每行附 owner）——
@@ -187,16 +187,16 @@ async function onAdminProjectAction(ev) {
   finally { busy(btn, false); }
 }
 
-// 管理动作：全部中文 confirm 写明影响（§12.2）
+// 管理动作：全部中文 confirm 写明影响（§12.2；F2 设备词族——不出现钥匙/绑定/密钥）
 const ADMIN_ACT = {
   useradmin: { ep: 'user-admin', cn: '设为管理员', body: (o) => ({ user: o, admin: true }),
-    ask: (o) => `确认将账号 ${o} 设为管理员？该账号任意钥匙登录即具管理权限（可管理全部账号、项目与平台状态）。` },
+    ask: (o) => `确认将账号 ${o} 设为管理员？该账号登录即具管理权限（可管理全部账号、项目与平台状态）。` },
   userunadmin: { ep: 'user-admin', cn: '取消管理员', body: (o) => ({ user: o, admin: false }),
-    ask: (o) => `确认取消账号 ${o} 的管理员权限？该账号全部钥匙同时失去管理权限。` },
-  keyrm: { ep: 'key-rm', cn: '删除钥匙', body: (o, k) => ({ user: o, kid: k }),
-    ask: (o, k) => `确认删除账号 ${o} 的钥匙 ${k}？该钥匙即刻失效（持有它的设备立即无法登录），不可恢复。` },
+    ask: (o) => `确认取消账号 ${o} 的管理员权限？该账号所有设备同时失去管理权限。` },
+  keyrm: { ep: 'key-rm', cn: '移除此设备', body: (o, k) => ({ user: o, kid: k }),
+    ask: (o, k) => `确认移除账号 ${o} 的此设备（${k}）？该设备立即无法使用，重新登录即可重新登记。` },
   revoke: { ep: 'user-revoke', cn: '吊销整个账号', body: (o) => ({ user: o }),
-    ask: (o) => `确认吊销整个账号 ${o}？其名下全部钥匙与镜像库访问凭据将一并删除，该账号即刻无法登录。` },
+    ask: (o) => `确认吊销整个账号 ${o}？其名下全部设备与镜像库访问凭据将一并删除，该账号即刻无法登录。` },
 };
 
 async function onAdminKeyAction(ev) {
@@ -218,9 +218,9 @@ async function onAdminKeyAction(ev) {
 }
 
 /** 补发/重置登录密码（plan-16 §1.5）：confirm → passwd-set {user,password}（客户端 crypto 生成）→
- *  新密码一次性展示（对话框）；旧密码即刻失效，不动既有钥匙 → 表刷新（徽标翻转）。 */
+ *  新密码一次性展示（对话框）；旧密码即刻失效，其他设备不受影响 → 表刷新（徽标翻转）。 */
 async function onAdminPasswdSet(user, btn) {
-  if (!confirm(`确认为账号 ${user} 补发密码？将生成新的登录初始密码，原密码即刻失效；各设备已绑定的钥匙不受影响。`)) return;
+  if (!confirm(`确认为账号 ${user} 补发密码？将生成新的登录初始密码，原密码即刻失效；其他设备不受影响。`)) return;
   const pw = randomPassword();
   busy(btn, true, '补发中…'); // B3：请求期间按钮就地「补发中…」并禁用
   try {
@@ -303,19 +303,17 @@ const KIND_CN = {
 };
 const kindCn = (k) => KIND_CN[k] || k || '动作';
 let hostState = null, hostImpact = null; // 最近一次 GET /_api/admin/host 与预演 impact
-/** 拉取期望状态并渲染（进入管理页 / 30s 定时 / 执行后收敛核对共用）。 */
+/** 拉取期望状态并渲染（进入管理页 / 30s 定时 / 执行后收敛核对共用）。
+ *  F3：成功全程静默（面板即状态，不写 hs-fb 回执；失败才说话，与平台状态面板同款）；
+ *  F3：自动刷新不得收起预演/确认——清单失效唯一路径 = 编辑控件 change（B4 onHostEditedAfterPreview）。 */
 export async function refreshHost() {
-  // 新一轮加载先收起上一轮预演/报告（避免陈旧清单误导编辑）
-  $('hs-review').classList.add('hidden');
-  $('hs-report').classList.add('hidden');
-  $('hs-confirm').classList.add('hidden');
-  $('hs-fb').textContent = '加载期望状态中…';
   try {
     const j = await api('GET', '/_api/admin/host');
     hostState = j;
-    hostImpact = null;
-    renderHostState(j);
-    $('hs-fb').textContent = `已刷新（${new Date().toLocaleTimeString([], { hour12: false })}）`;
+    // 预演在架时保留其 impact（确认执行的安全二次 confirm 依赖它；B4 编辑失效时会清空）
+    const reviewOn = !$('hs-review')?.classList?.contains('hidden');
+    if (!reviewOn) hostImpact = null;
+    renderHostState(j, reviewOn);
   } catch (e) {
     // B5：失败态写进数据容器（键值表/漂移清单占位；30s 定时自动重试）
     const kvTb = $('hs-kv-tbl')?.querySelector?.('tbody');
@@ -325,22 +323,26 @@ export async function refreshHost() {
     apiFail('主机期望状态加载', e);
   }
 }
-/** 期望状态渲染：中间件开关勾选态、host.env 其余键通用键值（含 FRP，不特判）、参数当前值、漂移黄条、池两态。 */
-function renderHostState(j) {
+/** 期望状态渲染：中间件开关勾选态、host.env 其余键通用键值（含 FRP，不特判）、参数当前值、漂移黄条、池两态。
+ *  F3：keepEdits=true（预演在架时自动刷新）不回写编辑控件——控件此刻表达的是被预演的期望值，
+ *  静默还原会让在架清单与确认执行体不一致；只更新只读展示（键值表/漂移/池）。 */
+function renderHostState(j, keepEdits = false) {
   const he = j.host_env || {};
   const mw = new Set(Array.isArray(he.MIDDLEWARE) ? he.MIDDLEWARE : String(he.MIDDLEWARE ?? '').split(/\s+/).filter(Boolean));
-  for (const n of MW_NAMES) { // 中间件集合：开关勾选态即启用态（「已启用」徽标已删——与勾选同源重复）
-    $(`hs-mw-${n}`).checked = mw.has(n);
+  if (!keepEdits) { // 中间件集合：开关勾选态即启用态（「已启用」徽标已删——与勾选同源重复）
+    for (const n of MW_NAMES) $(`hs-mw-${n}`).checked = mw.has(n);
   }
   const kv = Object.entries(he).filter(([k]) => k !== 'MIDDLEWARE');
   $('hs-kv-tbl').querySelector('tbody').innerHTML = kv.length ? kv.map(([k, v]) =>
     `<tr><td class="mono">${esc(k)}</td><td class="mono wrap">${esc(typeof v === 'object' && v !== null ? JSON.stringify(v) : String(v))}</td></tr>`).join('')
     : '<tr><td colspan="2" class="note">（无其他键）</td></tr>';
-  const p = j.policy || {};
-  $('hs-p-redisdbs').value = p.REDIS_DBS != null ? String(p.REDIS_DBS) : '';
-  $('hs-p-disk').value = p.DISK_RESERVE_GB != null ? String(p.DISK_RESERVE_GB) : '';
-  $('hs-p-mem').value = p.RESERVE_MEM_MB != null ? String(p.RESERVE_MEM_MB) : '';
-  $('hs-p-factor').value = p.UPLOAD_SPACE_FACTOR != null ? String(p.UPLOAD_SPACE_FACTOR) : '';
+  if (!keepEdits) {
+    const p = j.policy || {};
+    $('hs-p-redisdbs').value = p.REDIS_DBS != null ? String(p.REDIS_DBS) : '';
+    $('hs-p-disk').value = p.DISK_RESERVE_GB != null ? String(p.DISK_RESERVE_GB) : '';
+    $('hs-p-mem').value = p.RESERVE_MEM_MB != null ? String(p.RESERVE_MEM_MB) : '';
+    $('hs-p-factor').value = p.UPLOAD_SPACE_FACTOR != null ? String(p.UPLOAD_SPACE_FACTOR) : '';
+  }
   const drift = j.drift || []; // 漂移清单：warn 黄条 / error 红条，附建议命令
   $('hs-drift').innerHTML = drift.length ? drift.map((d) => `<div class="warnbar${d.severity === 'error' ? ' err' : ''}">` +
     `${d.severity === 'error' ? '缺失/停摆' : '漂移'} · <span class="mono">${esc(d.item)}</span>：期望 <span class="mono">${esc(String(d.expected))}</span>，实际 <span class="mono">${esc(String(d.actual))}</span>` +
@@ -424,8 +426,7 @@ async function onHostConfirmRun() {
       ${items.length ? `<div class="tbl-wrap" style="max-height:26vh"><table><thead><tr><th>结果</th><th>动作</th><th>目标</th><th>输出</th></tr></thead><tbody>${rows}</tbody></table></div>` : '<p class="note">（无动作）</p>'}
       ${(rep.warnings || []).map((w) => `<div class="warnbar">${esc(w)}</div>`).join('')}`;
     $('hs-report').classList.remove('hidden');
-    $('hs-fb').textContent = j.ok === false ? '执行完成（含失败项，详见报告与警告）' : '执行完成';
-    showMsg('主机变更已执行。', 'ok');
+    $('hs-fb').textContent = j.ok === false ? '执行完成（含失败项，详见报告与警告）' : '执行完成'; // F7：面板 fb 单通道（顶部条不重复播报）
   } catch (e) { $('hs-fb').textContent = ''; apiFail('确认执行', e); }
   busy($('hs-confirm'), false);
 }
@@ -470,9 +471,8 @@ async function onRedisXRun() { // confirm=true：停旧容器 → 新容器带 -
   try {
     const j = await api('POST', '/_api/admin/host', { redis_databases: n, confirm: true });
     const secs = j.restart_secs != null ? `（实例重启约 ${j.restart_secs} 秒）` : '';
-    $('hs-rx-fb').textContent = `扩容完成：databases → ${j.databases ?? n}${secs}，服务端已自动验证（PING + 库数）。`;
+    $('hs-rx-fb').textContent = `扩容完成：databases → ${j.databases ?? n}${secs}，服务端已自动验证（PING + 库数）。`; // F7：面板 fb 单通道
     $('hs-rx-run').classList.add('hidden');
-    showMsg(`Redis 逻辑库池已扩容到 ${j.databases ?? n}。`, 'ok');
     refreshHost(); // 池数字与漂移黄条随之收敛（不阻塞对话框回报）
   } catch (e) { apiFail('执行扩容', e); }
   busy($('hs-rx-run'), false);

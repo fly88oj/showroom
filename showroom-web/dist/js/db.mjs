@@ -2,7 +2,7 @@
 import { $, enc, esc, showMsg, busy, sleep, derToPem } from './util.mjs';
 import { state, checkProj, SEG, DUMP_CHUNK, platformPem, pemReady, openSettings, retryOnce } from './state.mjs';
 import { ex, mem, alloc, put, unput, shimCStr, api, apiDo, respErr } from './api.mjs';
-import { apiFail, uploadPayload, ZSTD_LEVEL, sealBegin, pushSlice, pushFlush } from './img.mjs';
+import { apiFail, uploadPayload, sealBegin, pushSlice, pushFlush } from './img.mjs';
 // ================ 标签页 2：数据库（SPEC §9） ================
 export function wireDbTab() {
   // Redis 浏览（§10.3；S2 自状态页迁入数据页）
@@ -104,7 +104,7 @@ async function oneTimeRsaPemPair() {
     } catch { /* 落到 wasm 垫片路径 */ }
   }
   const sid = ex.sr_keygen_rsa();
-  if (sid <= 0) throw { error: 'E_NET', msg: `一次性密钥生成失败（${sid}）` };
+  if (sid <= 0) throw { error: 'E_NET', msg: `下载准备失败（${sid}）` };
   return {
     pub: shimCStr((p, c) => ex.sr_rsa_pub_pem(sid, p, c), 1024),    // SPKI
     priv: shimCStr((p, c) => ex.sr_rsa_priv_pem(sid, p, c), 4096),  // PKCS#8
@@ -147,7 +147,7 @@ async function onDbDump() {
   if (dumpBusy) return showMsg('已有备份任务进行中，请等待完成');
   dumpBusy = true;
   busy($('btn-db-dump'), true, '备份中…');
-  dbDumpProgress(0, 1, '正在生成一次性 RSA-3072 密钥…');
+  dbDumpProgress(0, 1, '正在准备下载…');
   try {
     const pair = await oneTimeRsaPemPair();
     dbDumpProgress(0, 1, '已发起备份（服务端后台 pg_dump 加密导出）…');
@@ -156,11 +156,11 @@ async function onDbDump() {
     const dumpId = j.dump_id;
     // ② 轮询 status：1s 间隔，5 分钟上限（failed 即时报错）
     const t0 = Date.now();
-    let total = 0;
+    let total = 0, srvOut = '';
     for (;;) {
       const st = await api('GET', `/_api/db-dump-status?dump=${encodeURIComponent(dumpId)}`);
       if (st.error) throw { error: 'E_STATE', msg: `服务端备份失败：${st.error}` };
-      if (st.ready) { total = Number(st.total) || 0; break; }
+      if (st.ready) { total = Number(st.total) || 0; srvOut = st.out || ''; break; }
       if (Date.now() - t0 > 5 * 60 * 1000) throw { error: 'E_STATE', msg: '备份超时（5 分钟未就绪），请稍后重试' };
       dbDumpProgress(0, 1, `服务端正在导出（已等待 ${Math.round((Date.now() - t0) / 1000)} 秒）…`);
       await sleep(1000);
@@ -175,13 +175,13 @@ async function onDbDump() {
         const resp = await apiDo('GET', `/_api/db-dump-chunk?dump=${encodeURIComponent(dumpId)}&offset=${offset}&len=${len}`, null);
         if (!resp.ok) throw await respErr(resp);
         const hTotal = Number(resp.headers?.get?.('X-Sr-Total'));
-        if (Number.isFinite(hTotal) && hTotal !== total) throw { error: 'E_STATE', msg: `分片总长不一致（响应头 ${hTotal} ≠ 状态 ${total}）` };
+        if (Number.isFinite(hTotal) && hTotal !== total) throw { error: 'E_STATE', msg: `下载总长不一致（响应头 ${hTotal} ≠ 状态 ${total}）` };
         const buf = new Uint8Array(await resp.arrayBuffer());
-        if (!buf.length || offset + buf.length > total) throw { error: 'E_STATE', msg: `分片长度异常（offset=${offset}，收到 ${buf.length} / 总 ${total}）` };
+        if (!buf.length || offset + buf.length > total) throw { error: 'E_STATE', msg: `下载数据长度异常（offset=${offset}，收到 ${buf.length} / 总 ${total}）` };
         const out = opener.push(buf);
         if (out) parts.push(out);
         offset += buf.length;
-        dbDumpProgress(offset, total, `分片下载中：${offset} / ${total} 字节（第 ${parts.length ? Math.ceil(offset / DUMP_CHUNK) : 0} 片）`);
+        dbDumpProgress(offset, total, `下载中：${offset} / ${total} 字节`);
       }
       const tail = opener.push(new Uint8Array(0)); // len=0 = 流结束：解出尾段
       if (tail) parts.push(tail);
@@ -193,9 +193,9 @@ async function onDbDump() {
     a.download = `${t.project}.dump`;
     a.click();
     setTimeout(() => URL.revokeObjectURL(a.href), 60000);
-    // C10：完成播报收敛两通道——进度条文案 + db-out（db-fb 行删除，同一信息只出现一次）
-    dbDumpProgress(total, total, `完成：已下载 ${t.project}.dump——信封 ${total} 字节（${Math.max(1, Math.ceil(total / DUMP_CHUNK))} 片）→ 解密 ${plain} 字节。`);
-    dbOut(`pg_dump -Fc 三段式下载完成：信封 ${total} 字节（${Math.max(1, Math.ceil(total / DUMP_CHUNK))} 片 × ≤4MB）→ 本地解密 ${plain} 字节。`);
+    // C10/F8：完成双通道分工——进度条只报文件名；技术明细归 db-out（服务端原文优先，无则本地核算）
+    dbDumpProgress(total, total, `完成：已下载 ${t.project}.dump`);
+    dbOut(srvOut || `pg_dump -Fc 三段式下载完成：信封 ${total} 字节（${Math.max(1, Math.ceil(total / DUMP_CHUNK))} 片 × ≤4MB）→ 本地解密 ${plain} 字节。`);
   } catch (e) {
     $('db-fb').textContent = '';
     dbDumpProgress(0, 1, '备份失败或中断（可重新发起）');
@@ -208,16 +208,16 @@ async function onDbRestore() {
   if (!t) return;
   const file = $('db-restore-file').files[0];
   if (!file) return showMsg('请先选择要恢复的 .dump 文件（「备份下载」的产物）');
-  if (!pemReady()) { openSettings(true); return showMsg('恢复需先配置平台公钥 PEM：已打开「设置」，请粘贴或确认自动带回的 PEM（管理员分发的 platform_rsa.pub）'); }
+  if (!pemReady()) { openSettings(true); return showMsg('尚未完成安全配置：到「设置」完成（已为你打开设置）'); }
   const pem = platformPem();
   if (!confirm(`确认将 ${file.name}（${file.size} 字节）恢复到 ${t.project}？当前数据将被替换。`)) return;
   busy($('btn-db-restore'), true, '恢复中…');
   $('db-fb').textContent = '正在压缩并加密文件…';
   try {
-    // 魔数分支：已是 zstd（备份下载产物即服务端 zstd-19 包裹的 -Fc）原样上传；
+    // 魔数分支：已是压缩格式（备份下载产物即服务端压缩包裹的 -Fc）直接上传；
     // 原生 -Fc / 其他未压缩形态先压缩——服务端按魔数自适应解包，两态都正确。
     const { blob: payload, zstd: pre } = await uploadPayload(file, (done, raw) => {
-      $('db-fb').textContent = `压缩中 ${done} / ${raw} 字节（zstd-${ZSTD_LEVEL}）…`;
+      $('db-fb').textContent = `压缩中 ${done} / ${raw} 字节…`;
     });
     const sid = sealBegin(pem, crypto.getRandomValues(new Uint8Array(32)));
     const parts = [];
@@ -236,7 +236,7 @@ async function onDbRestore() {
     const j = await api('POST',
       `/_api/db-restore?project=${encodeURIComponent(t.project)}&confirm=true`, envelope);
     $('db-fb').textContent = '恢复完成';
-    dbOut(j.out || `pg_restore --clean --if-exists 完成：信封 ${envelope.length} 字节（${pre ? `文件已是 zstd（${payload.size} 字节）原样上传` : `压缩后 ${payload.size} / 原文件 ${file.size} 字节`}）。`);
+    dbOut(j.out || `pg_restore --clean --if-exists 完成：信封 ${envelope.length} 字节（${pre ? `文件无需压缩（${payload.size} 字节），直接上传` : `压缩后 ${payload.size} / 原文件 ${file.size} 字节`}）。`);
   } catch (e) { $('db-fb').textContent = ''; apiFail('恢复上传', e); }
   busy($('btn-db-restore'), false);
 }

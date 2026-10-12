@@ -104,7 +104,7 @@ export function pushSlice(sid, bytes) { // 返回 [written, outPtr, outCap]（�
   const ob = alloc(cap);
   const w = ex.sr_seal_push(sid, ip, il, ob, cap);
   unput(ip, il);
-  if (w < 0) { unput(ob, cap); throw { error: 'E_NET', msg: `加密分片失败（${w}）` }; }
+  if (w < 0) { unput(ob, cap); throw { error: 'E_NET', msg: `本地加密失败（${w}）` }; }
   return [w, ob, cap];
 }
 export function pushFlush(sid) { // 流结束（len=0）：写出尾段；返回 [written, outPtr, outCap]
@@ -141,7 +141,7 @@ function zPush(sid, bytes) { // 返回 [written, outPtr, outCap]（独立完整 
   const ob = alloc(cap);
   const w = ex.sr_zstd_push(sid, ip, il, ob, cap);
   unput(ip, il);
-  if (w < 0) { unput(ob, cap); throw { error: 'E_NET', msg: `压缩分片失败（${w}）` }; }
+  if (w < 0) { unput(ob, cap); throw { error: 'E_NET', msg: `本地压缩失败（${w}）` }; }
   return [w, ob, cap];
 }
 /** 全量压缩为 Blob（两遍法第一遍）：逐 8MB 片压成独立完整 zstd 帧（服务端流式解码跨帧续解）。
@@ -207,7 +207,7 @@ export async function resumeUploadCore(id, opts = {}) {
   const file = $('pub-file').files[0];
   if (!file || file.size !== saved.size) throw { error: 'E_STATE', msg: `续传需在发布表单选择同一文件（${saved.name}，${saved.size} 字节）` };
   const pem = platformPem();
-  if (!pem.startsWith('-----BEGIN PUBLIC KEY-----')) throw { error: 'E_STATE', msg: '请先在「设置」中配置平台公钥 PEM（管理员分发的 platform_rsa.pub；whoami 自动带回后无需手工粘贴）' };
+  if (!pem.startsWith('-----BEGIN PUBLIC KEY-----')) throw { error: 'E_STATE', msg: '尚未完成安全配置：到「设置」完成' };
   const st = await api('GET', `/_api/import-status?upload=${encodeURIComponent(id)}`);
   const rec = (st.received || []).length;
   opts.onRec?.(rec);

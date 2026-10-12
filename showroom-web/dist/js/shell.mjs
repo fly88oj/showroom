@@ -195,10 +195,13 @@ function onSetBaseInput() {
   }
 }
 
-/** 顶栏账号徽标的管理员角标（纯呈现）：boundAdmin=密码登录继承；admin=whoami 结论。 */
+/** 顶栏账号徽标的管理员角标（纯呈现）：boundAdmin=密码登录继承；admin=whoami 结论。
+ *  F11：数据页 Redis 静态句的「管理员可见全部逻辑库」半句同钩子显隐（state.admin||boundAdmin 才拼入）。 */
 function refreshAdminBadge() {
   const m = $('hd-admin');
   if (m) m.classList.toggle('hidden', !(state.admin || state.boundAdmin));
+  const rc = $('rd-admin-clause');
+  if (rc) rc.classList.toggle('hidden', !(state.admin || state.boundAdmin));
 }
 
 function wireTabs() {

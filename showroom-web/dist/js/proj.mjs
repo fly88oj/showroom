@@ -3,7 +3,7 @@
 import { $, esc, fmtTime, showMsg, errText, fieldErr, clearErrs, busy, copyText, randomProject, toHex } from './util.mjs';
 import { state, ENV_DESC, checkProj, platformPem, pemReady, dataFresh, dataMark, retryOnce } from './state.mjs';
 import { api, consumeNdjson } from './api.mjs';
-import { ensureImages, refreshSpace, onImageRm, apiFail, uploadPayload, resumeUploadCore, sealedTotal, sealBegin, uploadRest, refreshUpIds, ZSTD_LEVEL, upProgress } from './img.mjs';
+import { ensureImages, refreshSpace, onImageRm, apiFail, uploadPayload, resumeUploadCore, sealedTotal, sealBegin, uploadRest, refreshUpIds, upProgress } from './img.mjs';
 import { fillDbTargets, ensureRedisDbs } from './db.mjs';
 import { adminBuilt, activateAdminPanel } from './admin.mjs';
 // —— plan-17 §4：项目 7 态显示机（服务器真值 5 + 本地在途 2；显示层只出 7 词；C4：已知态不再带英文 tooltip，未知原词回落保留） ——
@@ -25,7 +25,7 @@ function projState(p) {
     return { label: '发布中…', cls: 'st-wait', breath: false, tip: '发布请求进行中（本地在途）：行操作已禁用，请稍候', act: { update: 0, ss: null, more: 0 } };
   if (deploy.phase === 'upload' && deploy.project === q)
     return { label: '上传中', cls: 'st-wait', breath: false,
-      tip: '分片上传中（本地在途）：完成状态条见发布页；失败可断点续传', act: { update: 0, ss: null, more: 0 } };
+      tip: '上传中（本地在途）：完成状态条见发布页；失败可断点续传', act: { update: 0, ss: null, more: 0 } };
   if (raw === 'running')
     return { label: '运行中', cls: 'status-ok', breath: false, tip: null, act: { update: 1, ss: 'stop', more: 1 } };
   if (raw === 'exited' || raw === 'paused' || raw === 'created')
@@ -35,7 +35,7 @@ function projState(p) {
   if (raw === 'dead' || (localState.failedUntil.get(q) || 0) > now)
     return { label: '异常', cls: 'status-bad', breath: false, tip: '可看日志排查，或点「发新版本」重新发布', act: { update: 1, ss: null, more: 0, rmOnly: 1 } };
   if (raw === 'missing')
-    return { label: '待部署', cls: 'st-wait', breath: false, tip: '仅镜像无容器：从发布页选择镜像即可拉起', act: { update: 0, ss: null, more: 0, deploy: 1 } };
+    return { label: '待发布', cls: 'st-wait', breath: false, tip: '仅镜像无容器：从发布页选择镜像即可拉起', act: { update: 0, ss: null, more: 0, deploy: 1 } };
   return { label: '已停止', cls: 'status-mid', breath: false, tip: raw, act: { update: 1, ss: 'start', more: 1 } }; // 未知原词回落已停止（原词进 tooltip，唯一保留处）
 }
 /** 行操作区按状态机渲染（§4 可执行动作表）；●+文字双通道（色盲可辨，单色打印可分）。 */
@@ -48,8 +48,8 @@ function rowActionsHtml(p) {
   const st = projState(p);
   const q = esc(p.project);
   const b = (act, label, extra = '') => `<button class="act" data-act="${act}" data-p="${q}"${extra}>${label}</button>`;
-  if (st.act.deploy) // 待部署：部署（→发布页预填项目名）·删除；日志经日志列 ▾ 打开抽屉
-    return `${b('deploy-row', '部署', ' title="到发布页预填该项目并选择镜像拉起"')}${b('rm', '删除')}`;
+  if (st.act.deploy) // 待发布：发布（→发布页预填项目名）·删除；日志经日志列 ▾ 打开抽屉
+    return `${b('deploy-row', '发布', ' title="到发布页预填该项目并选择镜像拉起"')}${b('rm', '删除')}`;
   let html = st.act.update ? b('update', '发新版本') : b('update', '发新版本', ' disabled');
   // B1：停止为危险操作——danger variant（红）+ 二次确认（见 onProjAction），与删除/重置同档警示
   if (st.act.ss) html += st.act.ss === 'stop'
@@ -97,8 +97,8 @@ export function activateTab(name) {
   if (name === 'proj') { refreshProjects(); refreshSpace(); } // TTL 内跳过（plan-17 §3）
   if (name === 'pub') { ensureImages(); refreshSpace(true); } // 发布页：镜像下拉数据源（TTL 300s）+ 空间条强制校准（第1轮UI审查P1：tar 上传准入信息在本页可见）
   if (name === 'img') { ensureImages(); refreshSpace(true); } // 镜像库：清单（TTL）+ 空间条强制校准（上传准入关键信息，§14.1 进入本区即刷新）
-  if (name === 'proj') { evLive.want = true; startEventsStream(); } // 项目页可见即订阅（§3）
-  else stopEventsStream();                                  // 离页退订（服务端收尸 docker events 子进程）
+  if (name === 'proj' || name === 'admin') { evLive.want = true; startEventsStream(); } // F4：事件面板在管理页——proj/admin 可见期均实时订阅（§3）
+  else stopEventsStream();                                  // 离开两页才退订（服务端收尸 docker events 子进程）
   if (name === 'db') { ensureRedisDbs(); fillDbTargets(); } // Redis 区首次展开惰性拉库号；下拉消费已加载 projects
   if (name === 'admin') activateAdminPanel(); // E1：管理页按二级导航当前面板按需刷新（默认「账号」）
 }
@@ -286,7 +286,7 @@ async function onProjAction(ev) {
   if (act === 'more') return toggleMoreMenu(btn);
   if (act === 'retry-projects') { btn.disabled = true; return refreshProjects(true); } // 内联重试（§3）
   closeMoreMenu();
-  if (act === 'update' || act === 'deploy-row') { // 待部署行「部署」=发布页预填项目名（§4）
+  if (act === 'update' || act === 'deploy-row') { // 待发布行「发布」=发布页预填项目名（§4）
     const row = state.projects.find((x) => x.project === project);
     if (row) updateViaPub(row);
     return;
@@ -345,12 +345,12 @@ async function deployRun(mode) {
         dpSet(1, 'on'); dpText('① 压缩中：读取文件…');
         $('dp-prog').max = file.size; $('dp-prog').value = 0;
         const { blob, zstd: pre } = await uploadPayload(file, (done, raw) => {
-          dpText(`① 压缩中：${((done / raw) * 100).toFixed(1)}%（${done} / ${raw} 字节，zstd-${ZSTD_LEVEL}）`);
+          dpText(`① 压缩中：${((done / raw) * 100).toFixed(1)}%（${done} / ${raw} 字节）`);
           $('dp-prog').max = raw; $('dp-prog').value = done;
         });
         deploy.blob = blob; deploy.pre = pre;
         dpSet(1, 'done');
-        dpText(`压缩完成：${pre ? '文件已是 zstd，原样进入上传' : `压缩后 ${blob.size} / 原 ${file.size} 字节`}`);
+        dpText(`压缩完成：${pre ? '文件无需压缩，直接上传' : `压缩后 ${blob.size} / 原 ${file.size} 字节`}`);
       } else {
         dpSet(1, 'skip'); dpSet(2, 'skip');
         dpText('未选镜像文件：跳过压缩与上传，直接发布（要求镜像已入镜像库）');
@@ -406,7 +406,7 @@ async function deployRun(mode) {
     if (phase === 'publish') markPublishFail(project); // 本地「异常」终态标记（§4）
     $('dp-bar').classList.add('err');
     dpSet(phase === 'compress' ? 1 : phase === 'upload' ? 2 : 3, 'err');
-    dpText(`「${PHASE_CN[phase]}」步骤失败：${errText(e)}${phase === 'upload' && deploy.uploadId ? '；点「重试」将从断点续传（保留已传分片）。' : '；可点「重试」再次执行。'}`);
+    dpText(`「${PHASE_CN[phase]}」步骤失败：${errText(e)}${phase === 'upload' && deploy.uploadId ? '；点「重试」将从断点继续。' : '；可点「重试」再次执行。'}`);
     $('dp-retry').classList.remove('hidden');
     apiFail(`发布（${PHASE_CN[phase]}）`, e);
     if (phase === 'compress') deploy.blob = null;
@@ -490,7 +490,7 @@ function dpUploadNote(sent, total) {
 /** 全新上传（发布②段）：import-begin → 本地会话登记 → 逐片加密上传 → 收尾。 */
 async function deployUpload(project, tag) {
   const pem = platformPem();
-  if (!pem.startsWith('-----BEGIN PUBLIC KEY-----')) throw { error: 'E_STATE', msg: '请先在「设置」中配置平台公钥 PEM（管理员分发的 platform_rsa.pub；whoami 自动带回后无需手工粘贴）' };
+  if (!pem.startsWith('-----BEGIN PUBLIC KEY-----')) throw { error: 'E_STATE', msg: '尚未完成安全配置：到「设置」完成' };
   const zb = deploy.blob, file = deploy.file;
   const total = sealedTotal(zb.size);
   dpUploadNote(0, total); // 状态条切入②上传段（已传 0 / 压缩后总长）
@@ -544,7 +544,7 @@ async function onResumeUpload() {
       compNote: (done, raw) => { $('up-status').textContent = `重新压缩中 ${done} / ${raw} 字节（恢复续传需先重建压缩产物）…`; },
     });
     // C5：完成引导并入 up-status 唯一落点（proj-fb 跨页写入删除）
-    $('up-status').textContent = `恢复完成：镜像导入完成（${r.pre ? '原文已是 zstd' : `压缩后 ${r.zsize} 字节`}）。到「发布」页选「镜像库」源即可发布。`;
+    $('up-status').textContent = `恢复完成：镜像导入完成（${r.pre ? '原文无需压缩' : `压缩后 ${r.zsize} 字节`}）。到「发布」页选「镜像库」源即可发布。`;
   } catch (e) {
     apiFail('恢复上传', e);
     $('up-status').textContent = `恢复中断：${errText(e)}`;
@@ -620,7 +620,7 @@ export function stopEventsStream() {
   if (evLive.debounce) { clearTimeout(evLive.debounce); evLive.debounce = null; }
   if (evLive.ac) { evLive.ac.abort(); evLive.ac = null; }
   const st = $('ev-state'); // S2：ev-state 迁入管理页（非管理员不存在）
-  if (st) st.textContent = '未连接（项目页可见时自动订阅）';
+  if (st) st.textContent = '未连接（项目页/管理页可见时自动订阅）';
 }
 export async function startEventsStream() {
   if (!evLive.want || evLive.ac || !state.loggedIn) return;

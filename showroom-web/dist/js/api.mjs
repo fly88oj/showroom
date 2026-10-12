@@ -59,7 +59,7 @@ export function signHeaderPtr(method, pathQ, bodyPtr, bodyLen) {
 
 /** 统一 API 调用：json 传对象 → JSON body；Uint8Array → 原始 body；null → 空 body。signal 供流式 GET 中止。 */
 export async function apiDo(method, pathQ, body, signal) {
-  if (!state.seed || !state.user) throw { error: 'E_STATE', msg: '未配置密钥或账号' };
+  if (!state.seed || !state.user) throw { error: 'E_STATE', msg: '尚未登录' };
   let bodyBytes = new Uint8Array(0), isJson = false;
   if (body && typeof body === 'object' && !(body instanceof Uint8Array)) {
     bodyBytes = enc.encode(JSON.stringify(body)); isJson = true;

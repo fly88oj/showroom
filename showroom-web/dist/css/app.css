@@ -195,7 +195,7 @@
   progress::-webkit-progress-value { background: var(--accent-hi); border-radius: 3px; transition: width .15s ease; }
   progress::-moz-progress-bar { background: var(--accent-hi); border-radius: 3px; }
   .status-ok { color: var(--ok); } .status-bad { color: var(--bad); } .status-mid { color: var(--warn); }
-  /* plan-17 §4：7 态状态机——待部署=灰（仅镜像无容器）；重建中=呼吸（reduced-motion 时静止） */
+  /* plan-17 §4：7 态状态机——待发布=灰（仅镜像无容器）；重建中=呼吸（reduced-motion 时静止） */
   .st-wait { color: var(--fg-dim); }
   .st-breath { animation: st-pulse 1.6s ease-in-out infinite; }
   @keyframes st-pulse { 50% { opacity: .4; } }

@@ -247,7 +247,7 @@ const resp = (status, obj) => ({ ok: status < 400, status, text: async () => JSO
 const WHOAMI_PEM = '-----BEGIN PUBLIC KEY-----\nMIIBsmokeAutoPem\n-----END PUBLIC KEY-----\n';
 const PROJECTS = { projects: [
   { project: 'demo', user: 'alice', tag: 'v1', url: '/demo/', status: 'running', port: 8100, mem: '256m', cpu: 0, updated: 1760107200 },
-  { project: 'demo0', user: 'alice', tag: 'v0', url: '/demo0/', status: 'missing', port: 0, mem: '128m', cpu: 0, updated: 1760020800 }, // §4：仅镜像无容器 → 待部署
+  { project: 'demo0', user: 'alice', tag: 'v0', url: '/demo0/', status: 'missing', port: 0, mem: '128m', cpu: 0, updated: 1760020800 }, // §4：仅镜像无容器 → 待发布
 ] };
 let mode = 'unregistered'; // unregistered | ok（key-bind 成功 → ok）
 // —— plan-16 §2.2 auth 端点族 mock（与页面 MOCK 垫片同一 toy 协议：ke2 内嵌验证因子，
@@ -473,9 +473,9 @@ globalThis.fetch = async (url, init = {}) => {
     return resp(200, { dump_id: 'dmp-smoke-1' });
   }
   if (u.includes('/_api/db-dump-status')) {
-    statusN++; // 第一轮 running，第二轮 ready（轮询两轮路径）
+    statusN++; // 第一轮 running，第二轮 ready（轮询两轮路径）；F8：ready 附服务端原文 out（db-out 优先展示）
     return statusN === 1 ? resp(200, { ready: false, total: 0, error: null })
-                         : resp(200, { ready: true, total: dumpEnv.env.length, error: null });
+                         : resp(200, { ready: true, total: dumpEnv.env.length, error: null, out: 'pg_dump -Fc 导出完成（服务端原文）。' });
   }
   if (u.includes('/_api/db-dump-chunk')) {
     const m = u.match(/[?&]offset=(\d+)&len=(\d+)/) || [];
@@ -499,7 +499,7 @@ globalThis.fetch = async (url, init = {}) => {
     return resp(200, { upload_id: curUploadId });
   }
   if (u.includes('/_api/import-chunk')) {
-    if (chunkFailN > 0) { chunkFailN--; return resp(500, { error: 'E_NET', msg: '模拟分片网络失败' }); }
+    if (chunkFailN > 0) { chunkFailN--; return resp(500, { error: 'E_NET', msg: '模拟上传网络失败' }); }
     importChunkLens.push(init.body?.length ?? 0);
     upSessions[curUploadId]?.received.push(Number(u.match(/seq=(\d+)/)[1]));
     dpSnaps.push({ txt: $s('dp-text').textContent || '', v: $s('dp-prog').value, m: $s('dp-prog').max, s2: $s('dp-s2').classList.contains('on') });
@@ -667,10 +667,10 @@ await sleep(60); // 项目列表异步渲染
 ok(($s('proj-fb').textContent || '') === '', '成功不再写「已加载 N 项」计数副题（proj-fb 仅失败/操作反馈用）');
 {
   const ptbl = $s('proj-tbl:q').innerHTML || '';
-  ok(ptbl.includes('>●</span> 运行中') && ptbl.includes('>●</span> 待部署'), 'S5：●+文字双通道状态（运行中/待部署）');
-  ok(!ptbl.includes('未部署') && !ptbl.includes('missing'), 'S5：「未部署」「missing」零进 UI（§4 词表纪律）');
-  ok(ptbl.includes('仅镜像无容器：从发布页选择镜像即可拉起'), 'S5：待部署 tooltip 说明镜像在库可拉起');
-  ok(ptbl.includes('data-act="deploy-row"') && />部署</.test(ptbl), 'S5：待部署行可执行「部署」（→发布页预填）');
+  ok(ptbl.includes('>●</span> 运行中') && ptbl.includes('>●</span> 待发布'), 'S5：●+文字双通道状态（运行中/待发布）');
+  ok(!ptbl.includes('未部署') && !ptbl.includes('missing') && !ptbl.includes('待部署'), 'S5：「未部署」「missing」「待部署」零进 UI（§4 词表纪律；F1 统一「待发布」）');
+  ok(ptbl.includes('仅镜像无容器：从发布页选择镜像即可拉起'), 'S5：待发布 tooltip 说明镜像在库可拉起');
+  ok(ptbl.includes('data-act="deploy-row"') && />发布</.test(ptbl), 'S5/F1：待发布行可执行「发布」（→发布页预填，与「发新版本」同词族）');
   ok(!/title="running"/.test(ptbl) && !/title="exited"/.test(ptbl) && !/title="missing"/.test(ptbl),
     'R5 C4：已知状态不再带英文 tooltip（原词仅未知回落分支保留）');
   ok(!ptbl.includes('>打开<') && !ptbl.includes('非本人项目'), 'R5 A2：「打开」按钮删除（URL 列即链接）；他人项目分支零残留');
@@ -689,6 +689,7 @@ ok(($s('rd-db').innerHTML || '').includes('<option value="0">'), 'redis-dbs：�
 ok(($s('rd-keys').innerHTML || '').includes('sr_demo'), 'redis-keys：键列表渲染（前缀过滤请求）');
 ok($s('rd-count').textContent === '共 1 个键', '「共 N 个键」提示（C2：Redis 文案统一「键」；「可能截断」只留在静态说明）');
 ok(!els.has('rd-scope'), '§13.2 R4 裁决：管理员视图徽章已删（顶栏「管」角标唯一，同一信息只出现一次）');
+ok(hidden('rd-admin-clause'), 'F11：非管理员不渲染「管理员可见全部逻辑库」半句（Redis 静态句按受众拆分）');
 $s('rd-keys').value = 'sr_demo';
 fire($s('rd-keys'), 'change');
 await sleep(60);
@@ -896,6 +897,7 @@ ok(chunkCalls.length === 2, `4MB 分片循环两个 chunk（实际 ${chunkCalls.
 ok(chunkCalls[0]?.off === 0 && chunkCalls[0]?.len === 4 * 1024 * 1024, '第一片 offset=0 len=4MiB');
 ok(chunkCalls[1]?.off === 4 * 1024 * 1024 && chunkCalls[1]?.len === dumpEnv.env.length - 4 * 1024 * 1024, '第二片 offset=4MiB len=尾片');
 ok($s('db-prog').value === $s('db-prog').max && Number($s('db-prog').max) === dumpEnv.env.length, '进度条按 offset/total 收满');
+ok(($s('db-prog-txt').textContent || '') === '完成：已下载 demo.dump', 'F8：进度条完成文案只报文件名（信封字节/片数/解密字节数不再重复）');
 ok(blobs.length === 1, '产物经 Blob 下载（createObjectURL 一次）');
 {
   const got = new Uint8Array(await blobs[0].arrayBuffer());
@@ -904,7 +906,7 @@ ok(blobs.length === 1, '产物经 Blob 下载（createObjectURL 一次）');
   for (let i = 0; same && i < got.length; i += 4096) if (got[i] !== dumpEnv.plain[i]) same = false;
   ok(same, `分片信封经 wasm 流式解密还原明文（${got.length} 字节，抽样+首尾比对）`);
 }
-ok(($s('db-out').textContent || '').includes('三段式下载完成'), 'dbOut 记录三段式结果');
+ok(($s('db-out').textContent || '') === 'pg_dump -Fc 导出完成（服务端原文）。', 'F8：db-out 保留服务端原文（j.out 优先；技术明细单通道归操作输出）');
 
 // ═══ 场景 7：上传压缩统一（zstd）——发布表单压缩后上传 + 恢复上传魔数两态 ═══
 {
@@ -996,7 +998,8 @@ ok(($s('db-out').textContent || '').includes('三段式下载完成'), 'dbOut �
   const importStatusBase = importStatusN;
   fire($s('pub-form'), 'submit', { preventDefault() {} });
   ok(await waitFor(() => shown('dp-retry'), 20000), '上传失败：出现重试按钮（片级 3 次重试后放弃）');
-  ok($s('dp-bar').classList.contains('err') && ($s('dp-text').textContent || '').includes('断点续传'), '上传失败：标红并提示从断点续传');
+  ok($s('dp-bar').classList.contains('err') && ($s('dp-text').textContent || '').includes('从断点继续'), '上传失败：标红并提示从断点继续（F9：机制词「保留已传分片」清除）');
+ok(!($s('dp-text').textContent || '').includes('分片'), 'F9：上传失败文案无「分片」字样');
   ok([...store.keys()].some((k) => k.startsWith('sr.up.')), '上传会话已登记本地（upload_id 可续传）');
   ok(publishN === 2, '上传失败未触达发布');
   chunkFailN = 0;
@@ -1061,7 +1064,7 @@ ok(($s('db-out').textContent || '').includes('三段式下载完成'), 'dbOut �
   click('btn-db-restore');
   ok(await waitFor(() => restoreLens.length === 1, 20000), '恢复上传（已压缩态）完成');
   ok(restoreLens[0] === sealedTotal(dumpZ.length), `已压缩态：信封按原样字节核算（${restoreLens[0]}）`);
-  ok(($s('db-out').textContent || '').includes('原样上传'), '已压缩态回显「原样上传」');
+  ok(($s('db-out').textContent || '').includes('无需压缩'), 'F9：已压缩态回显「无需压缩，直接上传」（原「已是 zstd 原样上传」）');
 
   // 未压缩态：原生 -Fc 形态（PGDMP 头，魔数非 zstd → 页面压缩后上传）
   const fcAll = new Uint8Array(plain.length);
@@ -1090,6 +1093,7 @@ ok(store.get('sr.seed') === seed1 && store.get('sr.user') === 'alice', '种子�
 await sleep(60); // whoami 异步返回
 ok(els.has('ad-users-tbl') && !els.has('ad-st-auto'),
   'whoami admin=true：管理区 DOM 渲染（第五「管理」标签随 whoami 构建）；自动刷新恒开无开关（R4）');
+ok(shown('rd-admin-clause'), 'F11：管理员渲染「管理员可见全部逻辑库」半句（whoami 结论拼入 Redis 静态句）');
 
 // —— §13.1/§13.2 管理员全量视角：镜像清单（whoami 回退）+ Redis 库（admin_view 全量）——
 ok(!els.has('img-scope') && !els.has('proj-scope'),
@@ -1104,13 +1108,14 @@ ok(!hidden('adp-users') && hidden('adp-projects') && hidden('adp-status') && hid
   'E1：管理页默认「账号」面板（五面板互斥显示）');
 ok(adminUsersN >= 1, '进入管理页（默认账号面板）：users 自动拉取');
 const otbl = $s('ad-users-tbl:q').innerHTML || '';
-ok(otbl.includes('alice') && otbl.includes('kid-a1') && otbl.includes('kid-b1'), '账号与钥匙表：账号 + 钥匙 kid 渲染');
+ok(otbl.includes('alice') && otbl.includes('kid-a1') && otbl.includes('kid-b1'), 'F2：账号表：账号 + 设备（kid 标识）渲染');
 ok(/data-act="userunadmin" data-user="alice"/.test(otbl) && /data-act="useradmin" data-user="bob"/.test(otbl),
   'D1：设/免管理员在账号行（alice=管理员徽标+取消 / bob=设为）');
 ok(!otbl.includes('>普通<') && !/data-act="(un)?admin" data-kid=/.test(otbl),
-  'D1：钥匙行「管理员/普通」列与钥匙级设免按钮零残留');
-ok(otbl.includes('2026/09/01') && otbl.includes('项目数 2'), '绑定时间与项目数展示');
-ok(otbl.includes('吊销整个账号') && otbl.includes('删除钥匙'), '行内管理动作按钮渲染（吊销账号/删除钥匙）');
+  'D1：设备行「管理员/普通」列与设备级设免按钮零残留');
+ok(otbl.includes('2026/09/01') && otbl.includes('项目数 2'), '登录时间与项目数展示');
+ok(otbl.includes('吊销整个账号') && otbl.includes('移除此设备'), '行内管理动作按钮渲染（吊销账号/移除此设备）');
+ok(otbl.includes('设备 2 台') && !otbl.includes('钥匙') && !otbl.includes('把</span>'), 'F2：设备词族收口（「设备 N 台」；钥匙 N 把/删除钥匙零残留）');
 // E3：全部项目面板（跨用户表 + owner 列 + 行操作）
 const admProjBase = adminProjectsN;
 clickAdp('projects');
@@ -1185,8 +1190,14 @@ confirmMsgs.length = 0;
 const act = (a, user, kid) => fire($s('ad-users-tbl'), 'click', { target: { closest: () => ({ dataset: { act: a, user, kid } }) } });
 act('keyrm', 'bob', 'kid-b1');
 await sleep(60);
-ok(keyRmBodies.length === 1 && keyRmBodies[0].user === 'bob' && keyRmBodies[0].kid === 'kid-b1', '删除钥匙：key-rm 提交体 {user,kid}');
-ok((confirmMsgs.at(-1) || '').includes('删除') && (confirmMsgs.at(-1) || '').includes('失效'), '删除钥匙：confirm 中文文案写明影响');
+ok(keyRmBodies.length === 1 && keyRmBodies[0].user === 'bob' && keyRmBodies[0].kid === 'kid-b1', '移除此设备：key-rm 提交体 {user,kid}');
+{
+  const krmAsk = confirmMsgs.at(-1) || '';
+  ok(krmAsk.includes('移除') && krmAsk.includes('无法使用') && krmAsk.includes('重新登录'),
+    'F2：移除设备 confirm 设备语言（立即无法使用 + 重新登录即可重新登记）');
+  ok(!krmAsk.includes('钥匙') && !krmAsk.includes('绑定') && !krmAsk.includes('密钥') && !krmAsk.includes('删除'),
+    'F2：移除设备 confirm 无钥匙/绑定/密钥/删除字样');
+}
 act('userunadmin', 'alice');
 await sleep(60);
 ok(userAdminBodies.some((b) => b.admin === false && b.user === 'alice' && !('kid' in b)),
@@ -1216,6 +1227,8 @@ await sleep(60);
 const psConfirm = confirmMsgs.at(-1) || '';
 ok(psConfirm.includes('bob') && psConfirm.includes('补发') && psConfirm.includes('失效') && !psConfirm.includes('仅显示一次'),
   '补发密码：confirm 中文文案含账号名与失效语义（「仅显示一次」只在对话框内保留一处）');
+ok(psConfirm.includes('其他设备不受影响') && !psConfirm.includes('钥匙') && !psConfirm.includes('绑定'),
+  'F2：补发密码 confirm 设备语言（其他设备不受影响；无钥匙/绑定词）');
 ok(passwdSetBodies.length === 1 && passwdSetBodies[0].user === 'bob' && /^[a-zA-Z0-9]{16}$/.test(passwdSetBodies[0].password),
   '补发提交体：{user, password=<crypto 随机 16 位>}');
 ok($s('dlg-passwd-set').open === true && ($s('ad-ps-user').textContent || '') === 'bob'
@@ -1243,6 +1256,8 @@ ok(($s('msg').textContent || '').includes('E_AUTH'), 'admin 接口 404 E_AUTH：
 adminFail404 = false;
 
 // —— §15.1/§15.2 主机编排（E4：宿主配置面板独立进入即拉取）——
+// 桩对齐真实 HTML 初始 class（惰性元素桩无 class 信息；F3 keepEdits 依 hs-review 初始 hidden 判定预演不在架）
+for (const id of ['hs-review', 'hs-report', 'hs-confirm']) $s(id).classList.add('hidden');
 clickAdp('host');
 await sleep(80);
 ok(hostGetN >= 1, '切「宿主配置」面板：/_api/admin/host 自动拉取（期望状态）');
@@ -1292,6 +1307,8 @@ ok(!hidden('hs-report') && hsRep.includes('执行报告') && hsRep.includes('完
 ok(hsRep.includes('成功') && hsRep.includes('sr-redis'), '报告行含成功标记与目标');
 ok(await waitFor(() => hostGetN >= 2, 3000), '执行后自动重取期望状态（面板收敛）');
 ok(!$s('hs-confirm').disabled && $s('hs-confirm').textContent === '确认执行', '确认执行按钮恢复原文与可用');
+ok(!($s('msg').textContent || '').includes('主机变更已执行') && ($s('hs-fb').textContent || '').includes('执行完成'),
+  'F7：主机执行单通道（面板 fb「执行完成」唯一播报；顶部条不再重复）');
 
 // R5 B4：预演后任一编辑控件 change → 预演清单即失效（收起 + 提示重新预演）
 hostPostBodies.length = 0;
@@ -1367,6 +1384,8 @@ const hsRxRun = hostPostBodies.find((b) => b.redis_databases !== undefined && b.
 ok(hsRxRun && hsRxRun.redis_databases === 256, '执行扩容：POST {redis_databases,confirm:true}');
 const hsRxFb = $s('hs-rx-fb').textContent || '';
 ok(hsRxFb.includes('扩容完成') && hsRxFb.includes('256') && hsRxFb.includes('3 秒'), '结果回报：databases → N + 重启耗时');
+ok(!($s('msg').textContent || '').includes('Redis 逻辑库池已扩容'),
+  'F7：扩容单通道（面板 fb 唯一播报；顶部条「Redis 逻辑库池已扩容到 N」删除）');
 ok(await waitFor(() => hostGetN >= 3, 3000), '扩容后自动重取期望状态（池数字收敛）');
 ok(hidden('hs-rx-run'), '执行后：扩容按钮收起（防重复点击）');
 ok(!$s('hs-rx-run').disabled && $s('hs-rx-run').textContent === '我已了解，执行扩容', '扩容按钮恢复原文与可用');
@@ -1380,6 +1399,18 @@ ok(($s('rd-db').innerHTML || '').includes('<option value="3">'),
   'admin 钥匙：Redis DB 下拉全量（含 dbs 0-3；R4 裁决后无徽章，全量视角由数据本身体现）');
 clickTab('proj');
 whoamiAdmin = false;
+
+// —— F4：实时事件面板在管理页——admin 可见期同样订阅，离开 proj/admin 才退订 ——
+const evF4a = eventsN;
+clickTab('pub'); // 离开订阅面（发布页无事件面板）→ 退订
+ok(($s('ev-state').textContent || '').includes('未连接'), 'F4：离开 proj/admin（发布页）→ 事件流退订');
+clickTab('admin'); // 管理页（实时事件面板所在）→ 订阅
+ok(await waitFor(() => eventsN > evF4a, 5000), 'F4：切管理页 → 事件流订阅（面板可见期真实时）');
+await sleep(80);
+const evF4b = eventsN;
+clickTab('proj'); // proj ↔ admin 同属订阅面：切换不重复订阅
+await sleep(80);
+ok(eventsN === evF4b, 'F4：admin → proj 切换不重复订阅（两页同属订阅面）');
 
 // —— 修改密码（plan-16 §2.2 pw 三件序列收口）：校验 → 当前密码本地校验 → pw-begin/commit → 重新登录 ——
 click('btn-pwchange');
@@ -1598,9 +1629,9 @@ ok(html.indexOf('id="rd-db"') > html.indexOf('id="tab-db"') && html.indexOf('id=
   'S2：Redis 浏览迁入数据页（rd-* 换父容器，id 不变）');
 ok(html.includes('data-drawer') || html.includes("drawerRow.dataset.drawer"), 'S2：行抽屉 data-drawer 机制（无全局行 id）');
 {
-  const words = ['运行中', '已停止', '重建中', '异常', '待部署', '上传中', '发布中'];
+  const words = ['运行中', '已停止', '重建中', '异常', '待发布', '上传中', '发布中'];
   for (const w of words) ok(html.includes(w), `S5/验收 5：7 态词表含「${w}」`);
-  ok(!html.includes('未部署'), 'S5/验收 5：「未部署」全站零出现');
+  ok(!html.includes('未部署') && !html.includes('待部署'), 'S5/验收 5/F1：「未部署」「待部署」全站零出现（统一「待发布/发布」词族）');
   ok(html.includes('st-breath') && html.includes('@keyframes st-pulse'), 'S5：重建中呼吸动画（reduced-motion 全局禁用即静止）');
   ok(html.includes('markPublishing') && html.includes('markPublishDone') && html.includes('markPublishFail'),
     'S5：本地在途标记（发布中/上传中/异常终态/60s 重建窗口）已接线');
@@ -1668,9 +1699,17 @@ for (const ep of ['/_api/admin/users', '/_api/admin/user-add', '/_api/admin/stat
   ok(html.includes(ep), `§12.2：${ep} 已接线（user-revoke/key-rm/user-admin 经 ep 表驱动；R5 D2 key-admin 垫片移除）`);
 }
 ok(!html.includes("key-admin") && !html.includes('/_api/admin/key-admin'), 'R5 D2：key-admin 兼容垫片端点零残留（前后端同步移除）');
-for (const s of ['发放新账号', '同时授予管理员', '仅显示一次', '吊销整个账号', '设为管理员', '取消管理员', '删除钥匙', '平台状态', '管理']) {
+for (const s of ['发放新账号', '同时授予管理员', '仅显示一次', '吊销整个账号', '设为管理员', '取消管理员', '移除此设备', '平台状态', '管理']) {
   ok(html.includes(s), `§12.2 新增文案全中文：${s}`);
 }
+ok(html.includes('<h2>账号</h2>') && html.includes('<th>设备</th><th>登录时间</th><th>操作</th>')
+  && html.includes('设备 ${keys.length} 台') && html.includes('（该账号暂无设备）'),
+  'F2：管理页账号面板设备词族（h2「账号」/表头 设备·登录时间/设备 N 台/暂无设备）');
+ok(!html.includes('账号与钥匙') && !html.includes('删除钥匙') && !html.includes('绑定时间') && !html.includes('钥匙 kid')
+  && !html.includes('（该账号没有钥匙）') && !html.includes('钥匙 ${keys.length} 把'),
+  'F2：钥匙词族零残留（账号与钥匙/删除钥匙/绑定时间/钥匙 kid/没有钥匙/钥匙 N 把）');
+ok(!html.includes('该账号任意钥匙登录即具管理权限') && html.includes('该账号登录即具管理权限'),
+  'F2：账号级权限表述设备语言化（「该账号登录即具管理权限」）');
 // —— §13.1 三入口并存（一键不取代分步）+ §13.2/13.3 Redis 隔离 ——
 ok(html.includes('id="pub-submit"') && html.includes('id="btn-upload-only"'),
   'plan-17 §5：发布主按钮 pub-submit + 次要按钮「仅上传」（三入口收敛为单表单）');
@@ -1737,7 +1776,7 @@ ok(html.includes('id="admin-subnav"') && html.includes('data-adp="users"') && ht
   'R5 E1：管理页二级导航五面板（账号|全部项目|平台状态|宿主配置|实时事件）');
 ok(html.includes('id="ad-projects-tbl"') && html.includes('所属账号') && html.includes('全部账号的项目（管理员）'),
   'R5 E3：全部项目面板（跨用户表 + 说明一句）');
-ok(html.includes('管理员是账号属性：该账号任意钥匙登录即具管理权限'), 'R5 C9/D3：账号与钥匙底部长说明缩为一句（账号级权限表述）');
+ok(html.includes('管理员是账号属性：该账号登录即具管理权限'), 'R5 C9/D3+F2：账号面板底部长说明缩为一句（账号级权限表述）');
 ok(html.includes('取消勾选即禁用，重新勾选即启用'), 'R5 C9：中间件说明缩为一句');
 ok(html.includes('配置已修改，请重新预演'), 'R5 B4：主机预演失效提示接线');
 ok(html.includes('执行失败（原文见顶部提示）') && html.includes('加载失败（将自动重试）') && html.includes('（加载失败，将自动重试）'),
@@ -1745,6 +1784,34 @@ ok(html.includes('执行失败（原文见顶部提示）') && html.includes('�
 ok(html.includes('收起日志') && html.includes('▴') && html.includes('更多 ▴'), 'R5 B1/B2：抽屉 ▾/▴ 翻转 + 更多菜单箭头翻转接线');
 ok(html.includes('a:hover:not(.act) { color: var(--fg-bright); text-decoration: underline; }') && html.includes('select:not(:disabled):hover'),
   'R5 B6：a:hover 下划线变色 + select hover 补齐');
+// —— 第三轮 IA 复查（F3/F4/F5/F6/F7/F9/F11/F12）静态断言 ——
+ok(!html.includes('已刷新') && !html.includes('加载期望状态中'),
+  'F3：宿主面板成功静默（「已刷新/加载期望状态中」回执删除；失败才说话）');
+ok(html.includes("if (name === 'proj' || name === 'admin') { evLive.want = true; startEventsStream(); }")
+  && html.includes("const adminShown = !!$('tab-admin') && !$('tab-admin')?.classList?.contains('hidden');"),
+  'F4：事件流订阅面=proj|admin（activateTab + 可见性钩子双接线）');
+ok(html.includes('自动压缩并上传再发布') && html.includes('自动压缩 → 上传 → 发布')
+  && !html.includes('自动压缩并分片上传') && !html.includes('分片上传 → 发布'),
+  'F5：发布页「分片」两处清除（文件说明 + 发布说明步骤）');
+ok(html.includes('备份内容用下载专用密码加密') && html.includes('自动生成下载专用密码') && !html.includes('一次性密钥'),
+  'F6：数据页备份「一次性密钥」→「下载专用密码」（两处，词族零残留）');
+ok(!html.includes('主机变更已执行') && !html.includes('逻辑库池已扩容到'),
+  'F7：宿主执行/扩容单通道（顶部条播报删除，面板 fb 唯一）');
+ok(html.includes('正在准备下载…') && html.includes('下载中：${offset}') && html.includes('压缩中 ${done} / ${raw} 字节…')
+  && html.includes('文件无需压缩，直接上传') && html.includes('从断点继续。')
+  && html.includes('本地加密失败') && html.includes('本地压缩失败') && html.includes("'尚未登录'"),
+  'F9：进度/错误文案机制词清尾（RSA 密钥/分片/zstd 字样→人读词）');
+ok(!html.includes('zstd-${ZSTD_LEVEL}') && !html.includes('加密分片失败') && !html.includes('压缩分片失败')
+  && !html.includes('分片下载中') && !html.includes('保留已传分片') && !html.includes('未配置密钥或账号')
+  && !html.includes('分片总长不一致') && !html.includes('分片长度异常') && !html.includes('分片上传中'),
+  'F9：旧机制词组零残留（用户可见面）');
+ok(html.includes('id="rd-admin-clause"') && html.includes('；管理员可见全部逻辑库'),
+  'F11：Redis 静态句管理员半句拆分（默认隐藏，refreshAdminBadge 按 admin||boundAdmin 拼入）');
+ok((html.match(/尚未完成安全配置/g) || []).length === 4
+  && !html.includes('请先在「设置」中配置平台公钥') && !html.includes('恢复需先配置平台公钥'),
+  'F12：未配置 PEM 引导统一「尚未完成安全配置：到「设置」完成」（hint + proj/img/db 三处错误）');
+ok(html.includes('每项目一库，由平台统一分配') && !html.includes('池上限见平台 policy'),
+  'F12：ENV_DESC REDIS_DB 说明去 policy 机制词');
 // —— 界面规范静态断言（B 部分逐条） ——
 ok(!/<div[^>]+onclick|onclick=/.test(html), '规范：无内联事件（含 div onclick）');
 ok(!/transition\s*:\s*all/.test(html), '规范：无 transition: all（过渡列明属性）');
