@@ -110,6 +110,8 @@ impl IntoResponse for ApiError {
 }
 
 pub async fn run(root: PathBuf) -> R<()> {
+    // R4 账号级 admin：启动即迁移旧 kid 标记（先于任何鉴权判定，防首请求卡死）
+    state::migrate_admin_markers(&root);
     // 平台 RSA 缺失自动生成（首次）
     if !root.join("state/platform_rsa").exists() {
         let p = ops::init_keys(&root)?;
@@ -221,7 +223,7 @@ async fn dispatch(
     if method == "GET" && path == "/_api/logs-stream" {
         let project = qget(&q, "project")?;
         state::check_name("project", &project)?;
-        user_check(&s.root, &project, &user, &kid)?;
+        user_check(&s.root, &project, &user)?;
         let tail: u32 = q.get("tail").and_then(|t| t.parse().ok()).unwrap_or(100).min(10000);
         let root = s.root.clone();
         return blk(move || streams::logs_stream(&root, &project, tail)).await;
@@ -262,7 +264,7 @@ async fn dispatch(
             // 心跳续期已统一在 auth() 中处理（每次认证 touch）
             Ok(Json(json!({
             "user": user, "kid": kid,
-            "admin": ops::key_is_admin(&s.root, &user, &kid),
+            "admin": state::user_is_admin(&s.root, &user),
             "platform_pem": std::fs::read_to_string(s.root.join("state/platform_rsa.pub")).unwrap_or_default(),
         })))
         }
@@ -404,11 +406,19 @@ async fn dispatch(
             Ok(Json(json!({"ok": true})))
         }
 
-        ("POST", "/_api/admin/key-admin", Collected::Mem(b)) => {
+        ("POST", "/_api/admin/user-admin", Collected::Mem(b)) => {
             admin_guard(s, &user, &kid)?; // 先守卫后解析 body：非管理员不因 body 畸形泄露 E_NAME/E_AUTH 差异
-            let req: AdminKeyAdminReq = jbody(b)?;
+            let req: AdminUserAdminReq = jbody(b)?;
             let root = s.root.clone();
-            blk(move || ops::key_set_admin(&root, &req.user, &req.kid, req.admin)).await?;
+            blk(move || ops::user_set_admin(&root, &req.user, req.admin)).await?;
+            Ok(Json(json!({"ok": true})))
+        }
+        // 兼容垫片：旧 key-admin 路由（web 批次同步后移除）——kid 忽略，语义即 user-admin
+        ("POST", "/_api/admin/key-admin", Collected::Mem(b)) => {
+            admin_guard(s, &user, &kid)?;
+            let req: AdminUserAdminReq = jbody(b)?;
+            let root = s.root.clone();
+            blk(move || ops::user_set_admin(&root, &req.user, req.admin)).await?;
             Ok(Json(json!({"ok": true})))
         }
 
@@ -439,10 +449,13 @@ async fn dispatch(
         ("GET", "/_api/projects", _) => {
             let root = s.root.clone();
             blk(move || {
+                // 「我的项目」恒只回本人项目（R4 用户裁决；亦符合零信息暴露——跨用户项目名/
+                // 账号名不再对普通登录者枚举）；管理员跨项目视图归管理页
                 // §15.2：禁用中间件的行附 middleware_disabled 标注「未启用」
                 let disabled = middleware::disabled_middleware(&root);
                 let v: Vec<_> = ops::ps(&root)
                     .into_iter()
+                    .filter(|(_, c, _)| c.user == user)
                     .map(|(p, c, st)| {
                         let mut row = c.to_json(&p, &st);
                         if !disabled.is_empty() {
@@ -459,7 +472,7 @@ async fn dispatch(
         // —— 镜像列表（SPEC §13.1，部署表单 ComboBox）：catalog+tags 展平；
         //     按签名用户 `<user>/` 前缀过滤；admin 钥匙不过滤 ——
         ("GET", "/_api/images", _) => {
-            let admin = ops::key_is_admin(&s.root, &user, &kid);
+            let admin = state::user_is_admin(&s.root, &user);
             let root = s.root.clone();
             let o = user.clone();
             let images = blk(move || ops::images(&root, if admin { None } else { Some(&o) })).await?;
@@ -476,7 +489,7 @@ async fn dispatch(
 
         ("POST", "/_api/image-rm", Collected::Mem(b)) => {
             let req: ImageRmReq = jbody(b)?;
-            let (repo, tag) = image_guard(s, &req.image, &user, &kid)?; // 先守卫后进内核
+            let (repo, tag) = image_guard(s, &req.image, &user)?; // 先守卫后进内核
             let root = s.root.clone();
             let freed = blk(move || ops::image_rm(&root, &repo, &tag)).await?;
             Ok(Json(json!({"freed_est_mb": freed})))
@@ -505,7 +518,7 @@ async fn dispatch(
         ) => {
             let req: ProjectReq = jbody(b)?;
             state::check_name("project", &req.project)?;
-            user_check(&s.root, &req.project, &user, &kid)?;
+            user_check(&s.root, &req.project, &user)?;
             let act: &'static str = match path {
                 "/_api/stop" => "stop",
                 "/_api/start" => "start",
@@ -592,7 +605,7 @@ async fn dispatch(
         ("POST", "/_api/db-sql", Collected::Mem(b)) => {
             let req: DbSqlReq = jbody(b)?;
             state::check_name("project", &req.project)?;
-            user_check(&s.root, &req.project, &user, &kid)?;
+            user_check(&s.root, &req.project, &user)?;
             let (p, sql, confirm) = (req.project, req.sql, req.confirm.unwrap_or(false));
             let root = s.root.clone();
             let out = blk(move || dbmaint::sql(&root, &p, &sql, confirm)).await?;
@@ -602,7 +615,7 @@ async fn dispatch(
         ("GET", "/_api/db-tables", _) => {
             let project = qget(&q, "project")?;
             state::check_name("project", &project)?;
-            user_check(&s.root, &project, &user, &kid)?;
+            user_check(&s.root, &project, &user)?;
             let root = s.root.clone();
             let tables = blk(move || dbmaint::tables(&root, &project)).await?;
             Ok(Json(json!({"tables": tables})))
@@ -611,7 +624,7 @@ async fn dispatch(
         ("POST", "/_api/db-preview", Collected::Mem(b)) => {
             let req: DbPreviewReq = jbody(b)?;
             state::check_name("project", &req.project)?;
-            user_check(&s.root, &req.project, &user, &kid)?;
+            user_check(&s.root, &req.project, &user)?;
             let (p, table, limit) = (req.project, req.table, req.limit.unwrap_or(50));
             let root = s.root.clone();
             let (columns, rows) = blk(move || dbmaint::preview(&root, &p, &table, limit)).await?;
@@ -622,7 +635,7 @@ async fn dispatch(
         ("POST", "/_api/db-dump-begin", Collected::Mem(b)) => {
             let req: DbDumpBeginReq = jbody(b)?;
             state::check_name("project", &req.project)?;
-            user_check(&s.root, &req.project, &user, &kid)?;
+            user_check(&s.root, &req.project, &user)?;
             let root = s.root.clone();
             let o = user.clone();
             let (p, pem) = (req.project, req.client_pub_pem);
@@ -642,7 +655,7 @@ async fn dispatch(
             let project = qget(&q, "project")?;
             let confirm = q.get("confirm").map(|v| v == "true").unwrap_or(false);
             state::check_name("project", &project)?;
-            user_check(&s.root, &project, &user, &kid)?;
+            user_check(&s.root, &project, &user)?;
             let root = s.root.clone();
             let p = project;
             let tmp = tmp.clone();
@@ -653,7 +666,7 @@ async fn dispatch(
         ("POST", "/_api/db-reset", Collected::Mem(b)) => {
             let req: DbResetReq = jbody(b)?;
             state::check_name("project", &req.project)?;
-            user_check(&s.root, &req.project, &user, &kid)?;
+            user_check(&s.root, &req.project, &user)?;
             let root = s.root.clone();
             let (p, confirm) = (req.project, req.confirm.unwrap_or(false));
             blk(move || dbmaint::reset(&root, &p, confirm)).await?;
@@ -664,7 +677,7 @@ async fn dispatch(
 
         ("GET", "/_api/redis-dbs", _) => {
             let policy = state::Policy::load(&s.root);
-            let admin = ops::key_is_admin(&s.root, &user, &kid);
+            let admin = state::user_is_admin(&s.root, &user);
             let dbs: Vec<u16> = if admin {
                 (0..policy.redis_pool_cap()).collect()
             } else {
@@ -678,7 +691,7 @@ async fn dispatch(
         }
 
         ("GET", "/_api/redis-keys", _) => {
-            let db = redis_db_guard(s, &q, &user, &kid)?;
+            let db = redis_db_guard(s, &q, &user)?;
             let pat = q.get("q").cloned().unwrap_or_default();
             // 默认 100 上限 200（--scan 无 limit 参数，内核读满即杀并标截断）
             let limit: usize = q.get("limit").and_then(|t| t.parse().ok()).unwrap_or(100).min(200);
@@ -687,7 +700,7 @@ async fn dispatch(
         }
 
         ("GET", "/_api/redis-get", _) => {
-            let db = redis_db_guard(s, &q, &user, &kid)?;
+            let db = redis_db_guard(s, &q, &user)?;
             let key = qget(&q, "key")?;
             let (t, ttl_ms, value) = blk(move || ops::redis_get(db, &key)).await?;
             Ok(Json(json!({"type": t, "ttl_ms": ttl_ms, "value": value})))
@@ -695,7 +708,7 @@ async fn dispatch(
 
         ("GET", "/_api/logs", _) => {
             let project = qget(&q, "project")?;
-            user_check(&s.root, &project, &user, &kid)?;
+            user_check(&s.root, &project, &user)?;
             let tail: u32 = q.get("tail").and_then(|t| t.parse().ok()).unwrap_or(100).min(10000);
             let root = s.root.clone();
             let logs = blk(move || ops::logs(&root, &project, tail)).await?;
@@ -704,7 +717,7 @@ async fn dispatch(
 
         ("GET", "/_api/env", _) => {
             let project = qget(&q, "project")?;
-            user_check(&s.root, &project, &user, &kid)?;
+            user_check(&s.root, &project, &user)?;
             let root = s.root.clone();
             let (env, disabled) = blk(move || {
                 Ok((ops::env_of(&root, &project)?, middleware::disabled_middleware(&root)))
@@ -1022,21 +1035,21 @@ async fn auth(s: &S, method: &str, uri: &str, body_sha: &str, headers: &HeaderMa
 
 /// 管理员钥匙校验（SPEC §12.2）：非管理员返回 E_AUTH → 与未登记/验签失败同一 404
 /// `{"error":"E_AUTH"}`（IntoResponse 对 E_AUTH 丢弃 msg），不泄露 /_api/admin/* 端点存在。
-fn admin_guard(s: &S, user: &str, kid: &str) -> R<()> {
-    if ops::key_is_admin(&s.root, user, kid) {
+fn admin_guard(s: &S, user: &str, _kid: &str) -> R<()> {
+    if state::user_is_admin(&s.root, user) {
         Ok(())
     } else {
-        Err(ApiError::new("E_AUTH", format!("not an admin key: {user}/{kid}")))
+        Err(ApiError::new("E_AUTH", format!("not an admin user: {user}")))
     }
 }
 
 /// Redis 浏览归属校验（SPEC §13.2）：请求 db 须 ∈ 签名用户名下项目的 redisdb 集合
 /// （state::user_redis_dbs）；admin 钥匙放开全量（0..policy 池）。
 /// 非归属 → E_AUTH（404 同体，不泄露池内容；与 user_check 语义一致）。
-fn redis_db_guard(s: &S, q: &HashMap<String, String>, user: &str, kid: &str) -> R<u8> {
+fn redis_db_guard(s: &S, q: &HashMap<String, String>, user: &str) -> R<u8> {
     let policy = state::Policy::load(&s.root);
     let db = state::parse_redis_db(&qget(q, "db")?, policy.redis_pool_cap())?;
-    if ops::key_is_admin(&s.root, user, kid) || state::user_redis_dbs(&s.root, user).contains(&(db as u16)) {
+    if state::user_is_admin(&s.root, user) || state::user_redis_dbs(&s.root, user).contains(&(db as u16)) {
         Ok(db)
     } else {
         Err(ApiError::new("E_AUTH", format!("redis db {db} not in '{user}' projects' pool")))
@@ -1046,14 +1059,14 @@ fn redis_db_guard(s: &S, q: &HashMap<String, String>, user: &str, kid: &str) -> 
 /// image-rm 归属校验（SPEC §14.1，仿 redis_db_guard）：`<repo>:<tag>` 形状拆分（无冒号 E_NAME）、
 /// repo 白名单与 tag 校验；repo 属签名用户命名空间（`<user>/` 前缀，split 精确比对）或
 /// admin 钥匙 → 放行，否则 E_AUTH（404 同体，与未登记钥匙不可区分）。
-fn image_guard(s: &S, image: &str, user: &str, kid: &str) -> R<(String, String)> {
+fn image_guard(s: &S, image: &str, user: &str) -> R<(String, String)> {
     let (repo, tag) = state::split_image_ref(image)
         .ok_or_else(|| ApiError::new("E_NAME", format!("image '{image}' 须形如 <user>/<project>:<tag>")))?;
     if !state::valid_image_repo(&repo) {
         return Err(ApiError::new("E_NAME", format!("bad image repo '{repo}'")));
     }
     publish::check_tag(&tag)?;
-    if state::repo_owned_by(&repo, user) || ops::key_is_admin(&s.root, user, kid) {
+    if state::repo_owned_by(&repo, user) || state::user_is_admin(&s.root, user) {
         Ok((repo, tag))
     } else {
         Err(ApiError::new("E_AUTH", format!("image '{image}' not in '{user}' namespace")))
@@ -1128,10 +1141,10 @@ fn jbody<T: serde::de::DeserializeOwned>(b: &[u8]) -> R<T> {
 /// 项目归属校验：conf.user 属主比对；admin 钥匙旁路（第2轮xiaozhi P2：管理员有跨项目管理
 /// 需求，服务端应允许而非拒绝——与 redis_db_guard / image_guard 的 admin 放行语义一致）。
 /// 非属主且非 admin → E_AUTH（404 同体，与未登记钥匙不可区分）。
-fn user_check(root: &Path, project: &str, user: &str, kid: &str) -> R<()> {
+fn user_check(root: &Path, project: &str, user: &str) -> R<()> {
     let conf = state::Conf::load(root, project)
         .map_err(|_| ApiError::new("E_NOTFOUND", format!("no project '{project}'")))?;
-    if conf.user != user && !ops::key_is_admin(root, user, kid) {
+    if conf.user != user && !state::user_is_admin(root, user) {
         return Err(ApiError::new("E_AUTH", format!("project '{project}' belongs to {}", conf.user)));
     }
     Ok(())
@@ -1391,9 +1404,8 @@ struct AdminKeyReq {
 }
 
 #[derive(Deserialize)]
-struct AdminKeyAdminReq {
+struct AdminUserAdminReq {
     user: String,
-    kid: String,
     admin: bool,
 }
 
@@ -1544,14 +1556,15 @@ mod tests {
         let s: S = Arc::new(test_state(root.clone()));
 
         let (admin_kid, a) = mk_key_user(&root, "root", true);
-        assert!(a, "管理员账号首把绑定钥匙继承 admin（B7 账号属性语义）");
+        assert!(a, "管理员账号的 key-bind 回传 admin=true（R4 账号属性语义）");
         assert!(admin_guard(&s, "root", &admin_kid).is_ok());
 
         let (plain_kid, a2) = mk_key_user(&root, "carl", false);
         assert!(!a2);
         assert_eq!(admin_guard(&s, "carl", &plain_kid).unwrap_err().code, "E_AUTH");
         assert_eq!(admin_guard(&s, "nobody", &admin_kid).unwrap_err().code, "E_AUTH");
-        assert_eq!(admin_guard(&s, "root", "ffffffff").unwrap_err().code, "E_AUTH");
+        // R4 账号级：管理员账号任意有效钥匙放行（kid 不再参与判定）
+        assert!(admin_guard(&s, "root", "ffffffff").is_ok());
         let _ = std::fs::remove_dir_all(&root);
     }
 
@@ -1574,29 +1587,29 @@ mod tests {
         let qq = |db: &str| HashMap::from([("db".to_string(), db.to_string())]);
 
         // 自己的 db 放行；别人的（bob 的 2）/未分配的（200）→ E_AUTH
-        assert_eq!(redis_db_guard(&s, &qq("3"), "alice", "ab12cd34").unwrap(), 3);
-        assert_eq!(redis_db_guard(&s, &qq("7"), "alice", "ab12cd34").unwrap(), 7);
-        assert_eq!(redis_db_guard(&s, &qq("2"), "alice", "ab12cd34").unwrap_err().code, "E_AUTH");
-        assert_eq!(redis_db_guard(&s, &qq("200"), "alice", "ab12cd34").unwrap_err().code, "E_AUTH");
-        assert_eq!(redis_db_guard(&s, &qq("3"), "nobody", "ab12cd34").unwrap_err().code, "E_AUTH");
+        assert_eq!(redis_db_guard(&s, &qq("3"), "alice").unwrap(), 3);
+        assert_eq!(redis_db_guard(&s, &qq("7"), "alice").unwrap(), 7);
+        assert_eq!(redis_db_guard(&s, &qq("2"), "alice").unwrap_err().code, "E_AUTH");
+        assert_eq!(redis_db_guard(&s, &qq("200"), "alice").unwrap_err().code, "E_AUTH");
+        assert_eq!(redis_db_guard(&s, &qq("3"), "nobody").unwrap_err().code, "E_AUTH");
 
         // admin 钥匙放开全量（含别人的 2 与池内任意 255）；超池/非数字仍 E_NAME
         let (admin_kid, _) = mk_key_user(&root, "root", true);
-        assert_eq!(redis_db_guard(&s, &qq("2"), "root", &admin_kid).unwrap(), 2);
-        assert_eq!(redis_db_guard(&s, &qq("255"), "root", &admin_kid).unwrap(), 255);
-        assert_eq!(redis_db_guard(&s, &qq("256"), "root", &admin_kid).unwrap_err().code, "E_NAME");
-        assert_eq!(redis_db_guard(&s, &qq("abc"), "root", &admin_kid).unwrap_err().code, "E_NAME");
-        assert_eq!(redis_db_guard(&s, &HashMap::new(), "root", &admin_kid).unwrap_err().code, "E_NAME");
+        assert_eq!(redis_db_guard(&s, &qq("2"), "root").unwrap(), 2);
+        assert_eq!(redis_db_guard(&s, &qq("255"), "root").unwrap(), 255);
+        assert_eq!(redis_db_guard(&s, &qq("256"), "root").unwrap_err().code, "E_NAME");
+        assert_eq!(redis_db_guard(&s, &qq("abc"), "root").unwrap_err().code, "E_NAME");
+        assert_eq!(redis_db_guard(&s, &HashMap::new(), "root").unwrap_err().code, "E_NAME");
 
         // 非管理员账号的钥匙不越权（无 E_AUTH 与 404 之外的信息差）
         let (plain_kid, _) = mk_key_user(&root, "carl", false);
-        assert_eq!(redis_db_guard(&s, &qq("3"), "carl", &plain_kid).unwrap_err().code, "E_AUTH");
+        assert_eq!(redis_db_guard(&s, &qq("3"), "carl").unwrap_err().code, "E_AUTH");
 
         // 小池（REDIS_DBS=8）：池内 7 放行、池外 15 → E_NAME（alice 名下 db 7 < 8 仍可用）
         std::fs::create_dir_all(root.join("state")).unwrap();
         std::fs::write(root.join("state/policy.env"), "REDIS_DBS=8\n").unwrap();
-        assert_eq!(redis_db_guard(&s, &qq("7"), "alice", "ab12cd34").unwrap(), 7);
-        assert_eq!(redis_db_guard(&s, &qq("15"), "root", &admin_kid).unwrap_err().code, "E_NAME");
+        assert_eq!(redis_db_guard(&s, &qq("7"), "alice").unwrap(), 7);
+        assert_eq!(redis_db_guard(&s, &qq("15"), "root").unwrap_err().code, "E_NAME");
         let _ = std::fs::remove_dir_all(&root);
     }
 
@@ -1609,21 +1622,21 @@ mod tests {
 
         // 本人命名空间：拆分出 (repo, tag) 放行
         assert_eq!(
-            image_guard(&s, "alice/demo:v1", "alice", "ab12cd34").unwrap(),
+            image_guard(&s, "alice/demo:v1", "alice").unwrap(),
             ("alice/demo".into(), "v1".into())
         );
         // 他人 repo / 无命名空间 repo → E_AUTH（404 同体）
-        assert_eq!(image_guard(&s, "bob/demo:v1", "alice", "ab12cd34").unwrap_err().code, "E_AUTH");
-        assert_eq!(image_guard(&s, "bare:v1", "alice", "ab12cd34").unwrap_err().code, "E_AUTH");
+        assert_eq!(image_guard(&s, "bob/demo:v1", "alice").unwrap_err().code, "E_AUTH");
+        assert_eq!(image_guard(&s, "bare:v1", "alice").unwrap_err().code, "E_AUTH");
         // 前缀不误吞："alice-x/…" 不属于 alice
-        assert_eq!(image_guard(&s, "alice-x/demo:v1", "alice", "ab12cd34").unwrap_err().code, "E_AUTH");
+        assert_eq!(image_guard(&s, "alice-x/demo:v1", "alice").unwrap_err().code, "E_AUTH");
         // 无 user 档案的签名者同样 E_AUTH
-        assert_eq!(image_guard(&s, "alice/demo:v1", "nobody", "ab12cd34").unwrap_err().code, "E_AUTH");
+        assert_eq!(image_guard(&s, "alice/demo:v1", "nobody").unwrap_err().code, "E_AUTH");
 
         // admin 钥匙放行他人命名空间
         let (admin_kid, _) = mk_key_user(&root, "root", true);
         assert_eq!(
-            image_guard(&s, "bob/demo:v1", "root", &admin_kid).unwrap(),
+            image_guard(&s, "bob/demo:v1", "root").unwrap(),
             ("bob/demo".into(), "v1".into())
         );
 
@@ -1631,7 +1644,7 @@ mod tests {
         for bad in [
             "alice/demo", "a b/x:v", "../x:v", "A/b:v", "a/b/c:v", "alice/demo:a b", "alice/demo:",
         ] {
-            assert_eq!(image_guard(&s, bad, "alice", "ab12cd34").unwrap_err().code, "E_NAME", "{bad}");
+            assert_eq!(image_guard(&s, bad, "alice").unwrap_err().code, "E_NAME", "{bad}");
         }
         let _ = std::fs::remove_dir_all(&root);
     }
@@ -2079,7 +2092,7 @@ mod tests {
         assert!(v.get("kid").is_none(), "pubkey 已删除：带旧字段也不落公钥");
         assert_eq!(v["login_password"].as_str().map(|s| s.len()), Some(24));
         assert!(v["registry_password"].as_str().is_some_and(|p| !p.is_empty()));
-        assert!(root.join("state/users/dave/admin.pending").exists(), "admin 落账号级 pending 标记");
+        assert!(root.join("state/users/dave/admin").exists(), "admin 落账号级标记（R4）");
 
         // 全无密码 → E_NAME（含新示例指引）
         let b3 = br#"{"user":"erin"}"#;

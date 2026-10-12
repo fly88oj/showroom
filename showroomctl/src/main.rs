@@ -57,10 +57,9 @@ enum Cmd {
     },
     /// 删除发布者某把公钥（admin 标记随钥匙一并清）
     UserKeyRm { user: String, kid: String },
-    /// 授/收管理员权限（--admin true|false，SPEC §12.2）
-    KeyAdmin {
+    /// 授/收管理员权限（账号级，R4 裁决；--admin true|false）
+    UserAdmin {
         user: String,
-        kid: String,
         #[arg(long, action = clap::ArgAction::Set)]
         admin: bool,
     },
@@ -252,12 +251,12 @@ fn dispatch(cli: &Cli) -> R<()> {
             out(j, &format!("removed {user}/{kid}"), json!({"ok": true}));
             Ok(())
         }
-        Cmd::KeyAdmin { user, kid, admin } => {
-            ops::key_set_admin(&root, user, kid, *admin)?;
+        Cmd::UserAdmin { user, admin } => {
+            ops::user_set_admin(&root, user, *admin)?;
             out(
                 j,
-                &format!("{} admin: {user}/{kid}", if *admin { "granted" } else { "revoked" }),
-                json!({"ok": true, "user": user, "kid": kid, "admin": admin}),
+                &format!("{} admin: {user}", if *admin { "granted" } else { "revoked" }),
+                json!({"ok": true, "user": user, "admin": admin}),
             );
             Ok(())
         }
@@ -273,9 +272,9 @@ fn dispatch(cli: &Cli) -> R<()> {
                     println!("{}", json!({"users": users}));
                 } else {
                     for o in &users {
-                        println!("{:<16} projects={:<3} keys={}", o.user, o.projects, o.keys.len());
+                        println!("{:<16} {} projects={:<3} keys={}", o.user, if o.admin { "[ADMIN]" } else { "" }, o.projects, o.keys.len());
                         for k in &o.keys {
-                            println!("  {:<10} {} since={}", k.kid, if k.admin { "[ADMIN]" } else { "      " }, k.since);
+                            println!("  {:<10} since={}", k.kid, k.since);
                         }
                     }
                 }

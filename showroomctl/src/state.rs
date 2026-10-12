@@ -718,8 +718,53 @@ pub fn user_keys_with_kid(root: &Path, user: &str) -> Vec<(String, VerifyingKey)
 }
 
 /// 管理员标记：`tokens/<user>/<kid>.admin` 空文件存在 = 该钥匙为管理员（SPEC §12.2）。
+/// 【已废弃】R4 用户裁决：管理员是账号属性（users/<user>/admin），钥匙无级；旧 kid 标记由
+/// migrate_admin_markers 一次性迁移清除，此函数仅供迁移/清扫内部使用。
 pub fn admin_marker_path(root: &Path, user: &str, kid: &str) -> PathBuf {
     tokens_dir(root, user).join(format!("{kid}.admin"))
+}
+
+/// 账号级管理员（R4 裁决唯一真相）：`users/<user>/admin` 存在 = 该账号为管理员。
+/// 该账号任一有效钥匙认证后即具管理权限，权限不随钥匙生灭。
+pub fn user_admin_path(root: &Path, user: &str) -> PathBuf {
+    users_dir(root, user).join("admin")
+}
+pub fn user_is_admin(root: &Path, user: &str) -> bool {
+    check_name("user", user).is_ok() && user_admin_path(root, user).exists()
+}
+pub fn set_user_admin(root: &Path, user: &str, admin: bool) {
+    if admin {
+        let _ = fs::create_dir_all(users_dir(root, user));
+        let _ = fs::write(user_admin_path(root, user), b"");
+    } else {
+        let _ = fs::remove_file(user_admin_path(root, user));
+    }
+}
+
+/// 旧 kid 级 .admin / admin.pending → 账号级 admin 一次性迁移（幂等）。
+/// serve 启动与 user_list 均调用：任一 kid 标记或 pending 存在 → 落账号级 → 清全部旧标记。
+pub fn migrate_admin_markers(root: &Path) {
+    let Ok(rd) = fs::read_dir(root.join("state/tokens")) else { return };
+    for u in rd.filter_map(|e| e.ok()) {
+        let Some(user) = u.path().file_name().and_then(|o| o.to_str()).map(|s| s.to_string()) else { continue };
+        if check_name("user", &user).is_err() { continue; }
+        let dir = tokens_dir(root, &user);
+        let mut admin_files: Vec<PathBuf> = vec![];
+        if let Ok(kd) = fs::read_dir(&dir) {
+            for e in kd.filter_map(|e| e.ok()) {
+                if e.path().extension().and_then(|o| o.to_str()) == Some("admin") {
+                    admin_files.push(e.path());
+                }
+            }
+        }
+        let pending = users_dir(root, &user).join("admin.pending");
+        if (!admin_files.is_empty() || pending.exists()) && !user_admin_path(root, &user).exists() {
+            set_user_admin(root, &user, true);
+            eprintln!("showroomctl: admin 迁移为账号级: {user}");
+        }
+        for p in admin_files { let _ = fs::remove_file(p); }
+        let _ = fs::remove_file(&pending);
+    }
 }
 
 /// 密码绑定标记（plan-16 §1.2）：`tokens/<user>/<kid>.bound` 空文件 = 该钥匙由密码登录

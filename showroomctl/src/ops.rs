@@ -626,10 +626,9 @@ pub fn user_passwd_set(root: &Path, user: &str, pw: &str) -> R<()> {
 /// admin=true 时记账号级待继承标记，首把登录绑定钥匙继承（SPEC §16）。
 pub fn user_add(root: &Path, name: &str, admin: bool, init_pw: InitPw) -> R<UserAdded> {
     state::check_name("user", name)?;
-    // 管理员是账号属性：落账号级待继承标记，登录绑定的首把钥匙继承（原预登记公钥路径已删除）
+    // 管理员是账号属性（R4 裁决）：直接落账号级标记，权限不随钥匙生灭
     if admin {
-        fs::create_dir_all(state::users_dir(root, name))?;
-        fs::write(state::users_dir(root, name).join("admin.pending"), b"")?;
+        state::set_user_admin(root, name, true);
     }
     let login_password = match init_pw {
         InitPw::Set(pw) => {
@@ -666,17 +665,8 @@ pub fn key_bind(root: &Path, user: &str, pubkey: &str) -> R<(String, bool)> {
     // 幂等：同钥匙重绑 = 重写 .pub + 补 .bound 标记
     fs::write(dir.join(format!("{kid}.pub")), format!("{}\n", pubkey.trim()))?;
     fs::write(state::bound_marker_path(root, user, &kid), "")?;
-    // admin 继承：既有任一 admin 钥匙（不含本 kid），或账号级 admin.pending（纯密码发卡
-    // 时落的一次性标记）→ 新钥匙授 admin；pending 一次性，首把继承钥匙消费后清除
-    let pending = state::users_dir(root, user).join("admin.pending");
-    let admin = pending.exists()
-        || state::user_keys_with_kid(root, user).iter().any(|(k, _)| {
-            *k != kid && state::admin_marker_path(root, user, k).exists()
-        });
-    if admin {
-        fs::write(state::admin_marker_path(root, user, &kid), "")?;
-        let _ = fs::remove_file(&pending);
-    }
+    // R4 裁决：admin 是账号属性（users/<user>/admin），钥匙无级——登录响应只回传账号结论
+    let admin = state::user_is_admin(root, user);
     let policy = state::Policy::load(root);
     for gone in state::bound_keys_gc(root, user, policy.bound_keys_max, Some(&kid)) {
         eprintln!("showroomctl: key-bind: GC 旧绑定钥匙 {user}/{gone}（保最近 {} 把）", policy.bound_keys_max);
@@ -699,35 +689,22 @@ pub fn user_key_rm(root: &Path, user: &str, kid: &str) -> R<()> {
     Ok(())
 }
 
-/// 授权/收权管理员（SPEC §12.2）：钥匙须存在；收权幂等（标记不存在也 Ok）。
-pub fn key_set_admin(root: &Path, user: &str, kid: &str, admin: bool) -> R<()> {
+/// 授权/收权管理员（R4 裁决：账号级，无钥匙维度）；账号须存在；收权幂等。
+pub fn user_set_admin(root: &Path, user: &str, admin: bool) -> R<()> {
     state::check_name("user", user)?;
-    if !state::valid_kid(kid) {
-        return Err(ApiError::new("E_NAME", format!("bad kid '{kid}'")));
+    if !state::users_dir(root, user).exists() && !state::tokens_dir(root, user).exists() {
+        return Err(ApiError::new("E_NOTFOUND", format!("no user '{user}'")));
     }
-    let dir = state::tokens_dir(root, user);
-    if !dir.join(format!("{kid}.pub")).exists() {
-        return Err(ApiError::new("E_NOTFOUND", format!("no kid '{kid}' for user '{user}'")));
-    }
-    let marker = state::admin_marker_path(root, user, kid);
-    if admin {
-        fs::write(&marker, "")?;
-    } else {
-        let _ = fs::remove_file(&marker);
-    }
+    state::set_user_admin(root, user, admin);
     Ok(())
 }
 
-/// 该钥匙是否管理员（标记文件存在即真；user/kid 非法恒假——serve 只喂自家派生的值）。
-pub fn key_is_admin(root: &Path, user: &str, kid: &str) -> bool {
-    state::check_name("user", user).is_ok() && state::admin_marker_path(root, user, kid).exists()
-}
-
-/// user_list 一行：账号 / 钥匙（kid+admin+登记时间=.pub mtime）/ 项目数（conf 归属计数）。
+/// user_list 一行：账号（admin 账号级）/ 钥匙（kid+绑定时间=.pub mtime）/ 项目数。
 #[derive(serde::Serialize)]
 pub struct UserKeyInfo {
     pub kid: String,
-    pub admin: bool,
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub admin: bool, // 兼容垫片：账号级值回填；web 批次同步后随字段一并移除
     pub since: u64,
 }
 
@@ -736,6 +713,8 @@ pub struct UserInfo {
     pub user: String,
     pub keys: Vec<UserKeyInfo>,
     pub projects: usize,
+    /// 管理员（R4 裁决：账号级，钥匙无级）。
+    pub admin: bool,
     /// 是否已设登录密码（pass.opaque 存在；plan-16 §1.5 面板「未设密码」徽标→一键补发）。
     pub has_password: bool,
 }
@@ -743,6 +722,7 @@ pub struct UserInfo {
 /// 全部账号聚合（GET /_api/admin/users 与 CLI admin users 共用）。
 /// 钥匙 kid 由公钥内容派生（与验签侧一致）；坏 .pub 跳过；user 目录即账号。
 pub fn user_list(root: &Path) -> Vec<UserInfo> {
+    state::migrate_admin_markers(root); // serve 启动已迁；此处兜底 CLI 直跑路径
     let projects: BTreeMap<String, usize> = state::all_confs(root).into_iter().fold(
         BTreeMap::new(),
         |mut m, (_, c)| {
@@ -770,15 +750,17 @@ pub fn user_list(root: &Path) -> Vec<UserInfo> {
         .into_iter()
         .map(|user| {
             state::sweep_stale_keys(root, &user); // 管理页每次查看即清扫（过期僵尸/旧机制存量/孤儿标记）
+            let admin = state::user_is_admin(root, &user);
             let keys = state::user_keys_with_kid(root, &user)
                 .into_iter()
                 .map(|(kid, _)| UserKeyInfo {
-                    admin: key_is_admin(root, &user, &kid),
+                    admin, // 兼容垫片：旧 web 读 keys[].admin 渲染；R4 真相在 users[].admin
                     since: state::file_mtime(&state::tokens_dir(root, &user).join(format!("{kid}.pub"))),
                     kid,
                 })
                 .collect();
             UserInfo {
+                admin: state::user_is_admin(root, &user), // R4：账号级
                 has_password: state::read_pass_opaque(root, &user).is_some(),
                 projects: projects.get(&user).copied().unwrap_or(0),
                 user,
@@ -894,7 +876,7 @@ mod tests {
         // B7 后真实形状：登录绑定钥匙必有 .bound（无 .bound=旧机制存量，user_list 清扫会删）
         fs::write(dir.join(format!("{kid}.bound")), "").unwrap();
         if admin {
-            fs::write(state::admin_marker_path(root, user, &kid), "").unwrap();
+            state::set_user_admin(root, user, true); // R4：admin 是账号属性
         }
         kid
     }
@@ -913,18 +895,25 @@ mod tests {
         }
     }
 
-    // admin 标记存在性判定：有 `<kid>.admin` 才是管理员钥匙；普通钥匙/他人 user/非法名恒假
+    // R4 账号级 admin：users/<user>/admin 存在即管理员；他人 user/非法名恒假；
+    // 旧 kid 级标记经 migrate_admin_markers 迁移为账号级并清除
     #[test]
-    fn admin_marker_existence() {
+    fn user_admin_account_level() {
         let root = troot("is-admin");
-        let admin_kid = put_key(&root, "alice", true);
-        let plain_kid = put_key(&root, "alice", false);
-        assert!(key_is_admin(&root, "alice", &admin_kid));
-        assert!(!key_is_admin(&root, "alice", &plain_kid));
-        assert!(!key_is_admin(&root, "alice", "ffffffff"), "不存在的 kid 恒假");
-        assert!(!key_is_admin(&root, "bob", &admin_kid), "他人 user 恒假");
-        assert!(!key_is_admin(&root, "Bad Name", &admin_kid), "非法 user 名恒假");
-        assert!(!key_is_admin(&root, "alice", "../x"), "非法 kid 恒假（防穿越探测）");
+        put_key(&root, "alice", true);
+        put_key(&root, "alice", false);
+        assert!(state::user_is_admin(&root, "alice"));
+        assert!(!state::user_is_admin(&root, "bob"), "他人 user 恒假");
+        assert!(!state::user_is_admin(&root, "Bad Name"), "非法 user 名恒假");
+        state::set_user_admin(&root, "alice", false);
+        assert!(!state::user_is_admin(&root, "alice"), "收权即移除");
+        // 旧 kid 标记迁移：手工放一个 kid .admin → migrate 后账号级成立、kid 标记清除
+        let kid = "deadbeef";
+        fs::create_dir_all(state::tokens_dir(&root, "bob")).unwrap();
+        fs::write(state::admin_marker_path(&root, "bob", kid), "").unwrap();
+        state::migrate_admin_markers(&root);
+        assert!(state::user_is_admin(&root, "bob"), "kid 标记迁移为账号级");
+        assert!(!state::admin_marker_path(&root, "bob", kid).exists(), "旧 kid 标记清除");
     }
 
     // user_add（上收公共函数）：admin 标记、htpasswd/reg.cred、密码只此一次返回。
@@ -933,11 +922,11 @@ mod tests {
     fn password_only_admin_pending_flow() {
         let root = troot("admin_pending");
         fs::create_dir_all(root.join("state")).unwrap();
-        // 密码发卡 + admin：落 pending 标记
+        // 密码发卡 + admin：直接落账号级标记（R4：admin 是账号属性）
         let added = user_add(&root, "bob", true, InitPw::Set("pw123456".into())).unwrap();
         assert!(added.login_password.is_some());
-        assert!(root.join("state/users/bob/admin.pending").exists());
-        // 首把绑定钥匙继承 admin，pending 被消费
+        assert!(state::user_is_admin(&root, "bob"));
+        // 登录绑定钥匙回传账号结论；admin 不随钥匙生灭
         let k1 = showroom_common::UserKey::generate();
         let (_, a1) = key_bind(&root, "bob", &k1.pub_string()).unwrap();
         assert!(a1, "首把绑定钥匙应继承 admin");
@@ -955,8 +944,8 @@ mod tests {
         let added = user_add(&root, "root", true, InitPw::Set("pw-123456".into())).unwrap();
         assert!(added.login_password.as_deref() == Some("pw-123456"), "登录密码只此一次返回");
         assert!(!added.password.is_empty());
-        // B7：admin 是账号属性——落账号级 pending 标记（登录绑定钥匙继承），不再预登记公钥
-        assert!(root.join("state/users/root/admin.pending").exists());
+        // R4：admin 是账号属性——直接落账号级标记，不再预登记公钥
+        assert!(state::user_is_admin(&root, "root"));
         assert!(state::user_keys_with_kid(&root, "root").is_empty(), "发卡不落任何公钥");
         // 密码与 reg.cred 一致；htpasswd 有 bcrypt 行
         let cred = fs::read_to_string(state::users_dir(&root, "root").join("reg.cred")).unwrap();
@@ -1036,9 +1025,9 @@ mod tests {
             &mut rng, &setup, Some(&rec2), &ke1c, "alice").unwrap();
         let ke3 = showroom_common::opaque::login_finish(st3, "new-pw", "alice", &ke2c).unwrap();
         assert!(showroom_common::opaque::server_login_finish(&sst, &ke3).is_ok(), "新密码可用");
-        // 既有钥匙不受影响
+        // 既有钥匙与账号级 admin 不受影响（R4）
         assert!(state::tokens_dir(&root, "alice").join(format!("{kid}.pub")).exists());
-        assert!(state::admin_marker_path(&root, "alice", &kid).exists());
+        assert!(state::user_is_admin(&root, "alice"));
         // 空密码/坏名/不存在账号
         assert_eq!(user_passwd_set(&root, "alice", "").unwrap_err().code, "E_NAME");
         assert_eq!(user_passwd_set(&root, "Bad", "x").unwrap_err().code, "E_NAME");
@@ -1113,25 +1102,24 @@ mod tests {
         assert!(l2.iter().all(|i| i.user != "alice"));
     }
 
-    // key_set_admin：授权/收权幂等；钥匙不存在 E_NOTFOUND；kid 非法 E_NAME
+    // user_set_admin（R4 账号级）：授权/收权幂等；账号不存在 E_NOTFOUND
     #[test]
-    fn key_set_admin_grant_revoke() {
+    fn user_set_admin_grant_revoke() {
         let root = troot("set-admin");
-        let kid = put_key(&root, "alice", false);
+        put_key(&root, "alice", false);
 
-        assert!(!key_is_admin(&root, "alice", &kid));
-        key_set_admin(&root, "alice", &kid, true).unwrap();
-        assert!(key_is_admin(&root, "alice", &kid));
-        key_set_admin(&root, "alice", &kid, true).unwrap(); // 重复授权幂等
-        assert!(key_is_admin(&root, "alice", &kid));
+        assert!(!state::user_is_admin(&root, "alice"));
+        user_set_admin(&root, "alice", true).unwrap();
+        assert!(state::user_is_admin(&root, "alice"));
+        user_set_admin(&root, "alice", true).unwrap(); // 重复授权幂等
+        assert!(state::user_is_admin(&root, "alice"));
 
-        key_set_admin(&root, "alice", &kid, false).unwrap();
-        assert!(!key_is_admin(&root, "alice", &kid));
-        key_set_admin(&root, "alice", &kid, false).unwrap(); // 重复收权幂等
+        user_set_admin(&root, "alice", false).unwrap();
+        assert!(!state::user_is_admin(&root, "alice"));
+        user_set_admin(&root, "alice", false).unwrap(); // 重复收权幂等
 
-        assert_eq!(key_set_admin(&root, "alice", "ffffffff", true).unwrap_err().code, "E_NOTFOUND");
-        assert_eq!(key_set_admin(&root, "alice", "../evil", true).unwrap_err().code, "E_NAME");
-        assert_eq!(key_set_admin(&root, "Bad", &kid, true).unwrap_err().code, "E_NAME");
+        assert_eq!(user_set_admin(&root, "nobody", true).unwrap_err().code, "E_NOTFOUND");
+        assert_eq!(user_set_admin(&root, "../evil", true).unwrap_err().code, "E_NAME", "非法账号名防穿越");
     }
 
     // key_rm：公钥+admin 标记双清；不存在 E_NOTFOUND；kid 非法 E_NAME
@@ -1175,11 +1163,9 @@ mod tests {
         let alice = &l[0];
         assert_eq!(alice.projects, 2);
         assert_eq!(alice.keys.len(), 2);
+        assert!(alice.admin, "put_key(admin=true) → 账号级 admin（R4）");
         let admin_key = alice.keys.iter().find(|k| k.kid == a_admin).unwrap();
-        assert!(admin_key.admin);
         assert!(admin_key.since > 0, "since=登记 mtime");
-        let plain_key = alice.keys.iter().find(|k| k.kid == a_plain).unwrap();
-        assert!(!plain_key.admin);
         assert_eq!(l[1].projects, 1);
         assert!(l[2].keys.is_empty(), "无钥匙账号仍列出（projects=0）");
         assert_eq!(l[2].projects, 0);
