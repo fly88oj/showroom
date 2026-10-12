@@ -1830,7 +1830,7 @@ ok(html.includes('select option {'), '规范：select option 显式配色');
 ok(!html.includes('<fieldset') && !html.includes('<legend'), 'S7/验收 9：全站无卡片内嵌 fieldset（分组一律 .fs + h3）');
 ok(html.includes('.fs {') && html.includes('--sp-1:') && html.includes('--sp-8:'),
   'S7/验收 12：间距刻度 token（4/8/12/16/24/32）+ 分组样式 .fs');
-ok(html.includes('h2 { font-size: 15px') && html.includes('.field > span { color: var(--fg-dim); font-size: 13px'),
+ok(html.includes('h2 { font-size: 15px') && html.includes('.field > span:not(.row):not(.q) { color: var(--fg-dim); font-size: 13px'),
   'S7/§7：字号刻度（卡片题 15/600、label/辅助 13、正文 14、注释 12）');
 ok(html.includes('.num { text-align: right; font-variant-numeric: tabular-nums; }') && html.includes('<th class="num">更新</th>'),
   'S7/验收 12：时间列右对齐且等宽数字');
