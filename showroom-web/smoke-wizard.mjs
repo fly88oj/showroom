@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 // showroom-web 向导冒烟（SPEC §10.2/§10.3/§10.4/§11/§12/§13 + plan-16 认证重设计；无浏览器依赖，node ≥ 18）：
-//   把 dist/index.html 的 <script type="module"> 挂到 mock DOM/localStorage/fetch 上执行，
-//   驱动登录与控制台状态机走完全部分支：
+//   mock 全局（document/localStorage/fetch/WebCrypto…）安装完毕后原生 import dist/js/app.mjs
+//   （零构建 ES Modules，相对 import 由 node 自动解析），驱动登录与控制台状态机走完全部分支：
 //   1) plan-16 一步登录（账号+密码，密钥无感）：全新浏览器 → 无感自动生成 seed（零提示、
 //      DOM 无 seed/公钥展示）→ 错密码本地 finish 即失败（两态文案+无第三请求）→ 正确密码
 //      login-begin/finish → key-bind（SR-SIG1 候选钥匙签名 + X-Sr-Bind 一次性令牌）→ 进入管理壳；
@@ -56,7 +56,7 @@
 //      impact 含受影响项目 → 红色警示 + 二次 confirm 取消不提交）、Redis 池黄条两态
 //      （常态数字行 / <20% 余量黄条+「扩容」按钮）、扩容对话框流（非法值字段内联拒绝 →
 //      confirm:false 取服务端提示原文逐字节展示 → 「我已了解，执行扩容」→ 结果回报+自动重取）
-import { readFileSync, writeFileSync, mkdtempSync } from 'node:fs';
+import { readFileSync, writeFileSync, readdirSync, copyFileSync, mkdtempSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { pathToFileURL } from 'node:url';
@@ -572,12 +572,21 @@ globalThis.fetch = async (url, init = {}) => {
   throw new Error(`smoke: 未预期的请求 ${u}`);
 };
 
-// —— 模块提取 + 带查询串重载（每个场景一个全新的模块实例） ——
-const html = readFileSync(new URL('./dist/index.html', import.meta.url), 'utf8');
-const script = html.match(/<script type="module">([\s\S]*?)<\/script>/)[1];
-const file = join(mkdtempSync(join(tmpdir(), 'sr-wiz-')), 'wiz.mjs');
-writeFileSync(file, script);
-const load = (t) => import(pathToFileURL(file).href + `?t=${t}`);
+// —— 模块加载（每个场景一份全新 dist/js 拷贝 → node 原生 ES Modules 全新实例；mock 全局先行安装） ——
+// 拆分适配：原「从 index.html 抽内联 <script> 写临时文件求值」改为原生 import dist/js/app.mjs。
+// 查询串只刷新入口文件本身（静态依赖会命中缓存共享实例），故每场景把整份 js/ 拷贝到独立
+// 临时目录再 import——与原「每场景全新模块实例」语义一致；wasm 经 mock fetch 按 URL 子串供给。
+const html = [
+  'index.html', 'css/app.css',
+  ...readdirSync(new URL('./dist/js/', import.meta.url)).filter((f) => f.endsWith('.mjs')).sort().map((f) => 'js/' + f),
+].map((f) => readFileSync(new URL('./dist/' + f, import.meta.url), 'utf8')).join('\n'); // 静态断言全量文本源（index → css → js，保持顺序敏感断言成立）
+const load = (t) => {
+  const dir = mkdtempSync(join(tmpdir(), `sr-wiz-${t}-`));
+  for (const f of readdirSync(new URL('./dist/js/', import.meta.url))) {
+    if (f.endsWith('.mjs')) copyFileSync(new URL('./dist/js/' + f, import.meta.url), join(dir, f));
+  }
+  return import(pathToFileURL(join(dir, 'app.mjs')).href + `?t=${t}`);
+};
 
 // ═══ 场景 1：全新浏览器 → 无感生成钥匙 → 密码登录（失败两态/成功绑定）→ 进入管理壳 ═══
 mode = 'unregistered';

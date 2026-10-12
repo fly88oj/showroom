@@ -166,14 +166,12 @@ exec duperemove -d --hashfile=\"$ROOT/state/dedup.hash\" \"$ROOT\"
 pub const PRECOMPRESS_PATH: &str = "/usr/local/bin/showroom-precompress";
 pub const PRECOMPRESS_SCRIPT: &str = "\
 #!/usr/bin/env bash
-# _console 静态资源 zstd -19 预压缩（Caddy file_server precompressed 直接下发 .zst）
+# _console 静态资源 zstd -19 预压缩（Caddy file_server precompressed 直接下发 .zst；
+# 递归覆盖 css/ js/ 等子目录——控制台拆分 ES Modules 后静态面是多文件树）
 set -euo pipefail
 DIR=\"${1:-${SHOWROOM_ROOT:-/srv/showroom}/_console}\"
 cd \"$DIR\"
-for f in *; do
-  case \"$f\" in *.zst) continue ;; esac
-  [ -f \"$f\" ] && zstd -19 -k -q -f \"$f\"
-done
+find . -type f ! -name '*.zst' -print0 | xargs -0 -r zstd -19 -k -q -f
 ";
 
 /// frpc 下载源（ChmlFrp linux/amd64；URL 可能回 HTML 壳——FrpcFetch 执行时 file 校验 ELF，
