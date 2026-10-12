@@ -31,23 +31,18 @@ struct Cli {
 enum Cmd {
     /// 启动 HTTP 控制面（127.0.0.1:8090；所有 /_api 端点强制 SR-SIG1 签名）
     Serve,
-    /// 发账号：登记公钥（可选）+ 设初始登录密码（可选，--password/--gen-password）+
+    /// 发账号：设初始登录密码（--password/--gen-password 必填其一）+
     /// 生成 registry 凭据（bcrypt 入 registry.htpasswd，明文 0600 入 reg.cred）。
-    /// pubkey 与 password 至少其一；--admin 授管理员（SPEC §12.2 + plan-16 §1.4）
+    /// --admin 授管理员（账号属性：该账号登录后的钥匙自动继承；SPEC §12.2 + plan-16 §1.4 + B7）
     UserAdd {
         name: String,
-        /// 发布者公钥串（showroom keygen 打印的那串；CI 专家路径）
-        #[arg(long)]
-        pubkey: Option<String>,
         /// 显式初始登录密码（明文只过管理员终端，不上网线）
         #[arg(long)]
         password: Option<String>,
         /// 自动生成初始登录密码（一次性返回）
         #[arg(long)]
         gen_password: bool,
-        #[arg(long)]
-        replace_key: bool,
-        /// 授予管理员钥匙（可远程授权/发卡）
+        /// 授予管理员（账号属性：该账号登录后的钥匙自动继承管理权限）
         #[arg(long)]
         admin: bool,
     },
@@ -203,33 +198,27 @@ fn dispatch(cli: &Cli) -> R<()> {
             .map_err(|e| ApiError::state(e.to_string()))?
             .block_on(serve::run(root)),
 
-        Cmd::UserAdd { name, pubkey, password, gen_password, replace_key, admin } => {
-            // plan-16 §1.4：pubkey 与 password 至少其一（全无 → E_NAME 指引在 ops::user_add）
+        Cmd::UserAdd { name, password, gen_password, admin } => {
+            // B7 统一账号密码认证：发卡必须设初始密码（plan-16 §1.4 同款 E_NAME 指引）
             let init_pw = match (password, *gen_password) {
                 (Some(p), _) => ops::InitPw::Set(p.clone()),
                 (None, true) => ops::InitPw::Gen,
-                (None, false) => ops::InitPw::None,
+                (None, false) => {
+                    return Err(ApiError::new(
+                        "E_NAME",
+                        format!("缺少初始密码：--password <pw> 与 --gen-password 至少其一（示例：showroomctl user-add {name} --gen-password --admin）"),
+                    ));
+                }
             };
-            let added = ops::user_add(&root, name, pubkey.as_deref(), *admin, *replace_key, init_pw)?;
+            let added = ops::user_add(&root, name, *admin, init_pw)?;
             // 两把密码各自只此一次显示（plan-16 §1.3：分开发放）
-            let kid_part = added
-                .kid
-                .as_deref()
-                .map(|k| format!("kid={k}"))
-                .unwrap_or_else(|| "no key".into());
             let human = format!(
-                "user {name} added: {kid_part}{}\n  registry 密码（只此一次，docker login 用）: {}\n  registry creds in state/users/{name}/reg.cred",
+                "user {name} added{}\n  登录密码（只此一次，控制台/showroom login 用）: {}\n  registry 密码（只此一次，docker login 用）: {}\n  registry creds in state/users/{name}/reg.cred",
                 if *admin { " [ADMIN]" } else { "" },
+                added.login_password.as_deref().unwrap_or(""),
                 added.password,
             );
-            let human = match &added.login_password {
-                Some(lp) => format!("{human}\n  登录密码（只此一次，控制台/showroom login 用）: {lp}"),
-                None => human,
-            };
             let mut v = json!({"ok": true, "user": name, "admin": admin, "registry_password": added.password});
-            if let Some(k) = &added.kid {
-                v["kid"] = json!(k);
-            }
             if let Some(lp) = &added.login_password {
                 v["login_password"] = json!(lp);
             }

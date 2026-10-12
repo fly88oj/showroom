@@ -215,28 +215,26 @@ fn admin_tag(admin: bool) -> &'static str {
     if admin { " [ADMIN]" } else { "" }
 }
 
-/// `showroom logout [--purge]`（plan-16 §4）：本地清钥匙与 config 身份字段；
-/// --purge 追加 key-selfrm 远端注销本机钥匙（仅删请求签名所用 kid 自己）。
-pub fn logout(cfg: &Config, purge: bool) -> Result<(), String> {
+/// `showroom logout`（plan-16 §4 + B7）：清本地钥匙与 config 身份字段，并恒为远程注销
+/// 本机钥匙（key-selfrm 仅删请求签名所用 kid 自己；尽力而为，失败如实报但不阻塞本地清理）。
+pub fn logout(cfg: &Config) -> Result<(), String> {
     let key_path = cfg.key_file();
-    if purge {
-        // 远端注销：需钥匙可读且服务端可达（尽力而为，失败如实报但不阻塞本地清理）
-        match UserKey::from_seed_file(&key_path) {
-            Ok(key) if !cfg.user.is_empty() => {
-                let kid = kid_of(&key);
-                match crate::api::Api::connect(cfg, None) {
-                    Ok(api) => {
-                        let body = json!({"kid": kid});
-                        match api.signed_post_json("/_api/key-selfrm", &body) {
-                            Ok(_) => println!("远端钥匙 {kid} 已注销"),
-                            Err(e) => eprintln!("showroom: 远端注销失败（{e}）；本地仍将清理"),
-                        }
+    // 远端注销：需钥匙可读且服务端可达
+    match UserKey::from_seed_file(&key_path) {
+        Ok(key) if !cfg.user.is_empty() => {
+            let kid = kid_of(&key);
+            match crate::api::Api::connect(cfg, None) {
+                Ok(api) => {
+                    let body = json!({"kid": kid});
+                    match api.signed_post_json("/_api/key-selfrm", &body) {
+                        Ok(_) => println!("远端钥匙 {kid} 已注销"),
+                        Err(e) => eprintln!("showroom: 远端注销失败（{e}）；本地仍将清理"),
                     }
-                    Err(e) => eprintln!("showroom: 无法连接服务端（{e}）；本地仍将清理"),
                 }
+                Err(e) => eprintln!("showroom: 无法连接服务端（{e}）；本地仍将清理"),
             }
-            _ => eprintln!("showroom: 无本地钥匙/账号，跳过远端注销"),
         }
+        _ => eprintln!("showroom: 无本地钥匙/账号，跳过远端注销"),
     }
     // 本地清理：删钥匙；config 清身份（user/registry），server 地址保留（机器属性，下次 login 免输）
     if key_path.exists() {
@@ -249,7 +247,7 @@ pub fn logout(cfg: &Config, purge: bool) -> Result<(), String> {
         c.registry = crate::config::Registry::default();
         c.save()?;
         println!("已清除配置中的身份信息（{}；server 地址保留）", crate::config::config_path().display());
-    } else if !key_path.exists() && !purge {
+    } else if !key_path.exists() {
         return Err("本机未登录（无可清理的钥匙与配置）".into());
     }
     Ok(())

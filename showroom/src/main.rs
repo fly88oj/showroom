@@ -40,8 +40,8 @@ enum Via {
 
 #[derive(Subcommand)]
 enum Cmd {
-    /// 生成发布者密钥（专家路径：机器对机器/CI 用——公钥串交管理员登记，无 .bound 标记
-    /// 不受 GC；日常登录走 showroom login，plan-16 §4）
+    /// 生成/重置本机签名密钥（调试用：排查签名问题、强制换钥）；日常登录无需手动执行
+    /// （showroom login 自动生成并绑定，B7 统一账号密码认证）
     #[command(hide = true)]
     Keygen {
         #[arg(long)]
@@ -173,11 +173,8 @@ enum Cmd {
         #[arg(long)]
         ephemeral: bool,
     },
-    /// 退出登录（清本地钥匙与 config 身份；--purge 追加远端注销本机钥匙）
-    Logout {
-        #[arg(long)]
-        purge: bool,
-    },
+    /// 退出登录（清本地钥匙与 config 身份，并远程注销本机钥匙——B7 后恒为完整登出）
+    Logout,
     /// 体检：密钥/配置/服务端可达/签名自测/docker
     Doctor,
 }
@@ -274,11 +271,11 @@ showroom doctor
 ```
 
 - 全绿 → 直接干活。
-- 提示缺密钥 → `showroom keygen`，把输出的 `ed25519:...` 公钥串给用户，让用户找平台管理员执行 `showroomctl user-add <用户名> --pubkey <公钥串>`，登记完重跑 doctor。
+- 提示缺密钥/未登录 → `showroom login <账号>`（密码一次、密钥常驻）；没有账号 → 找平台管理员 `showroomctl user-add <名> --gen-password` 发放（得到账号与初始密码），再 `showroom login`。
 - 提示缺 config → 让用户提供账号名和 registry 密码，然后：
   `showroom config --user <名> --server-lan http://your-host --server-public http://your-public-host:port --registry-user <名> --registry-password <密码>`
   （`--server-public` 可选：只有需要从公网发布时才配。）
-- **中间态（重要）**：密钥/config 都齐、唯独「签名自测」一项 ✗ 且其余全 ✓ = 公钥还没被管理员登记——这不是故障，把 doctor 输出顶部的公钥串交给用户走登记流程，登记后重跑即绿。此时不要 push/publish（会 E_AUTH）。
+- **签名自测 ✗**（密钥/config 都在、其余全 ✓）→ 钥匙被服务端删除/GC 或本地时钟偏差：重新 `showroom login <账号>` 重绑本机钥匙后重跑 doctor；仍 ✗ 再查时钟。此时不要 push/publish（会 E_AUTH）。
 
 ## 1. 镜像规范（构建前自检，不满足会发布失败或页面 404）
 
@@ -371,7 +368,7 @@ showroom db reset <项目> --confirm                    # 清库重建（破坏�
         Cmd::Login { account, server_lan, ephemeral } => {
             auth::login(&cfg, account.as_deref(), server_lan.clone(), *ephemeral)
         }
-        Cmd::Logout { purge } => auth::logout(&cfg, *purge),
+        Cmd::Logout => auth::logout(&cfg),
         Cmd::Doctor => doctor(&cfg),
     }
 }
@@ -387,7 +384,7 @@ fn keygen(force: bool, cfg: &Config) -> Result<(), String> {
     k.save_seed(&p).map_err(|e| format!("写密钥失败：{e}"))?;
     println!("密钥: {}", p.display());
     println!("公钥: {}", k.pub_string());
-    println!("专家路径（机器对机器/CI）：把上面的公钥串发给管理员登记。日常登录请用 showroom login。");
+    println!("调试用途（生成/重置本机签名密钥）：日常登录用 showroom login <账号>（密码一次、密钥自动绑定）。");
     Ok(())
 }
 
@@ -464,9 +461,9 @@ fn push(
 }
 
 fn select(cfg: &Config, force: Option<Which>) -> Result<(String, Which), String> {
-    // 探测需签名，故先加载密钥（失败即报错，引导 keygen）
+    // 探测需签名，故先加载密钥（失败即报错，引导登录）
     let key = UserKey::from_seed_file(&cfg.key_file())
-        .map_err(|e| format!("读取密钥 {} 失败：{e}（先运行 showroom keygen）", cfg.key_file().display()))?;
+        .map_err(|e| format!("读取密钥 {} 失败：{e}（先运行 showroom login <账号>）", cfg.key_file().display()))?;
     api::pick_server(
         cfg.server_lan.as_deref(),
         cfg.server_public.as_deref(),
@@ -881,7 +878,7 @@ fn project_action(
 fn doctor(cfg: &Config) -> Result<(), String> {
     let mut all_ok = true;
 
-    // 1. 密钥（plan-16：未登录 → 提示 showroom login；keygen 仅专家路径）
+    // 1. 密钥（plan-16 + B7：未登录 → 提示 showroom login；无账号找管理员发卡）
     let key = match UserKey::from_seed_file(&cfg.key_file()) {
         Ok(k) => {
             println!("✓ 密钥 {} 可读，公钥串：{}", cfg.key_file().display(), k.pub_string());
@@ -889,7 +886,7 @@ fn doctor(cfg: &Config) -> Result<(), String> {
         }
         Err(e) => {
             all_ok = false;
-            println!("✗ 密钥不可读：{e}（showroom login <账号> 一键登录；机器用户专家路径：showroom keygen）");
+            println!("✗ 密钥不可读：{e}（showroom login <账号> 一键登录；无账号找管理员 showroomctl user-add <名> --gen-password 发放）");
             None
         }
     };
@@ -940,7 +937,7 @@ fn doctor(cfg: &Config) -> Result<(), String> {
             }
             Err(msg) if msg.starts_with("E_AUTH") => {
                 all_ok = false;
-                println!("✗ 签名自测：{msg}（钥匙被服务端删除/GC，或公钥未登记——重新 showroom login <账号> 即可重绑本机钥匙；机器用户专家路径：把 doctor 顶部的公钥串交管理员登记；其次才是本地时钟偏差）");
+                println!("✗ 签名自测：{msg}（钥匙被服务端删除/GC——重新 showroom login <账号> 即可重绑本机钥匙；其次才是本地时钟偏差）");
             }
             Err(msg) => {
                 all_ok = false;

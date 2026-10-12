@@ -7,10 +7,9 @@
 | 场景 | 主机 CLI | 等价远程 API / 控制台 |
 |---|---|---|
 | 发新账号（初始密码 + registry 密码两把分开发放，均仅显示一次） | `showroomctl user-add <USER> --gen-password [--admin]` | `POST /_api/admin/user-add`；控制台「管理 → 发放新账号」 |
-| 登记机器用户公钥（CI 专家路径，不设密码） | `showroomctl user-add <USER> --pubkey 'ed25519:<公钥串>'` | 同上（发卡对话框折叠「专家路径」） |
 | 补发/重置登录密码（一次性返回，原密码即刻失效，**不动既有钥匙**） | `showroomctl user-passwd <USER> --gen-password` | `POST /_api/admin/passwd-set`；控制台账号表「补发密码」 |
 | 删除泄露的某把钥匙 | `showroomctl user-key-rm <USER> <KID>` | `POST /_api/admin/key-rm`；控制台账号表快捷动作 |
-| 收/授管理员权限（标记在钥匙上） | `showroomctl key-admin <USER> <KID> --admin false\|true` | `POST /_api/admin/key-admin` |
+| 收/授管理员权限（账号属性，钥匙级临时收权） | `showroomctl key-admin <USER> <KID> --admin false\|true` | `POST /_api/admin/key-admin` |
 | 吊销整账号（签名 + registry 全失效，展项不动） | `showroomctl user-revoke <USER>` | `POST /_api/admin/user-revoke` |
 | Redis 逻辑库扩容（需重启实例，约 3 秒，AOF 持久；**不静默重启**） | `showroomctl middleware set redis databases=256 --confirm`（取值 16–256） | `GET /_api/admin/host` 黄条 → 控制台「扩容」确认流 |
 | 主机形状变更（中间件增减/开关） | 编辑 `state/host.env` → `showroomctl setup --apply` | `POST /_api/admin/host` 两段式：无 confirm 返回变更清单与影响面（removed_middleware/affected_projects），`confirm=true` 才执行 |

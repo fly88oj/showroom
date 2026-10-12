@@ -348,22 +348,22 @@ async fn dispatch(
         ("POST", "/_api/admin/user-add", Collected::Mem(b)) => {
             admin_guard(s, &user, &kid)?; // 先守卫后解析 body：非管理员不因 body 畸形泄露 E_NAME/E_AUTH 差异
             let req: AdminUserAddReq = jbody(b)?;
-            // plan-16 §1.5：body 增 password|gen_password（pubkey 可选，至少其一——内核校验）
+            // plan-16 §1.5 + B7 统一账号密码认证：发卡必须设初始密码（password 或 gen_password）
             let init_pw = match (req.password, req.gen_password.unwrap_or(false)) {
                 (Some(p), _) => ops::InitPw::Set(p),
                 (None, true) => ops::InitPw::Gen,
-                (None, false) => ops::InitPw::None,
+                (None, false) => {
+                    return Err(ApiError::new(
+                        "E_NAME",
+                        format!("缺少初始密码：password 与 gen_password 至少其一（示例：{{\"user\":\"{}\",\"gen_password\":true,\"admin\":false}}）", req.user),
+                    ));
+                }
             };
             let root = s.root.clone();
-            let added = blk(move || {
-                ops::user_add(&root, &req.user, req.pubkey.as_deref(), req.admin.unwrap_or(false), false, init_pw)
-            })
-            .await?;
+            let added = blk(move || ops::user_add(&root, &req.user, req.admin.unwrap_or(false), init_pw))
+                .await?;
             // 两把密码各只此一次返回（plan-16 §1.3：分开发放；本机 reg.cred 常驻不再可查）
             let mut v = json!({"ok": true, "registry_password": added.password});
-            if let Some(kid) = added.kid {
-                v["kid"] = json!(kid);
-            }
             if let Some(lp) = added.login_password {
                 v["login_password"] = json!(lp);
             }
@@ -1319,11 +1319,8 @@ struct DbResetReq {
 #[derive(Deserialize)]
 struct AdminUserAddReq {
     user: String,
-    /// plan-16 §1.5：pubkey 可选（password 至少其一；CI 专家路径仍可只给公钥）。
-    #[serde(default)]
-    pubkey: Option<String>,
     admin: Option<bool>,
-    /// 初始登录密码（明示）或自动生成（gen_password:true）。
+    /// 初始登录密码（明示）或自动生成（gen_password:true）——B7 后必填其一（统一账号密码认证）。
     #[serde(default)]
     password: Option<String>,
     #[serde(default)]
@@ -1469,7 +1466,24 @@ mod tests {
 
     /// 生成一个已设密码用户（进程内注册），返回 root。
     fn mkuser(root: &Path, user: &str, pw: &str) {
-        crate::ops::user_add(root, user, None, false, false, crate::ops::InitPw::Set(pw.into())).unwrap();
+        crate::ops::user_add(root, user, false, crate::ops::InitPw::Set(pw.into())).unwrap();
+    }
+
+    /// B7 语义：发卡（恒设密码）→ 登录绑定钥匙。admin=账号属性（首把钥匙继承）。返回 (kid, 是否 admin)。
+    fn mk_key_user(root: &Path, user: &str, admin: bool) -> (String, bool) {
+        crate::ops::user_add(root, user, admin, crate::ops::InitPw::Gen).unwrap();
+        let k = showroom_common::UserKey::generate();
+        crate::ops::key_bind(root, user, &k.pub_string()).unwrap()
+    }
+
+    /// 直接落一把公钥（模拟存量预登记/遗留钥匙，无 pass.opaque），返回 kid。
+    fn put_key_legacy(root: &Path, user: &str, k: &showroom_common::UserKey) -> String {
+        let vk = showroom_common::UserKey::from_pub_string(&k.pub_string()).unwrap();
+        let kid = crate::state::kid_of(&vk);
+        let dir = crate::state::tokens_dir(root, user);
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join(format!("{kid}.pub")), format!("{}\n", k.pub_string())).unwrap();
+        kid
     }
 
     fn troot(name: &str) -> PathBuf {
@@ -1529,14 +1543,14 @@ mod tests {
         let root = troot("guard");
         let s: S = Arc::new(test_state(root.clone()));
 
-        let k = showroom_common::UserKey::generate();
-        let added = crate::ops::user_add(&s.root, "root", Some(&k.pub_string()), true, false, crate::ops::InitPw::None).unwrap();
-        assert!(admin_guard(&s, "root", added.kid.as_deref().unwrap()).is_ok());
+        let (admin_kid, a) = mk_key_user(&root, "root", true);
+        assert!(a, "管理员账号首把绑定钥匙继承 admin（B7 账号属性语义）");
+        assert!(admin_guard(&s, "root", &admin_kid).is_ok());
 
-        let k2 = showroom_common::UserKey::generate();
-        let plain = crate::ops::user_add(&s.root, "root", Some(&k2.pub_string()), false, false, crate::ops::InitPw::None).unwrap();
-        assert_eq!(admin_guard(&s, "root", plain.kid.as_deref().unwrap()).unwrap_err().code, "E_AUTH");
-        assert_eq!(admin_guard(&s, "nobody", added.kid.as_deref().unwrap()).unwrap_err().code, "E_AUTH");
+        let (plain_kid, a2) = mk_key_user(&root, "carl", false);
+        assert!(!a2);
+        assert_eq!(admin_guard(&s, "carl", &plain_kid).unwrap_err().code, "E_AUTH");
+        assert_eq!(admin_guard(&s, "nobody", &admin_kid).unwrap_err().code, "E_AUTH");
         assert_eq!(admin_guard(&s, "root", "ffffffff").unwrap_err().code, "E_AUTH");
         let _ = std::fs::remove_dir_all(&root);
     }
@@ -1567,24 +1581,22 @@ mod tests {
         assert_eq!(redis_db_guard(&s, &qq("3"), "nobody", "ab12cd34").unwrap_err().code, "E_AUTH");
 
         // admin 钥匙放开全量（含别人的 2 与池内任意 255）；超池/非数字仍 E_NAME
-        let k = showroom_common::UserKey::generate();
-        let added = crate::ops::user_add(&s.root, "root", Some(&k.pub_string()), true, false, crate::ops::InitPw::None).unwrap();
-        assert_eq!(redis_db_guard(&s, &qq("2"), "root", added.kid.as_deref().unwrap()).unwrap(), 2);
-        assert_eq!(redis_db_guard(&s, &qq("255"), "root", added.kid.as_deref().unwrap()).unwrap(), 255);
-        assert_eq!(redis_db_guard(&s, &qq("256"), "root", added.kid.as_deref().unwrap()).unwrap_err().code, "E_NAME");
-        assert_eq!(redis_db_guard(&s, &qq("abc"), "root", added.kid.as_deref().unwrap()).unwrap_err().code, "E_NAME");
-        assert_eq!(redis_db_guard(&s, &HashMap::new(), "root", added.kid.as_deref().unwrap()).unwrap_err().code, "E_NAME");
+        let (admin_kid, _) = mk_key_user(&root, "root", true);
+        assert_eq!(redis_db_guard(&s, &qq("2"), "root", &admin_kid).unwrap(), 2);
+        assert_eq!(redis_db_guard(&s, &qq("255"), "root", &admin_kid).unwrap(), 255);
+        assert_eq!(redis_db_guard(&s, &qq("256"), "root", &admin_kid).unwrap_err().code, "E_NAME");
+        assert_eq!(redis_db_guard(&s, &qq("abc"), "root", &admin_kid).unwrap_err().code, "E_NAME");
+        assert_eq!(redis_db_guard(&s, &HashMap::new(), "root", &admin_kid).unwrap_err().code, "E_NAME");
 
-        // 非管理员钥匙即便 user 有钥匙档案也不越权（无 E_AUTH 与 404 之外的信息差）
-        let k2 = showroom_common::UserKey::generate();
-        let plain = crate::ops::user_add(&s.root, "root", Some(&k2.pub_string()), false, false, crate::ops::InitPw::None).unwrap();
-        assert_eq!(redis_db_guard(&s, &qq("3"), "root", plain.kid.as_deref().unwrap()).unwrap_err().code, "E_AUTH");
+        // 非管理员账号的钥匙不越权（无 E_AUTH 与 404 之外的信息差）
+        let (plain_kid, _) = mk_key_user(&root, "carl", false);
+        assert_eq!(redis_db_guard(&s, &qq("3"), "carl", &plain_kid).unwrap_err().code, "E_AUTH");
 
         // 小池（REDIS_DBS=8）：池内 7 放行、池外 15 → E_NAME（alice 名下 db 7 < 8 仍可用）
         std::fs::create_dir_all(root.join("state")).unwrap();
         std::fs::write(root.join("state/policy.env"), "REDIS_DBS=8\n").unwrap();
         assert_eq!(redis_db_guard(&s, &qq("7"), "alice", "ab12cd34").unwrap(), 7);
-        assert_eq!(redis_db_guard(&s, &qq("15"), "root", added.kid.as_deref().unwrap()).unwrap_err().code, "E_NAME");
+        assert_eq!(redis_db_guard(&s, &qq("15"), "root", &admin_kid).unwrap_err().code, "E_NAME");
         let _ = std::fs::remove_dir_all(&root);
     }
 
@@ -1609,10 +1621,9 @@ mod tests {
         assert_eq!(image_guard(&s, "alice/demo:v1", "nobody", "ab12cd34").unwrap_err().code, "E_AUTH");
 
         // admin 钥匙放行他人命名空间
-        let k = showroom_common::UserKey::generate();
-        let added = crate::ops::user_add(&s.root, "root", Some(&k.pub_string()), true, false, crate::ops::InitPw::None).unwrap();
+        let (admin_kid, _) = mk_key_user(&root, "root", true);
         assert_eq!(
-            image_guard(&s, "bob/demo:v1", "root", added.kid.as_deref().unwrap()).unwrap(),
+            image_guard(&s, "bob/demo:v1", "root", &admin_kid).unwrap(),
             ("bob/demo".into(), "v1".into())
         );
 
@@ -1760,9 +1771,9 @@ mod tests {
         assert_eq!(ke2a.len(), ke2b.len(), "ke2 同形（长度不可区分）");
         assert_ne!(ke2a, ke2b);
 
-        // 未设密码用户（pubkey-only）→ 同 200（存量迁移 §6.6 同形态）
+        // 遗留无密码账号（存量 pubkey-only 形态：只有 .pub 无 pass.opaque）→ 同 200（防枚举不变，B7 后不再新增此类账号）
         let k = showroom_common::UserKey::generate();
-        crate::ops::user_add(&s.root, "ci", Some(&k.pub_string()), false, false, crate::ops::InitPw::None).unwrap();
+        let _kid = put_key_legacy(&s.root, "ci", &k);
         let (c3, b3) = call(&s, "POST", "/_api/auth/login-begin", &begin("ci", &ke1_of("ci", "x")), &[]).await;
         assert_eq!(c3, 200);
         let ke2c = serde_json::from_slice::<Value>(&b3).unwrap()["ke2"].as_str().unwrap().to_string();
@@ -1838,11 +1849,11 @@ mod tests {
     async fn key_bind_verifies_body_pubkey() {
         let root = troot("kb");
         mkuser(&root, "alice", "pw-a");
-        // alice 已有一把登记钥匙 A（旧设备）
+        // alice 已有一把登记钥匙 A（旧设备，经 key-bind 绑定）
         let key_a = showroom_common::UserKey::generate();
-        crate::ops::user_add(&s_unused(), "x", None, false, false, crate::ops::InitPw::None).ok();
+        crate::ops::user_add(&s_unused(), "x", false, crate::ops::InitPw::Gen).ok();
         let s: S = Arc::new(test_state(root.clone()));
-        crate::ops::user_add(&s.root, "alice", Some(&key_a.pub_string()), false, false, crate::ops::InitPw::None).unwrap();
+        crate::ops::key_bind(&s.root, "alice", &key_a.pub_string()).unwrap();
 
         let (token, key_b) = full_login(&s, "alice", "pw-a").await;
         // 未登记钥匙 B 签名 + body=B → 200（按 body 公钥验签通过）
@@ -1923,8 +1934,8 @@ mod tests {
     async fn pw_change_and_key_selfrm() {
         let root = troot("pwch");
         let old_key = showroom_common::UserKey::generate();
-        crate::ops::user_add(&root, "alice", Some(&old_key.pub_string()), false, false,
-            crate::ops::InitPw::Set("old-pw".into())).unwrap();
+        crate::ops::user_add(&root, "alice", false, crate::ops::InitPw::Set("old-pw".into())).unwrap();
+        crate::ops::key_bind(&root, "alice", &old_key.pub_string()).unwrap();
         let s: S = Arc::new(test_state(root.clone()));
         let mut rng = rand::rngs::OsRng;
 
@@ -2000,11 +2011,11 @@ mod tests {
     async fn admin_passwd_set_endpoint() {
         let root = troot("pwset");
         let admin_key = showroom_common::UserKey::generate();
-        crate::ops::user_add(&root, "root", Some(&admin_key.pub_string()), true, false,
-            crate::ops::InitPw::None).unwrap();
+        crate::ops::user_add(&root, "root", true, crate::ops::InitPw::Gen).unwrap();
+        crate::ops::key_bind(&root, "root", &admin_key.pub_string()).unwrap();
+        // alice：遗留无密码账号（存量 pubkey-only 形态，B7 后不再新增）
         let plain_key = showroom_common::UserKey::generate();
-        crate::ops::user_add(&root, "alice", Some(&plain_key.pub_string()), false, false,
-            crate::ops::InitPw::None).unwrap();
+        let _kid = put_key_legacy(&root, "alice", &plain_key);
         let s: S = Arc::new(test_state(root.clone()));
         assert!(!crate::ops::user_list(&s.root).iter().find(|u| u.user == "alice").unwrap().has_password);
 
@@ -2037,14 +2048,16 @@ mod tests {
         let _ = std::fs::remove_dir_all(&s.root);
     }
 
-    // admin/user-add（plan-16 §1.5）：body 增 password/gen_password → 响应两把密码一次性返回；
-    // pubkey-only 与 password-only 均可；两者全无 → E_NAME
+    // admin/user-add（plan-16 §1.5 + B7 统一账号密码认证）：password/gen_password → 响应两把
+    // 密码一次性返回；pubkey 字段已删除（serde 忽略未知键=前向兼容）；全无密码 → E_NAME
     #[tokio::test]
     async fn admin_user_add_with_password() {
         let root = troot("ua");
         let admin_key = showroom_common::UserKey::generate();
-        crate::ops::user_add(&root, "root", Some(&admin_key.pub_string()), true, false,
-            crate::ops::InitPw::None).unwrap();
+        crate::ops::user_add(&root, "root", true, crate::ops::InitPw::Gen).unwrap();
+        // 管理员钥匙：root 走 pending 继承——首把绑定钥匙拿 admin
+        let (_, admin) = crate::ops::key_bind(&root, "root", &admin_key.pub_string()).unwrap();
+        assert!(admin, "首把登录绑定钥匙继承账号级 admin");
         let s: S = Arc::new(test_state(root.clone()));
 
         // password-only
@@ -2055,25 +2068,26 @@ mod tests {
         let v: Value = serde_json::from_slice(&b).unwrap();
         assert_eq!(v["login_password"], "pw-1");
         assert!(v["registry_password"].as_str().is_some_and(|p| !p.is_empty()));
-        assert!(v.get("kid").is_none(), "无公钥无 kid 字段");
+        assert!(v.get("kid").is_none(), "B7 后响应无 kid 字段（不再预登记公钥）");
 
-        // gen_password + pubkey
-        let k = showroom_common::UserKey::generate();
-        let b2 = serde_json::to_vec(&json!({"user":"dave","pubkey": k.pub_string(),"gen_password":true,"admin":true})).unwrap();
+        // gen_password + admin（pubkey 字段被忽略，不生效）
+        let b2 = serde_json::to_vec(&json!({"user":"dave","gen_password":true,"admin":true})).unwrap();
         let (c, b) = call(&s, "POST", "/_api/admin/user-add", &b2,
             &[("Authorization", authz("root", &admin_key, "POST", "/_api/admin/user-add", &b2).as_str())]).await;
         assert_eq!(c, 200);
         let v: Value = serde_json::from_slice(&b).unwrap();
-        assert_eq!(v["kid"].as_str().map(|s| s.len()), Some(8));
+        assert!(v.get("kid").is_none(), "pubkey 已删除：带旧字段也不落公钥");
         assert_eq!(v["login_password"].as_str().map(|s| s.len()), Some(24));
         assert!(v["registry_password"].as_str().is_some_and(|p| !p.is_empty()));
+        assert!(root.join("state/users/dave/admin.pending").exists(), "admin 落账号级 pending 标记");
 
-        // 全无凭证 → E_NAME
+        // 全无密码 → E_NAME（含新示例指引）
         let b3 = br#"{"user":"erin"}"#;
         let (c, b) = call(&s, "POST", "/_api/admin/user-add", b3,
             &[("Authorization", authz("root", &admin_key, "POST", "/_api/admin/user-add", b3).as_str())]).await;
         assert_eq!(c, 400);
         assert!(b.starts_with(br#"{"error":"E_NAME""#));
+        assert!(String::from_utf8_lossy(&b).contains("gen_password"), "E_NAME 须带新示例指引");
         let _ = std::fs::remove_dir_all(&s.root);
     }
 
@@ -2110,7 +2124,7 @@ mod tests {
     async fn tool_endpoint_whitelist_auth_and_missing() {
         let root = troot("tool");
         let k = showroom_common::UserKey::generate();
-        crate::ops::user_add(&root, "alice", Some(&k.pub_string()), false, false, crate::ops::InitPw::None).unwrap();
+        let _kid = put_key_legacy(&root, "alice", &k);
         let s: S = Arc::new(test_state(root.clone()));
 
         // 未签名 → 404 E_AUTH（与一切未签名请求同体，零信息）

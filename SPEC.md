@@ -166,11 +166,11 @@ CLI 对应：`showroom db sql|tables|preview|dump|restore|reset`。公网全可�
 - 控制台：发布表单「一键部署」按钮——选 tar → 前端压缩 → 分片上传 → 自动 publish → 展示 URL；分步状态条（压缩中/上传 x%/发布中/完成）。
 ### 12.2 管理员（标记在 Key 上）
 - state：`tokens/<user>/<kid>.pub` 旁增加 `tokens/<user>/<kid>.admin`（空文件存在=管理员钥匙）。
-- 引导：主机 CLI `showroomctl user-add <名> --gen-password --admin`（或 --pubkey，§16 起密码为主路径）首个管理员；此后管理员可远程授权。
+- 引导：主机 CLI `showroomctl user-add <名> --gen-password --admin` 建立首个管理员（统一账号密码认证，B7）；此后管理员可远程授权。
 - 身份接口：`GET /_api/whoami`（签名）→ `{"user","kid","admin":bool,"platform_pem":str}`——控制台据此显示/隐藏「管理」标签；`platform_pem` 为平台 RSA 公钥 PEM（读 `state/platform_rsa.pub`，缺文件=空串；公钥本就公开，经签名端点下发零信息暴露），控制台自动缓存到本地（`sr.pempub`）免手工粘贴。
 - 管理接口（全部签名+管理员钥匙校验，非管理员=404 E_AUTH 与未登记不可区分；公网可用）：
   - `GET /_api/admin/users` → 账号/钥匙(kid,admin,登记时间)/项目数/has_password（§16 未设密码徽标）
-  - `POST /_api/admin/user-add {user,pubkey?,admin?,password?|gen_password:true}` → 一次性返回 `{kid?,login_password,registry_password}` 两把密码分开发放（§16 §1.3；pubkey 与 password 至少其一）
+  - `POST /_api/admin/user-add {user,admin?,password|gen_password:true}` → 一次性返回 `{login_password,registry_password}` 两把密码分开发放（§16 §1.3；统一账号密码认证 B7：必须设初始密码，预登记公钥路径已删除）
   - `POST /_api/admin/passwd-set {user,password?|gen:true}` → `{password}` 一次性（§16 重置/补发；不动既有钥匙）
   - `POST /_api/admin/user-revoke {user}`、`POST /_api/admin/key-rm {user,kid}`
   - `POST /_api/admin/key-admin {user,kid,admin}`（授权/收权）
@@ -271,7 +271,7 @@ S→C 200 {"kid","admin"}   # 写 <kid>.pub+.bound；账号已有任一 admin �
 C→S POST /_api/auth/pw-begin  {"user":u,"m1":b64}    [SR-SIG1 常规]
 S→C 200 {"m2":b64}                                  # 在途注册态内存保存，60s
 C→S POST /_api/auth/pw-commit {"user":u,"record":b64} [SR-SIG1 常规]  # 原子替换记录
-# 自助下线（CLI logout --purge / 控制台「忘记此设备」）：
+# 下线（CLI logout 恒为 / 控制台登出）：
 C→S POST /_api/key-selfrm {"kid":k} [SR-SIG1]   # 仅允许删除请求签名所用 kid 自己
 # 登录后信任通道下发 registry 凭据（CLI login 免手工 config）：
 C→S GET  /_api/reg-cred [SR-SIG1] → {"user","registry_password"}  # 暴露面=已绑定钥匙=账号主人
@@ -281,9 +281,9 @@ C→S GET  /_api/reg-cred [SR-SIG1] → {"user","registry_password"}  # 暴露�
   +全局（120 次/10 分）双令牌桶（内存，超限同 404）；服务重启丢在途登录态，重试即可。
 - **CLI**：`showroom login [账号] [--server-lan URL] [--ephemeral]`（rpassword 交互读密码，不回显
   不进 argv/env/ps）→ 上述序列 → 默认持久化（seed 落 key_path 0600、config 写 user/server_lan/
-  registry 凭据）；`--ephemeral` 不落任何盘（服务端 keep-N GC 收尾）。`showroom logout [--purge]`
-  清本地（--purge 追加 key-selfrm）。keygen 降为隐藏专家路径（CI 机器对机器：user-add --pubkey
-  登记，无 .bound=人工生命周期不受 GC）。doctor：未登录/自测 E_AUTH → 提示 showroom login。
+  registry 凭据）；`--ephemeral` 不落任何盘（服务端 keep-N GC 收尾）。`showroom logout`
+  清本地并恒为 key-selfrm 远端注销。keygen 保留为隐藏调试命令（生成/重置本机签名密钥；统一账号
+  密码认证 B7 后不再预登记公钥）。doctor：未登录/自测 E_AUTH → 提示 showroom login。
 
 ### 16.2 迁移与边界
 - 存量 users 无 pass.opaque → 密码登录不可用（login-begin 走 UnknownUser 同形态）；控制台文案

@@ -623,10 +623,10 @@
       <li>本设备钥匙由浏览器自动生成并保存在 localStorage（属试验性存储）：清除浏览器数据即失效，届时重新密码登录即可。</li>
     </ul>
 
-    <h2>专家路径：公钥与机器用户（CLI / CI）</h2>
+    <h2>CLI 使用</h2>
     <ul class="note help-list">
-      <li>CLI 与控制台同一模型：<span class="mono">showroom login &lt;账号&gt;</span> 输一次密码即自动配置本机（含镜像库凭据），此后全部子命令免密码（gh/ssh 模型）；<span class="mono">showroom logout</span> 退出（清本机并远程吊销钥匙）。</li>
-      <li>机器对机器 / CI：不走密码，由管理员登记公钥（<span class="mono">showroomctl user-add &lt;账号&gt; --pubkey &lt;公钥串&gt;</span>）；此类钥匙不参与密码绑定钥匙的自动回收，生命周期人工管理。</li>
+      <li>CLI 与控制台同一模型（统一账号密码认证）：<span class="mono">showroom login &lt;账号&gt;</span> 输一次密码即自动配置本机（含镜像库凭据），此后全部子命令免密码（gh/ssh 模型）；<span class="mono">showroom logout</span> 退出（清本机并远程吊销钥匙）。</li>
+      <li>无账号 / 忘记密码：联系管理员发放或重置（<span class="mono">showroomctl user-add &lt;名&gt; --gen-password</span>）。</li>
     </ul>
 
     <h2>镜像规范</h2>
@@ -677,10 +677,9 @@
         <tr><td>账号密码登录（自动绑定本机）</td><td class="mono">showroom login &lt;账号&gt;</td></tr>
         <tr><td>退出登录</td><td class="mono">showroom logout</td></tr>
         <tr><td>修改密码（登录态自助）</td><td class="wrap">控制台顶部「修改密码」入口（CLI 暂无；管理员可代为重置，见下）</td></tr>
-        <tr><td>生成密钥（专家：CI / 机器用户）</td><td class="mono">showroom keygen</td></tr>
+        <tr><td>生成/重置本机签名密钥（调试用）</td><td class="mono">showroom keygen</td></tr>
         <tr class="admin-only hidden"><td>发放新账号（初始密码 / 管理员）</td><td class="mono">showroomctl user-add &lt;账号&gt; --gen-password [--admin]</td></tr>
         <tr class="admin-only hidden"><td>补发 / 重置密码（管理员）</td><td class="mono">showroomctl user-passwd &lt;账号&gt; --gen-password</td></tr>
-        <tr class="admin-only hidden"><td>登记公钥（管理员 · 专家路径）</td><td class="mono">showroomctl user-add &lt;账号&gt; --pubkey &lt;公钥串&gt;</td></tr>
         <tr><td>展项列表</td><td class="mono">showroom ps</td></tr>
         <tr><td>发布（单表单：本地 tar / 镜像库）/ 仅上传</td><td class="mono">showroom deploy / push / publish</td></tr>
         <tr><td>启动 / 停止 / 回滚 / 删除</td><td class="mono">showroom start / stop / rollback / rm</td></tr>
@@ -694,7 +693,7 @@
     <div class="tbl-wrap"><table>
       <thead><tr><th>错误码</th><th>含义与处理</th></tr></thead>
       <tbody>
-        <tr><td class="mono">E_AUTH</td><td class="wrap">登录凭据校验未通过（常见于钥匙过期/被回收、更换设备，或操作了非本人项目）。重新用账号密码登录即可自动修复；CLI/钥匙用户请联系管理员登记公钥；仍失败可用 <span class="mono">showroom doctor</span> 排查时钟偏差。</td></tr>
+        <tr><td class="mono">E_AUTH</td><td class="wrap">登录凭据校验未通过（常见于钥匙过期/被回收、更换设备，或操作了非本人项目）。重新用账号密码登录即可自动修复（CLI 同：showroom login 重登）；仍失败可用 <span class="mono">showroom doctor</span> 排查时钟偏差。</td></tr>
         <tr><td class="mono">E_NAME</td><td class="wrap">命名不符合规则 <span class="mono">^[a-zA-Z0-9][a-zA-Z0-9-]{0,30}$</span> 或使用了保留名（v2/_api/_bootstrap/_console）。</td></tr>
         <tr><td class="mono">E_QUOTA</td><td class="wrap">超出限额：内存配额 / 导入体积 / 磁盘空间（扣除预留）不足；请调低内存配置、精简镜像，磁盘不足时可在「镜像库」删除旧镜像后重试。</td></tr>
         <tr><td class="mono">E_NOTFOUND</td><td class="wrap">展项或上传/下载会话不存在。</td></tr>
@@ -765,7 +764,7 @@
           <tbody><tr><td colspan="4" class="note">正在加载…</td></tr></tbody>
         </table>
       </div>
-      <p class="note">管理员标记挂在钥匙（kid）上：设为管理员后该钥匙可访问本页全部管理功能；删除钥匙即刻失效；吊销整个账号会一并删除其名下全部钥匙与镜像库访问凭据。「未设密码」表示该账号尚无登录密码（密码登录不可用，钥匙登录不受影响）：点「补发密码」生成新的登录初始密码（仅显示一次，原密码即刻失效）；补发/改密均不动已绑定的钥匙。</p>
+      <p class="note">管理员是账号属性：该账号登录后绑定的钥匙自动继承管理权限，吊销整个账号即全部失效（一并删除其名下全部钥匙与镜像库访问凭据）；对单把钥匙可用「取消管理员」临时收权。「未设密码」仅见于历史遗留账号（原预登记公钥机制，现已停用）：点「补发密码」生成新的登录初始密码（仅显示一次，原密码即刻失效）；补发/改密均不动已绑定的钥匙。</p>
 
       <div class="sep"></div>
       <h2>平台状态</h2>
@@ -837,9 +836,9 @@
       <div id="hs-report" class="hidden mt-2" aria-live="polite"></div>
     </section>
 
-    <!-- 发放新账号（plan-16 §1.4/§1.5 收口）：主路径=账号 + 自动生成登录初始密码（crypto 随机 16 位）
-         → user-add {user,password}；结果两行一次性密码（登录初始 + registry）。公钥直登记收进底部
-         折叠「专家路径」（CLI/CI 用户：user-add {user,pubkey}，旧公钥发卡表单保底） -->
+    <!-- 发放新账号（plan-16 §1.4/§1.5 + B7 统一账号密码认证）：主路径=账号 + 自动生成登录
+         初始密码（crypto 随机 16 位）→ user-add {user,password[,admin]}；结果两行一次性密码
+         （登录初始 + registry）；公钥直登记路径已删除（发卡恒设密码） -->
     <dialog id="dlg-user-add" aria-labelledby="dlg-user-add-title">
       <div class="dlg-head">
         <h2 id="dlg-user-add-title">发放新账号</h2>
@@ -876,16 +875,8 @@
           <code id="ad-na-pw" class="pub mono"></code>
           <button type="button" id="ad-na-copy">复制密码</button>
         </div>
-        <p class="note mt-1" id="ad-na-kid-note"></p>
+        <p class="note mt-1">发布者用「账号 + 登录密码」经 <span class="mono">showroom login</span> 或控制台登录即可（密钥自动生成绑定），无需分发任何密钥材料。</p>
       </div>
-      <details id="ad-na-expert" class="expert-fold">
-        <summary>专家路径：直接登记公钥（CLI 用户）</summary>
-        <p class="note mt-2">跳过登录密码：直接登记 <span class="mono">showroom keygen</span> 公钥串（机器对机器钥匙不受密码绑定钥匙的自动回收，生命周期人工管理）；登记后仍可在账号表用「补发密码」增设登录密码。</p>
-        <label class="field mt-2" for="ad-na-pub"><span>公钥串（粘贴 <span class="mono">showroom keygen</span> 产物，<span class="mono">ed25519:…</span>）</span>
-          <textarea id="ad-na-pub" class="mono" spellcheck="false" placeholder="ed25519:…" aria-describedby="ad-na-pub-err"></textarea></label>
-        <p class="ferr" id="ad-na-pub-err" aria-live="polite"></p>
-        <div class="row"><button type="button" id="ad-na-pubsubmit">登记公钥发放</button></div>
-      </details>
     </dialog>
 
     <!-- 补发登录密码（plan-16 §1.5 passwd-set）：confirm → 生成新密码一次性展示（旧密码即刻失效，不动既有钥匙） -->
@@ -991,7 +982,7 @@ function shimCStr(call, cap0) {
 
 // —— 消息条（错误统一顶部：「错误码：中文解释（含下一步动作）」）与行内反馈 ——
 const ERR_CN = {
-  E_AUTH: '登录凭据校验未通过（常见于钥匙过期/被回收、更换设备，或操作了非本人项目）：重新用账号密码登录即可自动修复；CLI/钥匙用户请联系管理员登记公钥',
+  E_AUTH: '登录凭据校验未通过（常见于钥匙过期/被回收、更换设备，或操作了非本人项目）：重新用账号密码登录即可自动修复（CLI 同：showroom login 重登）',
   E_NAME: '命名不符合规则或使用了保留名；请按提示修正名称后重试',
   E_QUOTA: '超出平台限额（内存配额/导入体积/磁盘空间不足）；请调低内存配置、精简镜像，磁盘不足时可先删除旧镜像',
   E_NOTFOUND: '对象不存在（展项/会话）；请确认名称或重新发起',
@@ -1866,16 +1857,14 @@ function wireAdminTab() {
     if ($('ad-st-auto').checked) { refreshAdminStatus(); adTimer = setInterval(refreshAdminStatus, 30000); }
   });
   $('ad-user-add').addEventListener('click', () => { // 发卡对话框（打开即聚焦首字段；Esc/关闭焦点自动归还）
-    $('ad-na-user').value = ''; $('ad-na-pub').value = '';
+    $('ad-na-user').value = '';
     $('ad-na-admin').checked = false;
     naGenPw = ''; // 上轮生成未发放的密码不跨轮残留
     $('ad-na-gen-box').classList.add('hidden');
     $('ad-na-gen-pw').textContent = '';
     $('ad-na-result').classList.add('hidden');
     $('ad-na-login-pw').textContent = ''; $('ad-na-pw').textContent = '';
-    $('ad-na-kid-note').textContent = '';
-    $('ad-na-expert').open = false; // 专家折叠每轮收起（主路径默认）
-    clearErrs('ad-na-user', 'ad-na-gen', 'ad-na-pub');
+    clearErrs('ad-na-user', 'ad-na-gen');
     $('dlg-user-add').showModal();
     $('ad-na-user').focus();
   });
@@ -1888,9 +1877,7 @@ function wireAdminTab() {
   });
   $('ad-na-copy-gen').addEventListener('click', () => copyText($('ad-na-gen-pw').textContent, '登录初始密码'));
   $('ad-na-submit').addEventListener('click', onUserAdd);
-  $('ad-na-pubsubmit').addEventListener('click', onUserAddPub);
   $('ad-na-user').addEventListener('input', () => fieldErr('ad-na-user', ''));
-  $('ad-na-pub').addEventListener('input', () => fieldErr('ad-na-pub', ''));
   $('ad-na-copy-login').addEventListener('click', () => copyText($('ad-na-login-pw').textContent, '登录初始密码'));
   $('ad-na-copy').addEventListener('click', () => copyText($('ad-na-pw').textContent, '镜像库密码'));
   // 补发密码对话框（plan-16 §1.5）：只承载一次性密码展示，动作在账号表行内
@@ -1979,41 +1966,29 @@ async function onAdminPasswdSet(user) {
     loadAdminUsers();
   } catch (e) { apiFail(`补发密码（${user}）`, e); }
 }
-/** 发卡提交共用：user-add → 两行一次性密码结果（登录初始 / registry）+ kid 回显 + 表刷新。 */
-async function issueUser(body, withLoginPw) {
+/** 发卡提交（B7 统一账号密码认证）：user-add {user,password[,admin]} → 两行一次性密码结果（登录初始 / registry）+ 表刷新。 */
+async function issueUser(body) {
   const j = await api('POST', '/_api/admin/user-add', body);
   $('ad-na-result').classList.remove('hidden');
-  $('ad-na-login-row').classList.toggle('hidden', !withLoginPw || !j.login_password);
+  $('ad-na-login-row').classList.toggle('hidden', !j.login_password);
   $('ad-na-login-pw').textContent = j.login_password || '';
   $('ad-na-pw').textContent = j.registry_password || j.password || j.cred || '（响应未携带密码，请联系主机管理员）';
-  $('ad-na-kid-note').textContent = j.kid ? `已登记公钥钥匙 kid：${j.kid}。` : '';
   $('ad-na-fb').textContent = `已发放账号 ${body.user}${body.admin ? '（含管理员）' : ''}`;
   loadAdminUsers();
 }
-async function onUserAdd() { // 主路径（plan-16 §1.5）：账号 + 自动生成的初始密码 → user-add {user,password}
+async function onUserAdd() { // 主路径（plan-16 §1.5 + B7）：账号 + 自动生成的初始密码 → user-add {user,password}
   const user = $('ad-na-user').value.trim();
   if (!NAME_RE.test(user)) return fieldErr('ad-na-user', `账号名「${user}」不合法（须匹配 ^[a-z0-9][a-z0-9-]{0,30}$），请修改后重试`);
-  if (!naGenPw) return fieldErr('ad-na-gen', '请先点「自动生成强密码」生成登录初始密码（或展开底部「专家路径」直接登记公钥）');
+  if (!naGenPw) return fieldErr('ad-na-gen', '请先点「自动生成强密码」生成登录初始密码（发放即生效，仅显示一次）');
   const body = { user, password: naGenPw };
   if ($('ad-na-admin').checked) body.admin = true; // 「同时授予管理员」勾选才携带
   busy($('ad-na-submit'), true, '发放中…');
   try {
-    await issueUser(body, true);
+    await issueUser(body);
     naGenPw = ''; // 发放即失效：结果区已接管展示，防止旧密码误发二次
     $('ad-na-gen-box').classList.add('hidden');
   } catch (e) { apiFail('发放新账号', e); }
   busy($('ad-na-submit'), false);
-}
-async function onUserAddPub() { // 专家路径（旧公钥发卡表单保底）：user-add {user,pubkey}
-  const user = $('ad-na-user').value.trim();
-  if (!NAME_RE.test(user)) return fieldErr('ad-na-user', `账号名「${user}」不合法（须匹配 ^[a-z0-9][a-z0-9-]{0,30}$），请修改后重试`);
-  const pubkey = $('ad-na-pub').value.trim();
-  if (!/^ed25519:[A-Za-z0-9+/]{43}$/.test(pubkey)) return fieldErr('ad-na-pub', '公钥串格式应为 ed25519:<43 位 Base64>（showroom keygen 产物），请粘贴完整公钥串');
-  const body = { user, pubkey };
-  if ($('ad-na-admin').checked) body.admin = true;
-  busy($('ad-na-pubsubmit'), true, '发放中…');
-  try { await issueUser(body, false); } catch (e) { apiFail('登记公钥发放', e); }
-  busy($('ad-na-pubsubmit'), false);
 }
 const SVC_CN = { active: '运行中', inactive: '未运行', failed: '失败', activating: '启动中', deactivating: '停止中' };
 const svcCn = (s) => SVC_CN[s] || s || '未知';

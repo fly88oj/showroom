@@ -1,7 +1,7 @@
 //! ops：子命令级操作（stop/start/rm/rollback/ps/logs/env/reconcile/autoheal/gc*/user*/init-keys）。
 //! serve 复用同一批函数；user 归属校验在 serve 层做（CLI 是管理员直发通道）。
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::path::{Path, PathBuf};
 
@@ -555,22 +555,19 @@ pub fn image_rm(root: &Path, repo: &str, tag: &str) -> R<i64> {
 
 // —— user 管理（CLI 与 /_api/admin/* 端点共用；user/kid 均过名字校验防路径拼接）——
 
-/// user_add 的初始登录密码（plan-16 §1.4）：pubkey 与 password 至少其一，全无 → E_NAME。
+/// user_add 的初始登录密码（plan-16 §1.4）：统一账号密码认证（B7）——发卡必须设初始密码。
 #[derive(Debug, Clone)]
 pub enum InitPw {
-    /// 不设密码（pubkey-only 账号，CI 专家路径）。
-    None,
     /// 管理员显式给定。
     Set(String),
     /// 自动生成（一次性返回，24 hex 字符）。
     Gen,
 }
 
-/// user_add 产物：kid（登记了公钥时）+ 登录密码（设了时，只此一次返回）+ registry 明文
+/// user_add 产物：登录密码（只此一次返回）+ registry 明文
 /// 密码（只此一次返回给远程发卡方；本机 reg.cred 常驻）。
 #[derive(Debug)]
 pub struct UserAdded {
-    pub kid: Option<String>,
     pub login_password: Option<String>,
     pub password: String,
 }
@@ -624,59 +621,27 @@ pub fn user_passwd_set(root: &Path, user: &str, pw: &str) -> R<()> {
     register_in_process(root, user, pw)
 }
 
-/// 登记发布者公钥 + 发 registry 凭据 + 可选设登录密码（plan-16 §1.4）。
-/// 公钥：kid=sha256(pubkey) 前 8 hex；registry 密码：bcrypt cost 10 进 htpasswd、明文
-/// 0600 进 reg.cred；admin=true 时同时落 `<kid>.admin` 空标记（SPEC §12.2）。
-/// pubkey 与 init_pw 至少其一，全无 → E_NAME（指引）。
-pub fn user_add(
-    root: &Path,
-    name: &str,
-    pubkey: Option<&str>,
-    admin: bool,
-    replace: bool,
-    init_pw: InitPw,
-) -> R<UserAdded> {
+/// 发账号（B7 统一账号密码认证）：设初始登录密码 + 发 registry 凭据。
+/// registry 密码：bcrypt cost 10 进 htpasswd、明文 0600 进 reg.cred；
+/// admin=true 时记账号级待继承标记，首把登录绑定钥匙继承（SPEC §16）。
+pub fn user_add(root: &Path, name: &str, admin: bool, init_pw: InitPw) -> R<UserAdded> {
     state::check_name("user", name)?;
-    if pubkey.is_none() && matches!(init_pw, InitPw::None) {
-        return Err(ApiError::new(
-            "E_NAME",
-            format!("缺少凭证：--pubkey <串> 与 --password <pw>/--gen-password 至少其一（示例：showroomctl user-add {name} --gen-password --admin）"),
-        ));
-    }
-    let mut kid = None;
-    if let Some(pk) = pubkey {
-        let vk = showroom_common::UserKey::from_pub_string(pk.trim())
-            .map_err(|e| ApiError::new("E_NAME", format!("bad pubkey: {e}")))?;
-        let k = state::kid_of(&vk);
-        let dir = state::tokens_dir(root, name);
-        if replace {
-            let _ = fs::remove_dir_all(&dir);
-        }
-        fs::create_dir_all(&dir)?;
-        fs::write(dir.join(format!("{k}.pub")), format!("{}\n", pk.trim()))?;
-        if admin {
-            fs::write(state::admin_marker_path(root, name, &k), "")?;
-        }
-        kid = Some(k);
-    }
-    // 纯密码发卡的管理员意图无法落在钥匙上：记账号级待继承标记，首把绑定钥匙继承（SPEC §16）
-    if admin && pubkey.is_none() {
+    // 管理员是账号属性：落账号级待继承标记，登录绑定的首把钥匙继承（原预登记公钥路径已删除）
+    if admin {
         fs::create_dir_all(state::users_dir(root, name))?;
         fs::write(state::users_dir(root, name).join("admin.pending"), b"")?;
     }
-    let mut login_password = None;
-    match init_pw {
-        InitPw::None => {}
+    let login_password = match init_pw {
         InitPw::Set(pw) => {
             register_in_process(root, name, &pw)?;
-            login_password = Some(pw);
+            Some(pw)
         }
         InitPw::Gen => {
             let pw = gen_login_password();
             register_in_process(root, name, &pw)?;
-            login_password = Some(pw);
+            Some(pw)
         }
-    }
+    };
     let pw = state::rand_hex(16);
     let hash = bcrypt::hash(&pw, 10).map_err(|e| ApiError::state(format!("bcrypt: {e}")))?;
     state::upsert_htpasswd(root, name, &hash)?;
@@ -684,7 +649,7 @@ pub fn user_add(
         &state::users_dir(root, name).join("reg.cred"),
         &format!("{name}:{pw}\n"),
     )?;
-    Ok(UserAdded { kid, login_password, password: pw })
+    Ok(UserAdded { login_password, password: pw })
 }
 
 /// 密码登录后绑定新钥匙（plan-16 §2.2）：幂等（同钥匙重绑=ok 补 .bound）+ .bound 标记
@@ -785,32 +750,41 @@ pub fn user_list(root: &Path) -> Vec<UserInfo> {
             m
         },
     );
-    let mut out = vec![];
-    if let Ok(rd) = fs::read_dir(root.join("state/tokens")) {
-        for e in rd.filter_map(|e| e.ok()) {
-            let path = e.path();
-            if !path.is_dir() {
-                continue;
+    // B7 统一账号密码认证：账号可先于首把钥匙存在（纯密码发卡，登录时才绑定钥匙）——
+    // 账号清单取 state/tokens（有钥匙）与 state/users（有记录）两目录并集
+    let mut users: BTreeSet<String> = BTreeSet::new();
+    for d in [root.join("state/tokens"), root.join("state/users")] {
+        if let Ok(rd) = fs::read_dir(&d) {
+            for e in rd.filter_map(|e| e.ok()) {
+                let path = e.path();
+                if !path.is_dir() {
+                    continue;
+                }
+                if let Some(user) = path.file_name().and_then(|o| o.to_str()) {
+                    users.insert(user.to_string());
+                }
             }
-            let Some(user) = path.file_name().and_then(|o| o.to_str()).map(str::to_string) else {
-                continue;
-            };
+        }
+    }
+    let mut out = users
+        .into_iter()
+        .map(|user| {
             let keys = state::user_keys_with_kid(root, &user)
                 .into_iter()
                 .map(|(kid, _)| UserKeyInfo {
                     admin: key_is_admin(root, &user, &kid),
-                    since: state::file_mtime(&path.join(format!("{kid}.pub"))),
+                    since: state::file_mtime(&state::tokens_dir(root, &user).join(format!("{kid}.pub"))),
                     kid,
                 })
                 .collect();
-            out.push(UserInfo {
+            UserInfo {
                 has_password: state::read_pass_opaque(root, &user).is_some(),
                 projects: projects.get(&user).copied().unwrap_or(0),
                 user,
                 keys,
-            });
-        }
-    }
+            }
+        })
+        .collect::<Vec<_>>();
     out.sort_by(|a, b| a.user.cmp(&b.user));
     out
 }
@@ -951,13 +925,13 @@ mod tests {
     }
 
     // user_add（上收公共函数）：admin 标记、htpasswd/reg.cred、密码只此一次返回。
-    // plan-16：InitPw 三态 + pubkey 可选（至少其一）；login_password 只此一次返回。
+    // B7 统一账号密码认证：无 pubkey 路径，发卡必须设初始密码；login_password 只此一次返回。
     #[test]
     fn password_only_admin_pending_flow() {
         let root = troot("admin_pending");
         fs::create_dir_all(root.join("state")).unwrap();
-        // 纯密码发卡 + admin：落 pending 标记
-        let added = user_add(&root, "bob", None, true, false, InitPw::Set("pw123456".into())).unwrap();
+        // 密码发卡 + admin：落 pending 标记
+        let added = user_add(&root, "bob", true, InitPw::Set("pw123456".into())).unwrap();
         assert!(added.login_password.is_some());
         assert!(root.join("state/users/bob/admin.pending").exists());
         // 首把绑定钥匙继承 admin，pending 被消费
@@ -972,27 +946,15 @@ mod tests {
     }
 
     #[test]
-    fn pubkey_admin_no_pending_marker() {
-        let root = troot("admin_nopending");
-        fs::create_dir_all(root.join("state")).unwrap();
-        let k = showroom_common::UserKey::generate();
-        user_add(&root, "carol", Some(&k.pub_string()), true, false, InitPw::None).unwrap();
-        assert!(!root.join("state/users/carol/admin.pending").exists(), "pubkey 路径 admin 落在钥匙上，不应有 pending");
-    }
-
-    #[test]
     fn user_add_with_admin_flag() {
         let root = troot("user-add");
-        let k = showroom_common::UserKey::generate();
 
-        let added = user_add(&root, "root", Some(&k.pub_string()), true, false, InitPw::None).unwrap();
-        assert_eq!(added.kid.as_deref().map(|s| s.len()), Some(8));
-        assert!(added.login_password.is_none(), "pubkey-only 不设密码");
+        let added = user_add(&root, "root", true, InitPw::Set("pw-123456".into())).unwrap();
+        assert!(added.login_password.as_deref() == Some("pw-123456"), "登录密码只此一次返回");
         assert!(!added.password.is_empty());
-        let kid = added.kid.clone().unwrap();
-        // 标记 + 公钥落位
-        assert!(state::admin_marker_path(&root, "root", &kid).exists());
-        assert!(state::tokens_dir(&root, "root").join(format!("{kid}.pub")).exists());
+        // B7：admin 是账号属性——落账号级 pending 标记（登录绑定钥匙继承），不再预登记公钥
+        assert!(root.join("state/users/root/admin.pending").exists());
+        assert!(state::user_keys_with_kid(&root, "root").is_empty(), "发卡不落任何公钥");
         // 密码与 reg.cred 一致；htpasswd 有 bcrypt 行
         let cred = fs::read_to_string(state::users_dir(&root, "root").join("reg.cred")).unwrap();
         assert_eq!(cred, format!("root:{}\n", added.password));
@@ -1000,24 +962,18 @@ mod tests {
         assert!(htpasswd.starts_with("root:$2"), "bcrypt 行: {htpasswd}");
 
         // 非 admin：无标记
-        let k2 = showroom_common::UserKey::generate();
-        let added2 = user_add(&root, "bob", Some(&k2.pub_string()), false, false, InitPw::None).unwrap();
-        assert!(!state::admin_marker_path(&root, "bob", added2.kid.as_deref().unwrap()).exists());
+        user_add(&root, "bob", false, InitPw::Set("pw-654321".into())).unwrap();
+        assert!(!state::users_dir(&root, "bob").join("admin.pending").exists());
 
-        // 坏 user 名 / 坏公钥 / 全无凭证
-        assert_eq!(user_add(&root, "Bad", Some(&k2.pub_string()), false, false, InitPw::None).unwrap_err().code, "E_NAME");
-        assert_eq!(user_add(&root, "ok", Some("junk"), false, false, InitPw::None).unwrap_err().code, "E_NAME");
-        assert_eq!(user_add(&root, "ok", None, false, false, InitPw::None).unwrap_err().code, "E_NAME");
-        let e = user_add(&root, "ok", None, false, false, InitPw::None).unwrap_err();
-        assert!(e.msg.contains("至少其一"), "E_NAME 须带指引: {}", e.msg);
+        // 坏 user 名 → E_NAME
+        assert_eq!(user_add(&root, "Bad", false, InitPw::Gen).unwrap_err().code, "E_NAME");
     }
 
     // plan-16 §6.5：user_add(Gen) 落记录且密码仅返一次（文件只是 OPAQUE 信封，无明文/哈希）
     #[test]
     fn user_add_gen_writes_pass_opaque() {
         let root = troot("user-add-gen");
-        let added = user_add(&root, "carol", None, false, false, InitPw::Gen).unwrap();
-        assert!(added.kid.is_none(), "无公钥无 kid");
+        let added = user_add(&root, "carol", false, InitPw::Gen).unwrap();
         let login_pw = added.login_password.clone().expect("Gen 返回一次性登录密码");
         assert_eq!(login_pw.len(), 24, "24 hex 字符");
         // 记录落位：b64 一行、0600；内容可被服务端反序列化（可登录）
@@ -1048,7 +1004,7 @@ mod tests {
     fn passwd_set_replaces_record_keys_untouched() {
         let root = troot("passwd-set");
         let kid = put_key(&root, "alice", true);
-        user_add(&root, "alice", None, false, false, InitPw::Set("old-pw".into())).unwrap();
+        user_add(&root, "alice", false, InitPw::Set("old-pw".into())).unwrap();
         // 旧密码可登录
         let setup = opaque_setup(&root).unwrap();
         let mut rng = rand::rngs::OsRng;
@@ -1139,15 +1095,14 @@ mod tests {
     #[test]
     fn revoke_deletes_record_and_list_has_password() {
         let root = troot("revoke-list");
-        user_add(&root, "alice", None, false, false, InitPw::Set("pw".into())).unwrap();
+        user_add(&root, "alice", false, InitPw::Set("pw".into())).unwrap();
         put_key(&root, "alice", false);
-        let k = showroom_common::UserKey::generate();
-        user_add(&root, "bob", Some(&k.pub_string()), false, false, InitPw::None).unwrap();
+        user_add(&root, "bob", false, InitPw::Gen).unwrap();
 
         let l = user_list(&root);
         let by = |u: &str| l.iter().find(|i| i.user == u).unwrap();
         assert!(by("alice").has_password, "设了密码");
-        assert!(!by("bob").has_password, "pubkey-only 无密码");
+        assert!(by("bob").has_password, "B7 后发卡恒设密码（无 pubkey-only 账号）");
 
         user_revoke(&root, "alice").unwrap();
         assert!(!state::users_dir(&root, "alice").exists(), "users 目录整删（记录随之消失）");

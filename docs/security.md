@@ -39,7 +39,7 @@ S→C 200 {"kid","admin"}   # 写 <kid>.pub+.bound；继承语义见 §4.2；GC 
 C→S POST /_api/auth/pw-begin  {"user":u,"m1":b64}    [SR-SIG1 常规]
 S→C 200 {"m2":b64}                                  # 在途注册态内存保存，60s
 C→S POST /_api/auth/pw-commit {"user":u,"record":b64} [SR-SIG1 常规]  # 原子替换记录
-# 自助下线（CLI logout --purge / 控制台「忘记此设备」）：
+# 下线（CLI logout 恒为 / 控制台登出）：
 C→S POST /_api/key-selfrm {"kid":k} [SR-SIG1]   # 仅允许删除请求签名所用 kid 自己
 # 登录后信任通道下发 registry 凭据（CLI login 免手工 config）：
 C→S GET  /_api/reg-cred [SR-SIG1] → {"user","registry_password"}  # 暴露面=已绑定钥匙=账号主人
@@ -160,7 +160,7 @@ SR-SIG1 签名已覆盖 `sha256(body)`（整个信封的哈希）——Encrypt-t
 ### 4.1 标记与能力分层
 
 - 标记在**钥匙**上而非账号上：`state/tokens/<user>/<kid>.admin`（空文件存在即管理员钥匙）；
-- 引导：首个管理员由主机 CLI `showroomctl user-add <名> --gen-password --admin`（密码为主路径）或 `--pubkey` 建立；此后管理员可经签名 API 远程发卡与授权；
+- 引导：首个管理员由主机 CLI `showroomctl user-add <名> --gen-password --admin` 建立（统一账号密码认证，B7）；此后管理员可经签名 API 远程发卡与授权；
 
 | 能力 | 发布者钥匙 | 管理员钥匙 |
 |---|---|---|
@@ -219,7 +219,7 @@ SR-SIG1 签名已覆盖 `sha256(body)`（整个信封的哈希）——Encrypt-t
 | 13 | SQL 注入 / 命令注入 | db-sql 直达 psql stdin（禁 argv）；redis-keys/get 白名单字符校验先于 docker 调用；展项凭据为独立随机密码 |
 | 14 | 大载荷拒绝服务 | JSON body 1MB 帽、import IMPORT_MAX_GB（默认 8GB）帽 + 磁盘准入（膨胀因子×密封体积 ≤ 可用−预留）、db-dump 明文 256MB 帽、分片 seq/total 强制、内存准入（RESERVE_MEM_MB 预留） |
 | 15 | 服务端会话残留 | `_tmp` 即用即删 + 24h gc 兜底；dump 会话读完最后一片即删 |
-| 16 | 控制台 localStorage 种子窃取 | P1 试验档，页面明示；不适用于共享浏览器。登录已走 OPAQUE（密码永存 localStorage 之外）；种子即 Ed25519 钥匙，可 `logout --purge` 远端注销 |
+| 16 | 控制台 localStorage 种子窃取 | P1 试验档，页面明示；不适用于共享浏览器。登录已走 OPAQUE（密码永存 localStorage 之外）；种子即 Ed25519 钥匙，`logout` 恒为远程注销 |
 | 17 | 时钟偏差攻击（拖回 ts） | 窗口绝对值判定；nonce 与 ts 绑定在 canonical 内，篡改即验签失败 |
 | 18 | 明文 HTTP 首登 MITM（接管账号） | 已知边界（§1.3 风险 1）：PAKE 不提供信任锚，主动 MITM 可中继 login-finish 并登记自己的公钥；缓解：公网面经 Caddy TLS、LAN 不可信走 CLI 钥匙路径；bind_token 60s 单次缩小窗口 |
 | 19 | 登录端点在线滥用 | login-begin 双令牌桶（user 10 次/10 分 + 全局 120 次/10 分）；超限 404 与未知路径逐字节一致；rwd 计算成本抬高单价 |

@@ -48,18 +48,18 @@ showroom login [<账号>] [--server-lan URL] [--ephemeral]
 ### showroom logout
 
 ```sh
-showroom logout [--purge]
+showroom logout
 ```
 
-清本地登录态：删除本机钥匙、清除 config 身份字段（server 地址保留，下次 login 免输）。`--purge` 追加远端注销本机这把钥匙（`/_api/key-selfrm`，仅删请求签名所用 kid 自己）。
+清本地登录态：删除本机钥匙、清除 config 身份字段（server 地址保留，下次 login 免输），并恒为远程注销本机这把钥匙（`/_api/key-selfrm`，仅删请求签名所用 kid 自己；服务端不可达时如实报错但本地仍清理）。
 
-### showroom keygen（隐藏命令：CI / 机器用户专用）
+### showroom keygen（隐藏命令：调试用）
 
 ```sh
-showroom keygen [--force]     # 生成密钥；已存在拒绝覆盖（--force 强制）
+showroom keygen [--force]     # 生成/重置本机签名密钥；已存在拒绝覆盖（--force 强制）
 ```
 
-**日常登录走 `showroom login`，不要用本命令**——keygen 是机器对机器的专家路径（CI、无密码账号）：生成密钥后把公钥串（`ed25519:<base64>`）交管理员用 `showroomctl user-add <账号> --pubkey '…'` 登记。此类钥匙无 `.bound` 标记，不参与密码绑定钥匙的 keep-N 自动回收，生命周期人工管理。已从 `--help` 隐藏（plan-16 §4）。
+**日常登录走 `showroom login`，不要用本命令**——keygen 仅用于排查签名问题或强制换钥（生成后仍需 `showroom login` 绑定登记）。统一账号密码认证（B7）后不再支持预登记公钥发卡。已从 `--help` 隐藏。
 
 ### showroom config
 
@@ -206,7 +206,7 @@ showroom skill [install]     # install 为缺省动作，当前唯一动作（�
 
 | 命令 | 说明 |
 |---|---|
-| `showroomctl user-add <USER> [--pubkey 'ed25519:<…>'] [--password '<初始密码>'\|--gen-password] [--admin] [--replace-key]` | 发账号：登记公钥（可选，CI 专家路径）+ 设初始登录密码（可选）+ 生成 registry 凭据（bcrypt）。pubkey 与 password 至少其一；`--gen-password` 自动生成初始密码一次性返回；`--admin` 授管理员（纯密码发卡的管理员意图经 `admin.pending` 由首把登录绑定钥匙继承） |
+| `showroomctl user-add <USER> (--password '<初始密码>'\|--gen-password) [--admin]` | 发账号：设初始登录密码（必填其一）+ 生成 registry 凭据（bcrypt）。`--gen-password` 自动生成初始密码一次性返回；`--admin` 授管理员（账号属性，经 `admin.pending` 由首把登录绑定钥匙继承）。统一账号密码认证（B7）：预登记公钥路径已删除 |
 | `showroomctl user-passwd <USER> [--password '<新密码>'\|--gen-password]` | 重置/补发登录密码（替换 `pass.opaque`，**不动既有钥匙**）；一次性返回新密码 |
 | `showroomctl user-key-rm <USER> <KID>` | 删除某把公钥（admin 标记随之消失） |
 | `showroomctl key-admin <USER> <KID> --admin true\|false` | 授/收管理员权限 |

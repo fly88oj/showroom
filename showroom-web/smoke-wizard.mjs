@@ -114,7 +114,7 @@ const BTN_TEXT = {
   'lg-submit': '登录',
   'pub-submit': '发布', 'btn-upload-only': '仅上传', 'ad-na-submit': '发放', // plan-17 §5：单表单（dep-submit 删除）
   'hs-apply': '查看变更', 'hs-confirm': '确认执行', 'hs-rx-preview': '获取确认提示', 'hs-rx-run': '我已了解，执行扩容',
-  'pw-submit': '确认修改', 'ad-na-pubsubmit': '登记公钥发放',
+  'pw-submit': '确认修改',
 };
 const armBtnText = () => { for (const [id, t] of Object.entries(BTN_TEXT)) $s(id).textContent = t; };
 globalThis.document = {
@@ -513,11 +513,11 @@ globalThis.fetch = async (url, init = {}) => {
     if (whoamiFail) return resp(404, { error: 'E_AUTH' });
     return resp(200, { user: 'alice', kid: 'kid-self', admin: whoamiAdmin, platform_pem: WHOAMI_PEM });
   }
-  if (u.includes('/_api/admin/user-add')) { // plan-16 §1.5：password → login_password 一次性回显；pubkey → kid
+  if (u.includes('/_api/admin/user-add')) { // plan-16 §1.5 + B7：password → login_password 一次性回显；无密码 → 400 E_NAME
     userAddBody = JSON.parse(dec2.decode(init.body));
+    if (!userAddBody.password && !userAddBody.gen_password) return resp(400, { error: 'E_NAME', msg: '缺少初始密码：password 与 gen_password 至少其一' });
     return resp(200, {
       ok: true,
-      ...(userAddBody.pubkey ? { kid: 'kid-new' } : {}),
       ...(userAddBody.password ? { login_password: userAddBody.password } : {}),
       registry_password: 'reg-pw-smoke',
     });
@@ -1133,20 +1133,9 @@ $s('ad-na-admin').checked = true;
 click('ad-na-submit');
 await sleep(60);
 ok(userAddBody.admin === true && userAddBody.user === 'newbie2', '勾选「同时授予管理员」→ 提交体 admin:true');
-// —— 专家路径（折叠）：直接登记公钥（旧 pubkey 发卡表单保底） ——
-$s('ad-na-user').value = 'ci-bot';
-$s('ad-na-pub').value = 'not-a-pubkey';
-click('ad-na-pubsubmit');
-ok(userAddBody.user === 'newbie2' && ($s('ad-na-pub-err').textContent || '').includes('ed25519:'), '专家路径：公钥串格式内联拒绝（未发请求）');
-$s('ad-na-pub').value = 'ed25519:' + 'A'.repeat(43);
-click('ad-na-pubsubmit');
-await sleep(60);
-ok(userAddBody.user === 'ci-bot' && userAddBody.pubkey.startsWith('ed25519:') && !('password' in userAddBody),
-  '专家路径提交体：{user,pubkey}（不带 password）');
-ok(shown('ad-na-result') && hidden('ad-na-login-row') && $s('ad-na-pw').textContent === 'reg-pw-smoke',
-  '专家路径结果：仅 registry 密码一行（登录初始密码行隐藏）');
-ok(($s('ad-na-kid-note').textContent || '').includes('kid-new'), '专家路径结果：登记钥匙 kid 回显');
-ok(!$s('ad-na-pubsubmit').disabled && $s('ad-na-pubsubmit').textContent === '登记公钥发放', '专家路径请求结束：按钮恢复原文与可用');
+// B7：原发卡对话框「专家路径：直接登记公钥」折叠（ad-na-pub/pubsubmit/kid-note）已整体删除
+ok(!html.includes('id="ad-na-expert"') && !html.includes('id="ad-na-pub"') && !html.includes('登记公钥发放'),
+  'B7：发卡对话框公钥直登记路径零残留（发卡恒设初始密码）');
 click('ad-na-close');
 ok($s('dlg-user-add').open === false, '发卡对话框关闭');
 
@@ -1506,17 +1495,19 @@ ok(!html.includes('id="lg-expert"') && !html.includes('钥匙登录（CLI / 机�
 ok(html.includes('id="lg-reenter"'), 'B2：「免密码进入」按钮容器保留（登出即清钥匙后不再显示）');
 ok(html.includes('登录与账号') && html.includes('两把独立发放的密码') && html.includes('试验性存储'),
   'plan-16 帮助页：登录方式描述（两把密码分开 + 试验性存储告示保留）');
-ok(html.includes('专家路径：公钥与机器用户（CLI / CI）') && html.includes('showroom keygen') && html.includes('--pubkey')
-  && html.includes('showroom login'),
-  'plan-16 帮助页：保留 CLI/公钥专家节（keygen/user-add --pubkey/login）');
+ok(html.includes('CLI 使用') && html.includes('showroom login') && html.includes('showroomctl user-add &lt;名&gt; --gen-password')
+  && !html.includes('--pubkey') && !html.includes('专家路径：公钥与机器用户'),
+  'B7 帮助页：统一账号密码认证（CLI login + 管理员发卡指引；预登记公钥路径零残留）');
+ok(html.includes('showroom keygen') && html.includes('调试用'),
+  'B7 帮助页：keygen 保留但定位为调试（CLI 对照表行标注）');
 // —— 工具下载（GET /_api/tool/*）：帮助页三行下载卡片 + 签名下载接线 ——
 ok(html.includes('工具下载') && html.includes('id="tool-tbl"') && (html.match(/data-tool-dl=/g) || []).length === 3,
   '工具下载：帮助页三行下载卡片（CLI 二进制 / Agent Skill / 平台公钥）齐备');
 ok(html.includes('<th>文件</th><th>说明</th><th>大小</th><th>操作</th>'),
   '工具下载：四列表头齐备（第 4 列「操作」不为空，第2轮xiaozhi P3）');
-ok((html.match(/class="admin-only hidden"/g) || []).length === 3
+ok((html.match(/class="admin-only hidden"/g) || []).length === 2
   && html.includes("document.querySelectorAll('#app .admin-only')"),
-  'CLI 对照表：user-add/user-passwd 三行 admin-only 默认隐藏 + syncAdmin 按 whoami 显隐（第2轮xiaozhi P3）');
+  'CLI 对照表：user-add/user-passwd 两行 admin-only 默认隐藏 + syncAdmin 按 whoami 显隐（B7：登记公钥行删除）');
 for (const t of ['showroom', 'showroom-publisher.md', 'platform_rsa.pub']) {
   ok(html.includes(`data-tool-dl="${t}"`) && html.includes(`id="tool-size-${t}"`), `工具下载：${t} 行（按钮 + 大小列）存在`);
 }
@@ -1565,12 +1556,12 @@ ok(html.includes('focusGuided') || html.includes('登录焦点引导'), 'S4/验�
 ok(html.includes('autocomplete="current-password"') && html.includes('autocomplete="new-password"'),
   '规范：改密密码框 autocomplete（current-password / new-password）');
 ok((html.match(/type="password"/g) || []).length >= 4, '规范：密码输入均 type=password（登录 1 + 改密 3）');
-for (const s of ['自动生成强密码', '登录初始密码', '未设密码', '已设密码', '补发密码', '仅显示一次', '重新登录', '专家路径：直接登记公钥（CLI 用户）']) {
+for (const s of ['自动生成强密码', '登录初始密码', '未设密码', '已设密码', '补发密码', '仅显示一次', '重新登录']) {
   ok(html.includes(s), `plan-16 收口文案全中文：${s}`);
 }
 ok(html.includes('id="ad-na-gen"') && html.includes('id="ad-na-gen-pw"') && html.includes('id="ad-na-login-pw"') && html.includes('id="ad-ps-pw"'),
   '发卡/补发一次性密码展示容器齐备（生成区 + 结果两行 + 补发对话框）');
-ok(html.includes('<details id="ad-na-expert"') && html.includes('登记公钥发放'), '发卡专家路径：公钥直登记收进 <details> 折叠（旧表单保底）');
+ok(!html.includes('id="ad-na-expert"') && !html.includes('登记公钥发放'), 'B7：发卡对话框无公钥直登记折叠（与场景 2 行为断言互补）');
 for (const id of ['pw-cur', 'pw-new', 'pw-new2']) ok(html.includes(`for="${id}"`), `规范：改密控件 label for="${id}"`);
 ok(!html.includes('op=change'), '改密路径与服务端对齐（pw-begin 无 op 查询参数——按 serve.rs/SPEC §16 实形状）');
 ok(!html.includes('内存上限'), '§10.2：「内存上限」零残留');
