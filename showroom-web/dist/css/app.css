@@ -158,7 +158,7 @@
   #tool-tbl th:nth-child(3), #tool-tbl td:nth-child(3) { width: 12%; }
   #tool-tbl th:nth-child(4), #tool-tbl td:nth-child(4) { width: 16%; }
   /* 他人项目标签已随项目列表只回本人（32c3484）整链路移除 */
-  .tbl-wrap { overflow: auto; max-height: 60vh; border: 1px solid var(--bd); border-radius: var(--r); }
+  .tbl-wrap { overflow-x: auto; border: 1px solid var(--bd); border-radius: var(--r); } /* R8：去 max-height 内滚盒——文档表格随页面流，滚轮不被吞 */
   .tbl-low { max-height: 22vh; } .tbl-mid { max-height: 26vh; }
   /* 项目表页面级滚动：取消容器裁剪——行内「更多 ▾」菜单（absolute）不再被 overflow 截断 */
   .tbl-page { overflow: visible; max-height: none; }
@@ -180,7 +180,9 @@
   .grid { display: flex; flex-wrap: wrap; gap: var(--sp-4); align-items: flex-end; } /* 不限 form：数据页/管理页 grid 同样横排（原 form .grid 使非表单区竖排堆叠） */
   .grid > .grow { flex: 1 1 20em; min-width: 0; } /* 横排后 field 收缩到 min-content 的字段（如数据页项目名）撑开 */
   /* 滚动容器不外溢滚动链 */
-  .tbl-wrap, pre.out, dialog pre, textarea, select[size] { overscroll-behavior: contain; }
+  #db-preview-wrap { max-height: 60vh; overflow: auto; } /* 查询结果大结果集：内滚合法，但边界链回页面 */
+  dialog pre, textarea, select[size] { overscroll-behavior: contain; } /* 弹窗/输入控件：隔离滚动链 */
+  /* R8：页面级容器（表格/输出框）不吃 contain——滚到边界必须链回页面，否则滚轮在表格上页面卡死 */
   /* 视觉QA P2-2：顶部条/警示条共享 alert 基类规格（同 padding/圆角） */
   #msg {
     max-width: 1200px; margin: var(--sp-4) auto 0; padding: var(--sp-2) var(--sp-3); border-radius: var(--r);
