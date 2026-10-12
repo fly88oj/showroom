@@ -290,18 +290,30 @@
 
   <!-- ———— 标签页 4：帮助 ———— -->
   <section id="tab-help" class="hidden" role="tabpanel" aria-labelledby="tabbtn-help">
+    <nav id="help-subnav" aria-label="帮助栏目">
+      <button data-hp="account" class="on" aria-selected="true">账号</button>
+      <button data-hp="cli">CLI 使用</button>
+      <button data-hp="mirror">镜像规范</button>
+      <button data-hp="tools">工具与命令</button>
+      <button data-hp="errors">错误码</button>
+    </nav>
+    <div class="hpanel" id="hp-account">
     <h2>登录与账号</h2>
     <ul class="note help-list">
       <li>账号与登录密码由管理员发放。</li>
       <li>忘记密码请联系管理员重置（控制台无法自助找回）。</li>
     </ul>
 
+    </div>
+    <div class="hpanel hidden" id="hp-cli">
     <h2>CLI 使用</h2>
     <ul class="note help-list">
       <li>CLI 与控制台同一模型（统一账号密码认证）：<span class="mono">showroom login &lt;账号&gt;</span> 输一次密码即自动配置本机（含镜像库凭据），此后全部子命令免密码（gh/ssh 模型）；<span class="mono">showroom logout</span> 退出（清本机并远程吊销钥匙）。</li>
       <li>无账号 / 忘记密码：联系管理员发放或重置（<span class="mono">showroomctl user-add &lt;名&gt; --gen-password</span>）。</li>
     </ul>
 
+    </div>
+    <div class="hpanel hidden" id="hp-mirror">
     <h2>镜像规范</h2>
     <ul class="note help-list">
       <li>项目须监听容器内 <span class="mono">8080</span> 端口（其他端口在发布表单的端口字段如实填写）。</li>
@@ -317,6 +329,8 @@
     </table></div>
     <p class="note">当前值可随时在项目列表「环境变量」里查看（<span class="mono">showroom env</span> 同）。</p>
 
+    </div>
+    <div class="hpanel hidden" id="hp-tools">
     <h2>工具下载</h2>
     <div class="tbl-wrap"><table id="tool-tbl">
       <thead><tr><th>文件</th><th>说明</th><th>大小</th><th>操作</th></tr></thead>
@@ -362,6 +376,8 @@
       </tbody>
     </table></div>
 
+    </div>
+    <div class="hpanel hidden" id="hp-errors">
     <h2>常见错误码</h2>
     <div class="tbl-wrap"><table>
       <thead><tr><th>错误码</th><th>含义与处理</th></tr></thead>
@@ -375,6 +391,7 @@
         <tr><td class="mono">502</td><td class="wrap">项目服务异常（容器未就绪或已崩溃），请联系管理员。</td></tr>
       </tbody>
     </table></div>
+    </div>
   </section>
 
   <!-- 环境变量模态（§6 键值 + 中文说明） -->

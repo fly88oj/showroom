@@ -176,6 +176,7 @@ export function buildApp() {
   $('drawer-close').addEventListener('click', () => closeDrawer());
   logsLive.want = true; // R4 用户裁决：抽屉展开即恒实时跟随（断线 5 秒自动重连），无开关 UI
   // A2：三个 wire* 各自 try/catch——单页绑定异常只降级对应页签（console.warn 记录页签名），不再雪崩全局
+  wireHelpSubnav(); // R9：帮助页二级导航
   for (const [name, fn] of [['wireTabs', wireTabs], ['wireProjTab', wireProjTab], ['wireDbTab', wireDbTab]]) {
     try { fn(); } catch (e) { console.warn(`[showroom] ${name} 事件绑定失败（对应页签功能可能不可用）`, e); }
   }
@@ -203,6 +204,24 @@ function refreshAdminBadge() {
   if (m) m.classList.toggle('hidden', !(state.admin || state.boundAdmin));
   const rc = $('rd-admin-clause');
   if (rc) rc.classList.toggle('hidden', !(state.admin || state.boundAdmin));
+}
+
+function wireHelpSubnav() { // R9：帮助页二级导航（与管理页同构）
+  const nav = $('help-subnav');
+  if (!nav || nav._wired) return;
+  nav._wired = true;
+  nav.addEventListener('click', (ev) => {
+    const btn = ev.target.closest('button[data-hp]');
+    if (!btn) return;
+    for (const b of nav.querySelectorAll('button')) {
+      const on = b === btn;
+      b.classList.toggle('on', on);
+      b.setAttribute?.('aria-selected', on ? 'true' : 'false');
+    }
+    for (const p of $('tab-help').querySelectorAll('.hpanel')) {
+      p.classList.toggle('hidden', p.id !== 'hp-' + btn.dataset.hp);
+    }
+  });
 }
 
 function wireTabs() {

@@ -30,7 +30,7 @@
   /* 视觉QA P0-1：帮助页区块标题（h2）与其他页 H3 区块同为 28px 上距——全局 h2 margin-top:0 在此页造成间距倒挂；
      首个 h2 是面板第一个子元素，28px 会顶出面板顶部死空白（R4 用户复核），first-child 归零 */
   #tab-help h2 { margin-top: 28px; }
-  #tab-help h2:first-child { margin-top: 0; }
+  #tab-help .hpanel > h2:first-child { margin-top: 0; }
   /* 视觉QA P1-1：分组/区块题（断点续传、操作输出等）与卡片题（h2）同色 --fg-head，消除 rogue 色 */
   .fs > h3, #tab-db > h3, #tab-admin h3 { color: var(--fg-head); }
   .mono { font-family: ui-monospace, "SF Mono", Consolas, monospace; font-size: 12px; font-variant-numeric: tabular-nums; }
@@ -277,10 +277,10 @@
   a:hover:not(.act) { color: var(--fg-bright); text-decoration: underline; }
   select:not(:disabled):hover { border-color: var(--accent-bd); }
   /* R5 E1：管理页二级导航（复用主 tab 栏配色，尺寸小一档） */
-  #admin-subnav { display: flex; gap: var(--sp-2); flex-wrap: wrap; align-items: center; margin: 0 0 var(--sp-3); }
-  #admin-subnav button { height: 26px; padding: 0 10px; font-size: 12px; background: var(--bg-input); border-color: var(--bd); color: var(--fg-dim); }
-  #admin-subnav button.on, #admin-subnav button[aria-selected="true"] { background: var(--accent); border-color: var(--accent-bd); color: var(--fg-bright); }
-  #admin-subnav button:not(.on):hover { background: var(--bg-page); border-color: var(--accent-bd); color: var(--fg); }
+  #admin-subnav, #help-subnav { display: flex; gap: var(--sp-2); flex-wrap: wrap; align-items: center; margin: 0 0 var(--sp-3); } /* R9：帮助页同构二级导航 */
+  #admin-subnav button, #help-subnav button { height: 26px; padding: 0 10px; font-size: 12px; background: var(--bg-input); border-color: var(--bd); color: var(--fg-dim); }
+  #admin-subnav button.on, #admin-subnav button[aria-selected="true"], #help-subnav button.on, #help-subnav button[aria-selected="true"] { background: var(--accent); border-color: var(--accent-bd); color: var(--fg-bright); }
+  #admin-subnav button:not(.on):hover, #help-subnav button:not(.on):hover { background: var(--bg-page); border-color: var(--accent-bd); color: var(--fg); }
   @media (prefers-reduced-motion: reduce) {
     *, *::before, *::after { transition: none !important; animation: none !important; scroll-behavior: auto !important; }
   }

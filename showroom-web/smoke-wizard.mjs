@@ -1623,6 +1623,8 @@ ok(!html.includes('id="tab-status"') && !html.includes('id="tabbtn-status"') && 
   && !html.includes('id="st-auto"') && !html.includes('id="st-refresh"') && !html.includes('id="st-fb"')
   && !html.includes('refreshStatus'),
   'S2：tab-status 拆除——健康表/手动刷新/10s 开关归零（能力并入展项列表+行抽屉+事件流去抖）');
+ok(html.includes('id="help-subnav"') && (html.match(/class="hpanel/g) || []).length === 5,
+  'R9：帮助页二级导航五面板（账号/CLI 使用/镜像规范/工具与命令/错误码）——与管理页同构，不混一页');
 ok(html.includes('id="tabbtn-pub"') && html.includes('id="tabbtn-img"') && html.includes('id="tab-pub"') && html.includes('id="tab-img"')
   && html.includes('我的项目') && !html.includes('id="btn-new-pub"') && !html.includes('id="hd-role"') && !html.includes('id="lg-srv"') && !html.includes('id="hd-srv"'),
   'S2：五标签（我的项目/发布/镜像库/数据/帮助）；R5 A1 顶栏/登录窗服务器行与 A3「+ 发布」CTA 均已删除（「管」角标唯一，无第三徽标）');
