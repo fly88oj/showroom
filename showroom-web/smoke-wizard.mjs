@@ -650,8 +650,8 @@ ok(($s('proj-fb').textContent || '').includes('已加载 2 项 · '), '展项列
 await sleep(60); // whoami 异步返回（§12.2）
 ok(($s('hd-pempub').value || '').startsWith('-----BEGIN PUBLIC KEY-----'), 'S1：whoami 附带 platform_pem 自动写入 PEM 字段（免手工粘贴）');
 ok((store.get('sr.pempub') || '').startsWith('-----BEGIN PUBLIC KEY-----'), 'S1：platform_pem 已自动缓存到 sr.pempub（写现有键）');
-ok(!els.has('tab-admin') && !els.has('ad-users-tbl') && !els.has('dlg-user-add') && !els.has('ad-st-auto'),
-  'whoami admin=false：管理标签与全部管理 DOM 不存在（第五标签不渲染）');
+ok(!els.has('tab-admin') && !els.has('ad-users-tbl') && !els.has('dlg-user-add') && !els.has('ad-st-auto') && !els.has('st-logs-live'),
+  'whoami admin=false：管理标签与全部管理 DOM 不存在（第五标签不渲染）；自动刷新/实时跟随无开关 UI（R4 恒开）');
 
 // —— 登录后 Redis 浏览（§10.3 三端点 + 交互；§13.2 普通用户视图） ——
 $s('rd-db').value = '3'; $s('rd-q').value = 'sr_';
@@ -838,9 +838,7 @@ ok(await waitFor(() => eventsN >= 2, 5000), '回到展项页：自动重新订�
 await sleep(80);
 ok(($s('st-events').textContent || '').includes('sr-demo2') && ($s('st-events').textContent || '').includes('停止'), '重连后新事件继续滚动（最近 20 条）');
 
-// ═══ 场景 6b：§10.4 日志实时流（S2：st-logs* 迁入行抽屉——行「日志」展开即订阅，J3 ≤2 点击） ═══
-$s('st-logs-live').checked = true; // 与真实浏览器 HTML 默认 checked 对齐
-fire($s('st-logs-live'), 'change');
+// ═══ 场景 6b：§10.4 日志实时流（S2：st-logs* 迁入行抽屉——行「日志」展开即恒跟随，R4 无开关 UI） ═══
 fire($s('proj-tbl'), 'click', { target: { closest: () => ({ dataset: { act: 'logs', p: 'demo' } }) } });
 await waitFor(() => logsN === 1, 3000);
 ok($s('proj-tbl').dataset !== undefined, '行抽屉随「日志」展开（data-drawer 行插机制）');
@@ -853,10 +851,7 @@ const logRows = logTxt.split('\n');
 ok(logRows.length === 1000, `1000 行环形帽（收 1003 行，保留 ${logRows.length}）`);
 ok(logTxt.includes('log-0003') && !logTxt.includes('log-0002'), '超帽丢弃头部（log-0000..0002 被裁）');
 ok(/^\d{2}:\d{2}:\d{2} log-/m.test(logTxt), '每行带格式化时间戳前缀');
-$s('st-logs-live').checked = false;
-fire($s('st-logs-live'), 'change');
-ok(($s('st-logs-fb').textContent || '').includes('已停止实时跟随'), '开关关闭 → 停流提示');
-ok(logsN === 1, '停流后不再发起日志请求（AbortController）');
+ok(logsN === 1, '抽屉展开只发起一次日志流（恒跟随，无开关路径）');
 click('drawer-close');
 ok(($s('st-logs-fb').textContent || '').includes('已收起抽屉'), 'S2：收起抽屉 → 日志流随行断开（§3 离页退订）');
 ok(logsN === 1, '收起抽屉后不再发起日志请求');
@@ -1065,8 +1060,8 @@ ok(hidden('login') && shown('app'), '再访（钥匙+账号记忆）：签名自
 ok(authBeginN === ab2 && keyBindBodies.length === kb2n, '再访直达：零 auth 请求（不重走密码登录）');
 ok(store.get('sr.seed') === seed1 && store.get('sr.user') === 'alice', '种子与账号未被改动');
 await sleep(60); // whoami 异步返回
-ok(els.has('ad-users-tbl') && els.has('ad-st-auto'),
-  'whoami admin=true：管理区 DOM 渲染（第五「管理」标签随 whoami 构建）');
+ok(els.has('ad-users-tbl') && !els.has('ad-st-auto'),
+  'whoami admin=true：管理区 DOM 渲染（第五「管理」标签随 whoami 构建）；自动刷新恒开无开关（R4）');
 
 // —— §13.1/§13.2 管理员视图：镜像清单（whoami 回退标注）+ Redis 浏览（admin_view 标注） ——
 ok(await waitFor(() => ($s('img-scope').textContent || '') === '管理员视图', 5000),
@@ -1092,12 +1087,11 @@ ok(stHtml.includes('3.3 GB') && stHtml.includes('42.0 GB') && stHtml.includes('4
 ok(stHtml.includes('sr-demo') && stHtml.includes('sr-hello') && stHtml.includes('已退出'), '容器列表渲染（状态中文化）');
 ok(stHtml.includes('showroom-snapshot-hourly') && stHtml.includes('13:00'), 'timer 下次触发时间展示');
 const adStBase = adminStatusN;
-$s('ad-st-auto').checked = true;
-fire($s('ad-st-auto'), 'change');
+ok(html.includes('if (!adTimer) adTimer = setInterval(refreshAdminStatus, 30000);')
+  && html.includes("case 'admin': await loadAdminUsers(); await refreshAdminStatus(); break;"),
+  'R4：状态面板 30 秒自动刷新恒开（随管理页构建启动，无开关 UI；全局 30s 轮询亦覆盖管理页数据）');
 await sleep(60);
-ok(adminStatusN === adStBase + 1, '勾选「每 30 秒自动刷新」：立即刷新一次（间隔 30 秒）');
-$s('ad-st-auto').checked = false;
-fire($s('ad-st-auto'), 'change');
+ok(adminStatusN === adStBase, '无开关可触发额外刷新（勾选框 UI 已删）');
 
 // —— 发卡对话框（plan-16 §1.5 主路径）：账号 + 自动生成强密码 → user-add {user,password} ——
 click('ad-user-add');
@@ -1521,8 +1515,8 @@ ok(!html.includes('id="tab-status"') && !html.includes('id="tabbtn-status"') && 
   && !html.includes('refreshStatus'),
   'S2：tab-status 拆除——健康表/手动刷新/10s 开关归零（能力并入展项列表+行抽屉+事件流去抖）');
 ok(html.includes('id="tabbtn-pub"') && html.includes('id="tabbtn-img"') && html.includes('id="tab-pub"') && html.includes('id="tab-img"')
-  && html.includes('id="btn-new-pub"') && html.includes('id="hd-role"'),
-  'S2：五标签（我的展项/发布/镜像库/数据/帮助）+ 顶栏「+ 发布」CTA + 角色徽标');
+  && html.includes('id="btn-new-pub"') && !html.includes('id="hd-role"'),
+  'S2：五标签（我的展项/发布/镜像库/数据/帮助）+ 顶栏「+ 发布」CTA；R4 角色徽标已删（「管」角标唯一，无第三徽标）');
 ok(html.indexOf('id="st-events"') > html.indexOf('id="tab-admin"') && html.includes('管理员工具'),
   'S2：docker events 原始流降为管理员工具（st-events 迁入管理页）');
 ok(html.indexOf('id="rd-db"') > html.indexOf('id="tab-db"') && html.indexOf('id="rd-db"') < html.indexOf('id="tab-help"'),
@@ -1598,7 +1592,7 @@ ok(html.includes('/_api/whoami'), '§12.2：whoami 已接入');
 for (const ep of ['/_api/admin/users', '/_api/admin/user-add', '/_api/admin/status', "'key-rm'", "'user-revoke'", "'key-admin'"]) {
   ok(html.includes(ep), `§12.2：${ep} 已接线（user-revoke/key-rm/key-admin 经 ep 表驱动）`);
 }
-for (const s of ['发放新账号', '同时授予管理员', '仅显示一次', '吊销整个账号', '设为管理员', '取消管理员', '删除钥匙', '每 30 秒自动刷新', '平台状态', '管理']) {
+for (const s of ['发放新账号', '同时授予管理员', '仅显示一次', '吊销整个账号', '设为管理员', '取消管理员', '删除钥匙', '平台状态', '管理']) {
   ok(html.includes(s), `§12.2 新增文案全中文：${s}`);
 }
 // —— §13.1 三入口并存（一键不取代分步）+ §13.2/13.3 Redis 隔离 ——
