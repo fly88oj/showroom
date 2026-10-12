@@ -33,7 +33,7 @@ function projState(p) {
   if (raw === 'restarting' || (localState.rebuiltUntil.get(q) || 0) > now)
     return { label: '重建中', cls: 'status-mid', breath: true, tip: '更新发布成功后的滚动窗口', act: { update: 0, ss: null, more: 0 } };
   if (raw === 'dead' || (localState.failedUntil.get(q) || 0) > now)
-    return { label: '异常', cls: 'status-bad', breath: false, tip: '可看日志排查，或点「发新版本」重新发布', act: { update: 1, ss: null, more: 0, rmOnly: 1 } };
+    return { label: '异常', cls: 'status-bad', breath: false, tip: '可看日志排查，或点「发布」重新发布', act: { update: 1, ss: null, more: 0, rmOnly: 1 } };
   if (raw === 'missing')
     return { label: '待发布', cls: 'st-wait', breath: false, tip: '仅镜像无容器：从发布页选择镜像即可拉起', act: { update: 0, ss: null, more: 0, deploy: 1 } };
   return { label: '已停止', cls: 'status-mid', breath: false, tip: raw, act: { update: 1, ss: 'start', more: 1 } }; // 未知原词回落已停止（原词进 tooltip，唯一保留处）
@@ -50,7 +50,7 @@ function rowActionsHtml(p) {
   const b = (act, label, extra = '') => `<button class="act" data-act="${act}" data-p="${q}"${extra}>${label}</button>`;
   if (st.act.deploy) // 待发布：发布（→发布页预填项目名）·删除；日志经日志列 ▾ 打开抽屉
     return `${b('deploy-row', '发布', ' title="到发布页预填该项目并选择镜像拉起"')}${b('rm', '删除')}`;
-  let html = st.act.update ? b('update', '发新版本') : b('update', '发新版本', ' disabled');
+  let html = st.act.update ? b('update', '发布') : b('update', '发布', ' disabled');
   // B1：停止为危险操作——danger variant（红）+ 二次确认（见 onProjAction），与删除/重置同档警示
   if (st.act.ss) html += st.act.ss === 'stop'
     ? `<button class="act danger" data-act="stop" data-p="${q}">停止</button>`

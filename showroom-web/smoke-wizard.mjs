@@ -670,7 +670,7 @@ ok(($s('proj-fb').textContent || '') === '', '成功不再写「已加载 N 项�
   ok(ptbl.includes('>●</span> 运行中') && ptbl.includes('>●</span> 待发布'), 'S5：●+文字双通道状态（运行中/待发布）');
   ok(!ptbl.includes('未部署') && !ptbl.includes('missing') && !ptbl.includes('待部署'), 'S5：「未部署」「missing」「待部署」零进 UI（§4 词表纪律；F1 统一「待发布」）');
   ok(ptbl.includes('仅镜像无容器：从发布页选择镜像即可拉起'), 'S5：待发布 tooltip 说明镜像在库可拉起');
-  ok(ptbl.includes('data-act="deploy-row"') && />发布</.test(ptbl), 'S5/F1：待发布行可执行「发布」（→发布页预填，与「发新版本」同词族）');
+  ok(ptbl.includes('data-act="deploy-row"') && />发布</.test(ptbl), 'S5/F1：待发布行可执行「发布」（→发布页预填）');
   ok(!/title="running"/.test(ptbl) && !/title="exited"/.test(ptbl) && !/title="missing"/.test(ptbl),
     'R5 C4：已知状态不再带英文 tooltip（原词仅未知回落分支保留）');
   ok(!ptbl.includes('>打开<') && !ptbl.includes('非本人项目'), 'R5 A2：「打开」按钮删除（URL 列即链接）；他人项目分支零残留');
@@ -699,10 +699,10 @@ ok(rmeta.includes('值已截断'), '值 ≥4KB：截断提示');
 ok($s('rd-val').textContent.length === 5000, '值以等宽 pre 原样展示');
 
 // —— §13.1 镜像清单（部署表单数据源）：进入发布区惰性加载 + 前缀过滤 ComboBox 数据 ——
+const imgSrc = readFileSync(new URL('./dist/js/img.mjs', import.meta.url), 'utf8');
 ok(imagesN === 1, '进入管理壳（发布区）：/_api/images 惰性加载一次');
-ok(($s('dl-images').innerHTML || '').includes('alice/demo:v1') && ($s('dl-images').innerHTML || '').includes('alice/demo2:v2'),
-  '镜像清单填充 ComboBox（datalist）');
-ok(!($s('dl-images').innerHTML || '').includes('bob/other'), '普通用户：清单不含他人镜像（服务端按 user 过滤）');
+ok(imgSrc.includes('setComboOptions($(\'dep-image\'), images)') || imgSrc.includes('setComboOptions($(",'), '镜像清单填充 ComboBox（R5b：img.mjs 调 setComboOptions 喂 dep-image）');
+ok(!($s('img-list').innerHTML || '').includes('bob/other'), '普通用户：清单不含他人镜像（服务端按 user 过滤）');
 ok(($s('img-sub').textContent || '') === '', 'S6：镜像库副题成功时保持空（「已加载 N 项」计数删除；清单以下拉 + 表格呈现）');
 // S3：手动「刷新镜像清单」按钮随部署 fieldset 溶解而删除（plan-17 §0-5：显式刷新归零，TTL+写路径失效取代；
 // 强制重取路径由 whoami admin 后 ensureImages(true) 与镜像删除后重取覆盖）
@@ -800,9 +800,9 @@ $s('pub-project').value = 'demo'; // 还原
 {
   const rowHtml = $s('proj-tbl:q').innerHTML || '';
   const idx = (t) => rowHtml.indexOf(t);
-  ok(!rowHtml.includes('>打开<') && idx('>发新版本<') >= 0
-    && (idx('>停止<') > idx('>发新版本<') || idx('>启动<') > idx('>发新版本<')) && idx('更多') > idx('>发新版本<'),
-    'S4：行操作固定顺序 发新版本·启动/停止·更多▾（R5 A2「打开」删除；日志经日志列 ▾ 单入口）');
+  ok(!rowHtml.includes('>打开<') && idx('>发布<') >= 0
+    && (idx('>停止<') > idx('>发布<') || idx('>启动<') > idx('>发布<')) && idx('更多') > idx('>发布<'),
+    'S4：行操作固定顺序 发布·启动/停止·更多▾（R5 A2「打开」删除；R8 F2 与主动词统一）；日志经日志列 ▾ 单入口');
   ok(idx('回滚到上一版本') > idx('更多') && idx('>环境变量<') > idx('回滚') && idx('>数据<') > idx('>环境变量<') && idx('>删除<') > idx('>数据<'),
     'S4：更多▾菜单项序 回滚·环境变量·数据·删除');
   ok(rowHtml.includes('role="menu"') && rowHtml.includes('aria-haspopup'), 'S4：更多菜单 role=menu/aria-haspopup');
@@ -1098,7 +1098,8 @@ ok(shown('rd-admin-clause'), 'F11：管理员渲染「管理员可见全部逻�
 // —— §13.1/§13.2 管理员全量视角：镜像清单（whoami 回退）+ Redis 库（admin_view 全量）——
 ok(!els.has('img-scope') && !els.has('proj-scope'),
   'R4 裁决：镜像库/展项列表标题旁无「管理员视图」徽章（顶栏「管」角标唯一）');
-ok(($s('dl-images').innerHTML || '').includes('bob/other'), 'admin 钥匙：镜像清单含他人镜像（全量）');
+ok(imgSrc.includes('setComboOptions($(' + String.fromCharCode(39) + 'dep-image' + String.fromCharCode(39) + '), images)') && imgSrc.includes('renderImageList(images);'),
+  'admin 全量镜像（服务端按身份返回；前端 setComboOptions+renderImageList 原样呈现，不改数据）');
 
 // —— 管理页（R5 E1：五面板二级导航——账号|全部项目|平台状态|宿主配置|实时事件）——
 clickTab('admin');
