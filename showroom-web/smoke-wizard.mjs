@@ -107,7 +107,7 @@ const clickTab = (name) => fire($s('tabs'), 'click', { target: tabBtn(name) });
 const armTabs = () => { $s('tabs').querySelectorAll = () => ['proj', 'pub', 'img', 'db', 'help'].map(tabBtn); }; // plan-17 §1 五标签
 /** 与真实登录 HTML 的初始 class 对齐（惰性元素桩无 class 信息；断言「初始不可见」前先打桩）。 */
 const armLoginInit = () => {
-  for (const id of ['wz-p3', 'wz-pubbox', 'wz-import-box', 'wz-seed-err', 'lg-reenter', 'lg-forget']) $s(id).classList.add('hidden');
+  for (const id of ['lg-reenter']) $s(id).classList.add('hidden'); // B5/B6 后登录卡仅剩「免密码进入」隐藏桩
 };
 /** 模拟浏览器渲染 HTML：给关键按钮桩设置初始文案（busy 恢复断言按真实文字比对）。 */
 const BTN_TEXT = {
@@ -594,7 +594,6 @@ ok(shown('login') && !els.has('hd-user'), '登录前：只有登录卡（一步�
 const seed1 = store.get('sr.seed');
 ok(/^[0-9a-f]{64}$/.test(seed1 || ''), `无感断言：首访自动生成 seed 入 localStorage（${(seed1 || '').slice(0, 8)}…）`);
 ok(($s('msg').textContent || '') === '', '无感断言：密钥生成零提示（顶部条静默）');
-ok(hidden('wz-pubbox') && ($s('wz-pub').textContent || '') === '' && hidden('wz-p3'), '无感断言：主路径 DOM 无公钥串/验证面板展示');
 {
   const pub1 = pubOf(seed1);
   const leaked = [...els.values()].some((el) =>
@@ -603,7 +602,7 @@ ok(hidden('wz-pubbox') && ($s('wz-pub').textContent || '') === '' && hidden('wz-
   ok(!leaked, '无感断言：任何 DOM 文本不含 seed 十六进制与公钥串');
 }
 ok(els.has('lg-user') && els.has('lg-pass'), '一步登录表单：账号 + 密码两个输入');
-ok(hidden('lg-forget') && hidden('lg-reenter'), '无记忆账号：「忘记此设备」/「免密码进入」不出现');
+ok(hidden('lg-reenter'), '无记忆账号：「免密码进入」不出现（B5 后设备清除入口不存在）');
 // —— 失败态一（本地密码错）：两态文案 + 无第三请求 ——
 const ab1 = authBeginN, af1 = authFinishN, kb1 = keyBindBodies.length;
 $s('lg-user').value = 'alice';
@@ -656,11 +655,11 @@ ok(!els.has('tab-admin') && !els.has('ad-users-tbl') && !els.has('dlg-user-add')
 
 // —— 登录后 Redis 浏览（§10.3 三端点 + 交互；§13.2 普通用户视图） ——
 $s('rd-db').value = '3'; $s('rd-q').value = 'sr_';
-click('rd-refresh');
+fire($s('rd-q'), 'keydown', { key: 'Enter', preventDefault() {} }); // A1 后：查询入口=回车（#rd-refresh 已随 c3b0558 删除）
 await sleep(60);
 ok(($s('rd-db').innerHTML || '').includes('<option value="0">'), 'redis-dbs：填充 DB 下拉');
-ok(($s('rd-keys').innerHTML || '').includes('sr_demo'), 'redis-keys：key 列表渲染（前缀过滤请求）');
-ok($s('rd-count').textContent === '共 1 个 key（可能截断）', '「共 N 个 key（可能截断）」提示');
+ok(($s('rd-keys').innerHTML || '').includes('sr_demo'), 'redis-keys：键列表渲染（前缀过滤请求）');
+ok($s('rd-count').textContent === '共 1 个键（可能截断）', '「共 N 个键（可能截断）」提示（C2：Redis 文案统一「键」）');
 ok(($s('rd-scope').textContent || '') === '', '§13.2 普通用户：DB 下拉无「管理员视图」标注');
 $s('rd-keys').value = 'sr_demo';
 fire($s('rd-keys'), 'change');
@@ -761,8 +760,8 @@ ok($s('pub-url').textContent === '/demo/', 'URL 提示随手输联动');
 store.set('sr.conf.demo', JSON.stringify({ tag: 'v9', cport: 9000, ts: Date.parse('2026-10-01T10:00:00') }));
 $s('pub-project').value = 'demo';
 fire($s('pub-project'), 'change');
-ok($s('pub-mem').value === '256m' && $s('pub-tag').value === 'v9' && $s('pub-cport').value === '9000',
-  'S3 预填：mem=projects 行值（服务端权威）、tag/cport=sr.conf.* 记忆');
+ok($s('pub-mem').value === '256' && $s('pub-tag').value === 'v9' && $s('pub-cport').value === '9000',
+  'S3 预填：mem=projects 行值（C4：MiB 裸数字展示）、tag/cport=sr.conf.* 记忆');
 ok(($s('pub-pref-note').textContent || '').includes('沿用上次发布参数') && ($s('pub-pref-note').textContent || '').includes('10-01'),
   'S3 预填：注记「沿用上次发布参数（MM-DD）」');
 $s('pub-project').value = 'nosuch';
@@ -784,7 +783,7 @@ $s('pub-project').value = 'demo'; // 还原
 fire($s('proj-tbl'), 'click', { target: { closest: () => ({ dataset: { act: 'update', p: 'demo' } }) } });
 await sleep(20);
 ok(!hidden('tab-pub') && hidden('tab-proj'), 'S4：行「更新」→ 跳发布页');
-ok($s('pub-project').value === 'demo' && $s('pub-tag').value === 'v9' && String($s('pub-cport').value) === '9000' && $s('pub-mem').value === '256m',
+ok($s('pub-project').value === 'demo' && $s('pub-tag').value === 'v9' && String($s('pub-cport').value) === '9000' && $s('pub-mem').value === '256',
   'S4/验收 7：更新预填同一套参数（项目/内存/端口一致）');
 ok(shown('pub-pref-note'), 'S4：更新预填注记可见（沿用上次发布参数）');
 clickTab('proj');
@@ -1060,17 +1059,18 @@ const ab2 = authBeginN, kb2n = keyBindBodies.length;
 els.clear();
 await load(2);
 armBtnText(); // 发卡按钮初始文案（busy 恢复断言用）
+armLoginInit(); // 与真实登录 HTML 初始 hidden 对齐（B2 断言「免密码进入」不出现的前提）
 await sleep(80);
 ok(hidden('login') && shown('app'), '再访（钥匙+账号记忆）：签名自测通过自动进入（免密码）');
 ok(authBeginN === ab2 && keyBindBodies.length === kb2n, '再访直达：零 auth 请求（不重走密码登录）');
 ok(store.get('sr.seed') === seed1 && store.get('sr.user') === 'alice', '种子与账号未被改动');
 await sleep(60); // whoami 异步返回
-ok(els.has('ad-users-tbl') && els.has('ad-st-auto') && els.has('ad-refresh'),
+ok(els.has('ad-users-tbl') && els.has('ad-st-auto'),
   'whoami admin=true：管理区 DOM 渲染（第五「管理」标签随 whoami 构建）');
 
 // —— §13.1/§13.2 管理员视图：镜像清单（whoami 回退标注）+ Redis 浏览（admin_view 标注） ——
-ok(await waitFor(() => ($s('img-sub').textContent || '').includes('管理员视图'), 5000),
-  'admin 钥匙：镜像清单副题标注「管理员视图」（whoami 落定后按需重取）');
+ok(await waitFor(() => ($s('img-scope').textContent || '') === '管理员视图', 5000),
+  'B4：admin 钥匙镜像库页标题旁「管理员视图」徽章（服务端 admin_view 标注）');
 ok(($s('dl-images').innerHTML || '').includes('bob/other'), 'admin 钥匙：镜像清单含他人镜像（全量）');
 
 // —— 管理页：账号与钥匙表 + 平台状态面板（§12.2） ——
@@ -1205,7 +1205,7 @@ confirmRet = true;
 
 // —— admin 接口 404 E_AUTH（权限被收回等异常）：顶部条报错 ——
 adminFail404 = true;
-click('ad-refresh');
+clickTab('admin'); // #ad-refresh 已随 c3b0558 删除（30s 自动刷新取代）——重进管理页触发 loadAdminUsers
 await sleep(60);
 ok(($s('msg').textContent || '').includes('E_AUTH'), 'admin 接口 404 E_AUTH：顶部条报错');
 adminFail404 = false;
@@ -1383,18 +1383,14 @@ ok(await waitFor(() => keyBindBodies.length === kbP + 1 && hidden('login'), 5000
 pwChangeNew = null;
 PWDB.alice.pass = 'alice-pw'; // 还原 toy 口令本（后续场景 3 仍按旧口令编排）
 
-// —— 退出登录（8bf79ed 密钥生命周期：登出=清本机密钥+远程吊销；会话内存钥匙仍可免密码重进） ——
+// —— 退出登录（8bf79ed 密钥生命周期 + B2 语义：登出=清本机密钥+远程吊销；钥匙已回收，无密可免） ——
 click('btn-logout');
 ok(shown('login') && hidden('app'), '退出登录：回到登录卡（管理壳隐藏）');
 ok(!store.has('sr.seed') && !store.has('sr.user') && !store.has('sr.pempub'),
   '密钥生命周期（8bf79ed）：登出清本机 seed/账号记忆/PEM（不留僵尸钥匙）');
-ok(shown('lg-reenter') && hidden('lg-forget'), '「免密码进入」出现（会话内存钥匙）；记忆已清 →「忘记此设备」收起');
-ok(($s('lg-fb').textContent || '').includes('已退出登录') && ($s('lg-fb').textContent || '').includes('免密码进入'),
-  '退出提示：钥匙已清 + 需重新密码登录');
-const ab2b = authBeginN;
-click('lg-reenter');
-await sleep(80);
-ok(hidden('login') && shown('app') && authBeginN === ab2b, '免密码进入：本机钥匙自测通过重新进入（仍零 auth 请求）');
+ok(hidden('lg-reenter') && !els.has('lg-forget'), 'B2：钥匙已回收——「免密码进入」不出现（无密可免）；B5 后设备清除入口不存在');
+ok(($s('lg-fb').textContent || '').includes('已退出登录') && ($s('lg-fb').textContent || '').includes('已回收'),
+  'B2 退出提示：「已退出登录，本机钥匙已回收」（如实描述 + 引导密码重登）');
 
 // ═══ 场景 3：E_AUTH 回落（钥匙被删/GC）→ 密码表单 → 同钥匙重绑（找回/换设备路径） ═══
 mode = 'unregistered'; // 模拟服务端已删除/GC 本机钥匙
@@ -1476,76 +1472,17 @@ ok(($s('rd-scope').textContent || '') === '',
 // —— 4d. whoami 失败（404 E_AUTH）：顶部条报错、管理标签不渲染 ——
 whoamiFail = true; // §12.2：whoami 404 E_AUTH → 顶部条报错、管理标签不渲染
 click('btn-logout');
-click('lg-reenter'); // 免密码重进 → enterApp → syncAdmin → whoami 失败
-await sleep(100);
-ok(hidden('login') && shown('app'), '免密码重进成功（whoami 失败不影响本地自测进入）');
+$s('lg-user').value = 'alice'; $s('lg-pass').value = 'alice-pw'; // B2 后无「免密码进入」——密码重登驱动 enterApp
+fire($s('lg-form'), 'submit', { preventDefault() {} });
+await sleep(200);
+ok(hidden('login') && shown('app'), '密码重登成功（whoami 失败不影响本地进入）');
 ok(($s('msg').textContent || '').includes('身份查询') || ($s('msg').textContent || '').includes('E_AUTH'),
   'whoami 失败（404 E_AUTH）：顶部条报错');
 ok(!els.has('tab-admin') && !els.has('ad-users-tbl'), 'whoami 失败：管理标签不渲染');
 whoamiFail = false;
 
-// ═══ 场景 5：「忘记此设备」（key-selfrm 联动 + 本地清除 + 取消路径 + 无感重生成） ═══
-// 8bf79ed 后登出即清记忆（不存在「sr.user 仍在的登录卡」）——改为铺垫记忆后重载模块直测：
-// init 的 refreshLoginChrome 点亮 lg-forget；seed4 已在场景 4 绑定（mode=ok）→ bootSelfTest 直达
-store.set('sr.seed', seed4); store.set('sr.user', 'alice');
-els.clear();
-await load(5);
-armBtnText();
-await sleep(80);
-ok(shown('lg-forget'), '有记忆账号：「忘记此设备」按钮出现');
-const selfrm0 = selfrmN, seed5a = store.get('sr.seed');
-confirmRet = false;
-click('lg-forget');
-await sleep(60);
-ok(store.has('sr.seed') && store.has('sr.user') && selfrmN === selfrm0, 'confirm 取消：不清除本地、不注销远端');
-confirmRet = true;
-confirmMsgs.length = 0;
-click('lg-forget');
-await sleep(120);
-ok(selfrmN === selfrm0 + 1 && selfrmBodies.at(-1).kid === 'kid-self', '忘记此设备：key-selfrm 提交体 {kid}（仅删签名所用钥匙自身）');
-ok(!store.has('sr.user'), '账号记忆已清除（sr.user）');
-const seed5b = store.get('sr.seed');
-ok(/^[0-9a-f]{64}$/.test(seed5b || '') && seed5b !== seed5a, '旧 seed 已清除且无感层即刻重新生成新候选钥匙');
-ok(hidden('lg-reenter') && hidden('lg-forget'), '回到干净登录卡（辅助按钮收起）');
-ok(($s('msg').textContent || '').includes('已忘记此设备') && ($s('msg').textContent || '').includes('远程注销'),
-  '回报文案：已忘记此设备 + 远程注销结果');
-const forgetConfirms = confirmMsgs.map(String);
-ok(forgetConfirms.some((m) => m.includes('忘记此设备') || m.includes('清除')) && forgetConfirms.some((m) => m.includes('注销')),
-  '两段 confirm：本地清除与远程注销分别确认');
-
-// ═══ 场景 6：专家路径（钥匙登录折叠）：本机已有默认选中 / 导入种子 / 公钥串登记+重检循环 ═══
-mode = 'unregistered';
-store.clear();
-els.clear();
-await load(6);
-armLoginInit();
-await sleep(40);
-const seed6 = store.get('sr.seed');
-fire($s('lg-expert'), 'toggle'); // 打开折叠 → setupExpert
-ok($s('wz-r-use').checked && shown('wz-l-use'), '专家路径：本机已有（无感生成的）钥匙默认选中');
-ok($s('wz-fp').textContent === pubOf(seed6).replace('ed25519:', '').slice(0, 8), '指纹 = 公钥载荷前 8 位');
-ok(hidden('wz-p3') && hidden('wz-pubbox'), '折叠初始：验证面板与公钥串不展示');
-fire($s('wz-r-import'), 'change'); // 选导入 → 出现粘贴框
-ok(shown('wz-import-box') && $s('wz-r-import').checked, '选「导入」：粘贴框出现');
-$s('lg-user').value = 'carl';
-$s('wz-seed').value = 'not-hex!';
-click('wz-verify');
-ok(($s('wz-seed-err').textContent || '').includes('64 位十六进制'), '非法 seed：字段内联拒绝（不进入验证）');
-$s('wz-seed').value = seed1; // 复用 alice 的种子（专家：其他设备导出）
-click('wz-verify');
-await sleep(80);
-ok(store.get('sr.seed') === seed1 && store.get('sr.user') === 'carl', '合法 seed 导入并记忆（账号+种子）');
-ok(shown('wz-p3') && shown('wz-pubbox'), '未登记：验证面板 + 公钥串区块展示（专家路径可见）');
-ok($s('wz-pub').textContent === pubOf(seed1), '公钥串与 wasm 独立推导一致');
-ok(/^ed25519:[A-Za-z0-9+/]{43}$/.test($s('wz-pub').textContent), '公钥串格式 ed25519:<b64-43>');
-ok(($s('wz-v-fp').textContent || '') === pubOf(seed1).replace('ed25519:', '').slice(0, 8), '验证面板回显指纹');
-click('wz-recheck');
-await sleep(40);
-ok(shown('wz-pubbox') && shown('login'), '重新检测：仍未登记 → 公钥展示循环');
-mode = 'ok'; // 模拟管理员完成 user-add --pubkey 登记
-click('wz-recheck');
-await sleep(80);
-ok(hidden('login') && shown('app') && $s('hd-user').textContent === 'carl', '登记后重检：自动进入管理壳');
+// ═══ 场景 5/6（B5/B6 后已删除）：原「忘记此设备」与登录窗专家路径链路整体移除，
+//     其行为断言由场景 7 的零残留静态断言取代 ═══
 
 // ═══ 场景 7：静态断言（plan-16 登录重设计 / §10.2 更名 / §10.3+§10.4 端点 / §11 零残留 / §12+§13 接入 / 界面规范） ═══
 // —— plan-16：一步登录 + 密钥无感 + OPAQUE 端点 + 专家折叠 ——
@@ -1557,14 +1494,16 @@ ok(html.includes('id="lg-form"') && html.includes('id="lg-user"') && html.includ
 ok(!html.includes('已生成新密钥并存入'), 'plan-16：密钥自动生成零提示文案（无感）');
 for (const ep of ['/_api/auth/login-begin', '/_api/auth/login-finish', '/_api/auth/key-bind']) ok(html.includes(ep), `plan-16 §2.2：${ep} 已接线`);
 ok(html.includes('X-Sr-Bind'), 'plan-16 §2.2：key-bind 携带 X-Sr-Bind 头');
-ok(html.includes('/_api/key-selfrm'), 'plan-16 §2.2：key-selfrm（忘记此设备远端注销）已接线');
+ok(html.includes('/_api/key-selfrm'), 'plan-16 §2.2：key-selfrm（登出远程吊销本机钥匙）已接线');
 ok(html.includes('E_PW_LOCAL'), 'plan-16：本地密码错错误态（E_PW_LOCAL，无第三请求）已接线');
 ok(html.includes('密码错误，或该账号尚未设置密码（请联系管理员重置）'), 'plan-16 §3：失败文案两态合一（防枚举一致代价）');
 ok(html.includes('忘记密码') && html.includes('联系管理员重置'), 'plan-16 §3：忘记密码 → 找管理员重置文案');
-for (const s of ['新设备', '自动绑定', '忘记此设备', '免密码进入']) ok(html.includes(s), `plan-16 §3 文案：${s}`);
-ok(html.includes('<details id="lg-expert"') && html.includes('钥匙登录（CLI / 机器用户 · 专家路径）'),
-  'plan-16 §3：钥匙登录收进 <details> 折叠（专家路径）');
-ok(html.includes('id="lg-forget"') && html.includes('id="lg-reenter"'), 'plan-16 §3：「忘记此设备」/「免密码进入」容器齐备');
+for (const s of ['新设备', '自动绑定', '免密码进入']) ok(html.includes(s), `plan-16 §3 文案：${s}`);
+ok(!html.includes('忘记此设备') && !html.includes('id="lg-forget"') && !html.includes('btn-settings-forget'),
+  'B5：「忘记此设备」整链路零残留（登录窗/设置弹窗/帮助页/CLI 对照表）');
+ok(!html.includes('id="lg-expert"') && !html.includes('钥匙登录（CLI / 机器用户'),
+  'B6：登录窗「钥匙登录（专家路径）」折叠零残留（控制台登录=账号+密码唯一方式）');
+ok(html.includes('id="lg-reenter"'), 'B2：「免密码进入」按钮容器保留（登出即清钥匙后不再显示）');
 ok(html.includes('登录与账号') && html.includes('两把独立发放的密码') && html.includes('试验性存储'),
   'plan-16 帮助页：登录方式描述（两把密码分开 + 试验性存储告示保留）');
 ok(html.includes('专家路径：公钥与机器用户（CLI / CI）') && html.includes('showroom keygen') && html.includes('--pubkey')
@@ -1656,8 +1595,8 @@ ok(!html.includes('id="dep-form"') && !html.includes('id="dep-project"') && !htm
   && !html.includes('id="dep-mem"') && !html.includes('id="dep-cport"') && !html.includes('id="dep-submit"')
   && !html.includes('id="dep-fb"') && !html.includes('id="dep-project-err"') && !html.includes('id="dep-tag-err"'),
   'S3：dep-form 九件全零残留（能力并入发布表单镜像库源）');
-ok((html.match(/内存需求/g) || []).length === 1 && (html.match(/监听端口/g) || []).length === 1,
-  'S3/验收 4：「内存需求」「监听端口」label 全站各恰好 1 次');
+ok((html.match(/内存需求/g) || []).length === 1 && (html.match(/演示服务端口/g) || []).length === 1,
+  'S3/验收 4：「内存需求」「演示服务端口」label 全站各恰好 1 次（C4 更名）');
 for (const s of ['① 压缩', '② 上传', '③ 发布', '④ 完成']) ok(html.includes(s), `§12.1：状态条分段「${s}」`);
 ok(html.includes('沿用上次发布参数'), '§5：预填注记文案');
 ok(html.includes('压缩后总长') && html.includes('断点续传') && html.includes('复制地址'), '§12.1：②段文案「已传/压缩后总长」+ 断点续传 + 完成段复制按钮');
@@ -1738,7 +1677,7 @@ ok(html.includes('.num { text-align: right; font-variant-numeric: tabular-nums; 
   const ph = [...html.matchAll(/placeholder="([^"]*)"/g)].map((x) => x[1]);
   ok(ph.length > 0 && ph.every((p) => p.endsWith('…')), `规范：占位符全部以 … 结尾（${ph.length} 处）`);
 }
-for (const id of ['lg-user', 'lg-pass', 'wz-seed', 'pub-project', 'dep-image', 'db-project', 'rd-db', 'ad-na-user']) {
+for (const id of ['lg-user', 'lg-pass', 'pub-project', 'dep-image', 'db-project', 'rd-db', 'ad-na-user']) {
   ok(html.includes(`for="${id}"`), `规范：表单控件 label for="${id}"`);
 }
 ok(html.includes('showModal'), '规范：dialog 用 showModal（Esc/焦点圈闭/inert）');

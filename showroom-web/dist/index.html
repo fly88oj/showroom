@@ -24,7 +24,7 @@
     --ok-bg: #21362a; --ok-bd: #3a6b4c; --ok-fg: #a9e8b8;     /* 成功条/内联反馈 */
     --bad-bg: #3a2226; --bad-bd: #6b3a42; --bad-fg: #ffb3bd;  /* 错误条 */
     --warn-bg: #3a3222; --warn-bd: #6b5f3a;                   /* 警示黄条 */
-    --danger-bg: #5a2b2b; --danger-bd: #7a3d3d;               /* 危险按钮 */
+    --danger-bg: #5a2b2b; --danger-bd: #7a3d3d; --danger-hi: #6d3535; /* 危险按钮（C1：hover 保持红色系） */
   }
   body {
     margin: 0; padding: 0 1rem 3rem; background: var(--bg-page); color: var(--fg);
@@ -65,6 +65,8 @@
   }
   #tabs button { background: var(--bg-card); border-color: var(--bd); color: var(--fg-dim); }
   #tabs button.on, #tabs button[aria-selected="true"] { background: var(--accent); border-color: var(--accent-bd); color: var(--fg-bright); }
+  /* C5：导航 tab hover 反馈（背景/文字/边框微变；不影响当前选中态） */
+  #tabs button:not(.on):hover { background: var(--bg-input); border-color: var(--accent-bd); color: var(--fg); }
   /* —— 内容卡片：全部 section/fieldset 统一卡面 —— */
   section {
     background: var(--bg-card); border: 1px solid var(--bd); border-radius: var(--r);
@@ -120,6 +122,8 @@
   button:hover:not(:disabled) { background: var(--accent-hi); }
   button:disabled { opacity: .4; cursor: not-allowed; }
   button.danger { background: var(--danger-bg); border-color: var(--danger-bd); }
+  /* C1：danger hover 保持红色系——button:hover:not(:disabled) 同优先级且按序覆盖（原被通用 hover 压成蓝色） */
+  button.danger:hover:not(:disabled) { background: var(--danger-hi); border-color: var(--danger-bd); color: var(--bad-fg); }
   /* 可见焦点（全控件；不移除 outline） */
   :focus-visible { outline: 2px solid var(--focus); outline-offset: 1px; }
   /* —— 间距工具类（HTML 不再写内联 style） —— */
@@ -169,6 +173,10 @@
   /* 展项表页面级滚动：取消容器裁剪——行内「更多 ▾」菜单（absolute）不再被 overflow 截断 */
   .tbl-page { overflow: visible; max-height: none; }
   .tbl-page th { position: static; }
+  /* B3：移动端展项表溢出——窄视口表格内横向滚动（外层页面不出横滚条）；≥900px 表格自然放得下，保持 visible 不裁剪「更多 ▾」菜单 */
+  .tbl-xwrap { min-width: 0; }
+  @media (max-width: 900px) { .tbl-xwrap { overflow-x: auto; } }
+  #proj-tbl td.wrap { overflow-wrap: anywhere; } /* B3：URL 列长串可断行 */
   .grid { display: flex; flex-wrap: wrap; gap: var(--sp-4); align-items: flex-end; } /* 不限 form：数据页/管理页 grid 同样横排（原 form .grid 使非表单区竖排堆叠） */
   .grid > .grow { flex: 1 1 20em; min-width: 0; } /* 横排后 field 收缩到 min-content 的字段（如数据页项目名）撑开 */
   /* 滚动容器不外溢滚动链 */
@@ -213,7 +221,7 @@
   /* 行内反馈（操作后就近显示，错误另走顶部条） */
   .fb { font-size: 12px; color: var(--ok-fg); min-height: 1.2em; margin: var(--sp-1) 0 0; }
   .fb.warn { color: var(--warn); }
-  .sep { border-top: 1px dashed var(--bd); margin: var(--sp-4) 0 var(--sp-3); }
+  .sep { border-top: 1px dashed var(--bd); margin: var(--sp-6) 0 var(--sp-3); } /* C8：数据页区块间 ≥24px（与 .fs 的 28px 上距同层级；标题仍紧贴内容） */
   dl.help dt { color: var(--fg-head); font-weight: 600; margin-top: var(--sp-2); }
   dl.help dd { margin: 0 0 0 1rem; color: var(--fg-dim); }
   /* 字段级内联错误（首错聚焦；API 错误另走顶部条） */
@@ -224,19 +232,15 @@
   /* 视觉QA P2-2：警示条与顶部条同基类规格（padding/圆角一致） */
   .warnbar { background: var(--warn-bg); border: 1px solid var(--warn-bd); color: var(--warn); border-radius: var(--r); padding: var(--sp-2) var(--sp-3); font-size: 13px; }
   .warnbar.err { background: var(--bad-bg); border-color: var(--bad-bd); color: var(--bad-fg); }
+  .warnbar .act { min-height: 25px; } /* C6：警示条内嵌「设置」按钮与行内按钮同档 25px */
   /* 登录向导（§10.1）：步骤条 + 三步面板 */
   .wz-step {
     color: var(--fg-dim); font-size: 12px; padding: .1rem .6rem;
     border: 1px solid var(--bd); border-radius: 999px; background: var(--bg-card);
   }
   .wz-step.on { background: var(--accent); border-color: var(--accent-bd); color: var(--fg-bright); }
-  .wz-pane { margin-top: var(--sp-3); }
-  #wz-key-choices { display: flex; flex-direction: column; gap: var(--sp-1); }
-  #wz-key-choices label { cursor: pointer; }
-  /* plan-16 §3：钥匙登录收进折叠（专家路径）；主路径一步「账号+密码」 */
+  /* B6：原登录向导 .wz-pane/#wz-key-choices/#lg-expert 样式随专家路径折叠一并移除 */
   details > summary { cursor: pointer; color: var(--fg-head); }
-  #lg-expert { margin-top: var(--sp-4); border-top: 1px dashed var(--bd); padding-top: var(--sp-2); }
-  #lg-expert > summary { padding: .1rem 0; }
   /* 状态监控 */
   #st-events { min-height: 3em; max-height: 9em; }
   #st-logs { min-height: 10em; }
@@ -244,7 +248,7 @@
   .drawer-row > td { background: var(--bg-input); }
   /* plan-17 S6：卡片副题「已加载 N 项 · HH:MM:SS」——整段可点重取（无手动刷新按钮） */
   .sub { background: none; border: none; color: var(--fg-dim); font-size: 12px; font-weight: 400; padding: 2px 6px; height: auto; line-height: inherit; cursor: pointer; }
-  .sub:hover { color: var(--fg); background: var(--bg-input); }
+  .sub:hover { color: var(--fg); background: var(--bg-input); text-decoration: underline; } /* C5：hover 下划线强化可点性 */
   /* plan-17 S4：行内「更多 ▾」菜单（回滚/环境变量/数据/删除） */
   .more-wrap { position: relative; display: inline-block; }
   .more-wrap .menu {
@@ -263,6 +267,16 @@
   #rd-keys, #rd-val { height: min(24rem, 48vh); }
   /* 视觉QA P1-7：镜像页「等待上传」→ 帮助文字间距（原 2px 过紧） */
   #up-help { margin-top: 10px; }
+  /* C5：展项表行 hover 背景微变（抽屉行除外） */
+  #proj-tbl tbody tr:not(.drawer-row):hover > td { background: rgba(231, 237, 245, .045); }
+  /* C7：长说明段折叠（与发布页「高级说明」同款 details/summary；summary 弱化为辅助色） */
+  details.fold { margin-top: var(--sp-2); }
+  details.fold > summary { font-size: 12px; color: var(--fg-dim); }
+  details.fold[open] > summary { margin-bottom: var(--sp-2); }
+  /* D4：发布页 radio 组行与同行输入框同高（label 基线对齐） */
+  .radio-row { min-height: var(--control-h); align-items: center; }
+  /* D3：项目名输入与其余输入框同字号 14px */
+  #pub-project { font-size: 14px; }
   @media (max-width: 900px) { .srv { display: none; } }
   @media (prefers-reduced-motion: reduce) {
     *, *::before, *::after { transition: none !important; animation: none !important; scroll-behavior: auto !important; }
@@ -277,7 +291,7 @@
        seed/公钥串；签名自测通过前只渲染本区块，不渲染任何管理 UI） ———— -->
 <section id="login">
   <h1>Showroom 控制台</h1>
-  <p class="note">服务器（同源代理，经 <span class="mono">/_api/*</span> 签名调用）：<span class="mono" id="lg-srv"></span></p>
+  <p class="note">服务器（同源代理，签名调用）：<span class="mono" id="lg-srv"></span></p>
 
   <!-- 主路径：一步登录（OPAQUE → 绑定本机钥匙 → 进入控制台，plan-16 §2.2 报文序列） -->
   <form id="lg-form" class="mt-3">
@@ -290,46 +304,12 @@
     <div class="row">
       <button type="submit" id="lg-submit">登录</button>
       <button type="button" id="lg-reenter" class="hidden" title="本机钥匙自测通过即可免密码进入">免密码进入</button>
-      <button type="button" id="lg-forget" class="hidden danger" title="清除本机密钥与账号记忆（可选远程注销本机钥匙）">忘记此设备…</button>
       <span class="fb" id="lg-fb" aria-live="polite"></span>
     </div>
   </form>
   <p class="note">新设备 / 换浏览器：直接输入账号密码登录即可自动绑定本设备（无需迁移密钥）；忘记密码请联系管理员重置。
     本设备登录钥匙由控制台自动生成并保管于浏览器 localStorage（属试验性存储，清除浏览器数据后重新密码登录即可），全程无需人工干预。</p>
-
-  <!-- 专家路径（plan-16 §3）：钥匙登录收进折叠——CLI / 机器用户用本机已有或导入种子，
-       公钥串交管理员登记（user-add --pubkey：机器对机器钥匙不受密码绑定钥匙的自动回收） -->
-  <details id="lg-expert">
-    <summary>钥匙登录（CLI / 机器用户 · 专家路径）</summary>
-    <div class="fs">
-      <h3>为账号（上方「账号」输入框）选择本机密钥</h3>
-      <div id="wz-key-choices">
-        <label class="row" id="wz-l-use" for="wz-r-use"><input type="radio" name="wz-key" id="wz-r-use"><span>使用本机已有密钥（指纹 <span class="mono" id="wz-fp"></span>）</span></label>
-        <label class="row" for="wz-r-import"><input type="radio" name="wz-key" id="wz-r-import"><span>导入密钥种子</span></label>
-      </div>
-      <label class="field hidden mt-2" id="wz-import-box" for="wz-seed"><span>粘贴 64 位十六进制密钥种子（showroom keygen 产物 / 其他设备导出）</span>
-        <textarea id="wz-seed" class="mono" spellcheck="false" placeholder="64 位十六进制字符（32 字节）…" aria-describedby="wz-seed-err"></textarea></label>
-      <p class="ferr hidden mt-1" id="wz-seed-err" aria-live="polite"></p>
-    </div>
-    <div class="row"><button type="button" id="wz-verify">使用钥匙登录</button></div>
-    <!-- 验证：自动签名自测；未登记 → 展示公钥串等待登记，点【重新检测】循环；通过 → 自动进入管理界面 -->
-    <div class="wz-pane hidden" id="wz-p3">
-      <p class="note">密钥指纹 <span class="mono" id="wz-v-fp"></span></p>
-      <p class="fb" id="wz-v-fb" aria-live="polite"></p>
-      <div id="wz-pubbox" class="hidden">
-        <p class="note">尚未登记：把下方公钥串发给管理员登记（<span class="mono">showroomctl user-add &lt;账号&gt; --pubkey &lt;公钥串&gt;</span>），登记后点【重新检测】。</p>
-        <div class="row combo">
-          <code id="wz-pub" class="pub"></code>
-          <button type="button" id="wz-copypub">复制公钥</button>
-        </div>
-      </div>
-      <div class="row">
-        <button type="button" id="wz-recheck">重新检测</button>
-      </div>
-    </div>
-    <p class="note">密钥即身份：32 字节 seed 以十六进制存于浏览器 localStorage——<b>属试验性存储</b>，换设备/清缓存即失效；正式场景请用 CLI <span class="mono">showroom login &lt;账号&gt;</span>（密码一次、密钥常驻）。</p>
-  </details>
-</section>
+  </section>
 
 <!-- ———— 管理壳（模板：惰性，登录成功后才克隆进文档流；SPEC §3「登录成功前不加载管理资源」） ———— -->
 <template id="app-tpl">
@@ -344,7 +324,7 @@
       </div>
       <div class="chrome-actions">
         <button id="btn-new-pub" title="发布新 Demo（跳转发布页）">+ 发布</button>
-        <button id="btn-settings" title="对外访问域名 / 平台公钥 PEM / 修改密码 / 忘记此设备">设置</button>
+        <button id="btn-settings" title="对外访问域名 / 平台公钥 PEM / 修改密码">设置</button>
         <button id="btn-logout">退出登录</button>
       </div>
     </div>
@@ -378,24 +358,25 @@
     <div class="sep"></div>
     <div class="row">
       <button type="button" id="btn-pwchange" title="当前密码校验后替换为新密码（OPAQUE，密码不明文上线）">修改密码…</button>
-      <button type="button" id="btn-settings-forget" class="danger" title="清除本机密钥与账号记忆（可选远程注销本机钥匙）">忘记此设备…</button>
     </div>
   </dialog>
 
   <!-- ———— 标签页 1：展项管理 ———— -->
   <section id="tab-proj" role="tabpanel" aria-labelledby="tabbtn-proj">
-    <h2>展项列表</h2>
+    <h2>展项列表 <span id="proj-scope" class="badge"></span></h2>
     <div class="warnbar hidden" id="proj-base-note">正在用内网地址展示 URL：可在<button type="button" id="btn-base-note-settings" class="act">设置</button>中配置「对外访问域名」（公网域名）。</div>
     <div class="row">
       <button type="button" id="proj-fb" class="sub" title="点击重新加载展项列表（自动加载；事件到达亦自动刷新）" aria-label="刷新展项列表"></button>
     </div>
     <div class="tbl-wrap tbl-page">
+      <div class="tbl-xwrap"><!-- B3：窄视口横向滚动容器 -->
       <table id="proj-tbl">
         <thead><tr>
           <th>名称</th><th>状态</th><th>对外 URL</th><th>标签</th><th class="num">更新</th><th>操作</th><th>详情</th>
         </tr></thead>
-        <tbody><tr><td colspan="7" class="note">未加载</td></tr></tbody>
+        <tbody><tr><td colspan="7" class="note">正在加载…</td></tr></tbody>
       </table>
+      </div>
     </div>
     <p class="note">仅展示对外可见信息；主机端口等内部细节不在此显示。删除会一并移除容器/路由/数据库与凭据。</p>
   </section>
@@ -415,7 +396,7 @@
       <!-- 视觉QA P1-3：镜像源 radio 与其余字段同列栅格（原独立成行脱离列轴，左移 90px） -->
       <div class="grid mt-2">
         <div class="field" role="radiogroup" aria-label="镜像源"><span>镜像源</span>
-          <span class="row">
+          <span class="row radio-row">
             <label class="row" for="pub-src-tar"><input type="radio" name="pub-src" id="pub-src-tar" checked>本地 tar 文件</label>
             <label class="row" for="pub-src-registry"><input type="radio" name="pub-src" id="pub-src-registry">镜像库（已入库镜像）</label>
           </span>
@@ -436,8 +417,8 @@
         <label class="field" for="pub-tag"><span>镜像标签（必填；选镜像后自动带出）</span>
           <input type="text" id="pub-tag" required size="10" aria-describedby="pub-tag-err"></label>
         <label class="field" for="pub-mem"><span>内存需求</span>
-          <input type="text" id="pub-mem" value="256m" list="dl-mem" size="6"></label>
-        <label class="field" for="pub-cport"><span>Demo 服务监听端口（容器内）</span>
+          <input type="text" id="pub-mem" value="256" list="dl-mem" size="6" placeholder="单位 MiB，如 256…"></label>
+        <label class="field" for="pub-cport"><span>演示服务端口（容器内）</span>
           <input type="number" id="pub-cport" value="8080" min="1" max="65535" size="5"></label>
         <!-- 视觉QA P2-3：「发布」「仅上传」同一行排列（row 包组，不再随栅格换行分离） -->
         <span class="row" id="pub-actions">
@@ -483,7 +464,7 @@
       <ol class="note help-list">
         <li>选「本地 tar 文件」→ 自动压缩 → 分片上传 → 发布 → 展示访问地址（恒为 <span class="mono" id="pub-url">/&lt;project&gt;/</span>）。</li>
         <li>选「镜像库」→ 直接发布已入库镜像（①②两段自动跳过）。</li>
-        <li>任一步失败状态条标红，可点「重试」（上传失败自动从断点续传）；「仅上传」只把镜像送入镜像库（不发布），适合先备好镜像、稍后选「镜像库」源发布。</li>
+        <li>任一步失败状态条标红，可点「重试」；「仅上传」只把镜像送入镜像库（不发布），适合先备好镜像、稍后发布。</li>
       </ol>
       <details class="expert-fold">
         <summary>高级说明</summary>
@@ -491,23 +472,28 @@
           <li>命名规则：<span class="mono">^[a-zA-Z0-9][a-zA-Z0-9-]{0,30}$</span>（随机名 8 位字母数字，降低被字典遍历发现的门槛；项目留空即自动生成并回填），保留名 <span class="mono">v2 _api _bootstrap _console</span>；项目归属首个创建者。</li>
           <li>命中已有项目时自动沿用上次发布参数（内存取服务端当前配置；标签/端口取本机记忆），可修改。</li>
           <li>未选择文件时「发布」直接发布（要求镜像已入镜像库）；镜像 tar 上传前自动经 <span class="mono">zstd-19</span> 压缩再加密（已是 <span class="mono">.tar.zst</span> 则原样上传）。</li>
+          <li>压缩/分片细节：按 8MB 分片逐片加密上传，每片失败自动重试 3 次；上传失败点「重试」自动从断点续传（保留已传分片，恢复时先重新压缩重建产物），详见镜像库页「上传机制说明」。</li>
         </ul>
       </details>
     </div>
 
     <datalist id="dl-projects"></datalist>
-    <datalist id="dl-mem"><option value="128m"></option><option value="256m"></option><option value="512m"></option><option value="1g"></option></datalist>
+    <datalist id="dl-mem"><option value="128"></option><option value="256"></option><option value="512"></option><option value="1024"></option></datalist>
   </section>
 
   <!-- ———— 标签页 3：镜像库（plan-17 §1：镜像清单/删除/断点续传收纳） ———— -->
   <section id="tab-img" class="hidden" role="tabpanel" aria-labelledby="tabbtn-img">
-    <h2>镜像库 <button type="button" id="img-sub" class="sub" title="点击重新加载镜像清单（自动加载）" aria-label="重新加载镜像清单"></button></h2>
-    <p class="note">镜像清单从已上传入库的镜像加载（发布页选「镜像库」源时下拉同此数据，自动加载）；默认仅列出您名下的镜像，管理员钥匙可见全部账号的镜像并标注「管理员视图」。每行可删除不再使用的旧镜像：删除即触发回收（秒级释放磁盘），正在运行的展项不受影响，但其回滚/重建将失效。</p>
+    <h2>镜像库 <span id="img-scope" class="badge"></span><button type="button" id="img-sub" class="sub" title="点击重新加载镜像清单（自动加载）" aria-label="重新加载镜像清单"></button></h2>
+    <!-- C7：长说明段折叠（details/summary，与发布页「高级说明」同款） -->
+    <details class="fold">
+      <summary>镜像库说明（可见范围 · 删除语义）</summary>
+      <p class="note">镜像清单从已上传入库的镜像加载（发布页选「镜像库」源时下拉同此数据，自动加载）；默认仅列出您名下的镜像，管理员钥匙可见全部账号的镜像并标注「管理员视图」。每行可删除不再使用的旧镜像：删除即触发回收（秒级释放磁盘），正在运行的展项不受影响，但其回滚/重建将失效。</p>
+    </details>
     <!-- §14.3 镜像清单：与发布表单「镜像库」下拉同源 /_api/images 数据；每行「删除」走 POST /_api/image-rm（内联 GC，秒级回收磁盘） -->
     <div class="tbl-wrap tbl-low mt-3"><!-- 视觉QA P1-7：介绍段→表头 3px → 12px -->
       <table id="img-list">
         <thead><tr><th>镜像（同发布页下拉清单 · 可删除旧镜像释放磁盘）</th><th>操作</th></tr></thead>
-        <tbody><tr><td colspan="2" class="note">未加载</td></tr></tbody>
+        <tbody><tr><td colspan="2" class="note">正在加载…</td></tr></tbody>
       </table>
     </div>
     <datalist id="dl-images"></datalist>
@@ -528,7 +514,10 @@
         <progress id="up-prog" max="1" value="0"></progress>
         <div id="up-status" class="note" aria-live="polite">尚未开始上传：到「发布」页选「本地 tar 文件」点「发布」或「仅上传」即可开始；中断的上传可凭上方续传编号在此恢复。</div>
       </div>
-      <p class="note" id="up-help">上传前先在本地压缩（zstd-19，已是压缩格式则跳过），再按 8MB 分片逐片加密上传——压缩后上传更省流量；每片失败自动重试 3 次；中断后凭续传编号 + 本地会话记录续传（需重新选择同一文件，恢复时会先重新压缩以重建产物）；发布/仅上传失败后的「重试」也走同一续传通道。陈旧会话由服务端清理。</p>
+      <details class="fold">
+        <summary>上传机制说明（压缩 · 分片 · 断点续传）</summary>
+        <p class="note" id="up-help">上传前先在本地压缩（zstd-19，已是压缩格式则跳过），再按 8MB 分片逐片加密上传——压缩后上传更省流量；每片失败自动重试 3 次；中断后凭续传编号 + 本地会话记录续传（需重新选择同一文件，恢复时会先重新压缩以重建产物）；发布/仅上传失败后的「重试」也走同一续传通道。陈旧会话由服务端清理。</p>
+      </details>
     </div>
   </section>
 
@@ -583,12 +572,15 @@
       <progress id="db-prog" max="1" value="0"></progress>
       <div id="db-prog-txt" class="note" aria-live="polite">（备份进度：等待发起）</div>
     </div>
-    <p class="note">
-      备份：浏览器生成一次性 RSA-3072 密钥对，仅公钥上行；服务端后台导出（zstd-19 压缩的 -Fc）加密信封后按 4MB 分片下发，
-      控制台边下载边流式解密（内存占用恒定），服务器无法解密内容。
-      恢复：文件在本地压缩后上传（已是 zstd 的备份产物原样），用平台公钥加密，服务端按魔数自适应解密解压执行恢复——需要上方「平台公钥 PEM」已配置。
-      重置：清空并重建数据库（凭据不变，数据不可恢复）。
-    </p>
+    <details class="fold"><!-- C7：4 行技术说明折叠 -->
+      <summary>备份 / 恢复 / 重置机制说明（端到端加密）</summary>
+      <p class="note">
+        备份：浏览器生成一次性 RSA-3072 密钥对，仅公钥上行；服务端后台导出（zstd-19 压缩的 -Fc）加密信封后按 4MB 分片下发，
+        控制台边下载边流式解密（内存占用恒定），服务器无法解密内容。
+        恢复：文件在本地压缩后上传（已是 zstd 的备份产物原样），用平台公钥加密，服务端按魔数自适应解密解压执行恢复——需要上方「平台公钥 PEM」已配置。
+        重置：清空并重建数据库（凭据不变，数据不可恢复）。
+      </p>
+    </details>
     <h3>操作输出（原文）</h3>
     <pre class="out mono" id="db-out" aria-live="polite">（尚无输出）</pre>
     <p class="fb" id="db-fb" aria-live="polite"></p>
@@ -598,7 +590,7 @@
     <h2>Redis 浏览（仅显示您名下项目的库）</h2>
     <div class="row">
       <label class="field" for="rd-db"><span>逻辑库（DB）<span id="rd-scope" class="badge"></span></span><select id="rd-db"></select></label>
-      <label class="field" for="rd-q"><span>key 前缀过滤（回车或点「刷新」）</span>
+      <label class="field" for="rd-q"><span>键前缀过滤（回车查询）</span>
         <input type="text" id="rd-q" class="mono" placeholder="如 sr_demo_ 或留空…"></label>
       <!-- 自动加载（选库/输入前缀后回车自动查询 -->
       <span class="note" id="rd-count" aria-live="polite"></span>
@@ -606,17 +598,17 @@
     <!-- 视觉QA P2-10：key 栏与值面板同构（div.field flex column + 顶部 label 行），双栏对齐 -->
     <div class="row rd-panes">
       <div class="field rd-keys-pane">
-        <span>key 列表（点击查看值）</span>
-        <select id="rd-keys" size="12" class="mono" aria-label="key 列表（点击查看值）">
-          <option value="">（先刷新 key 列表）</option>
+        <span>键列表（点击查看值）</span>
+        <select id="rd-keys" size="12" class="mono" aria-label="键列表（点击查看值）">
+          <option value="">（选择逻辑库后自动加载）</option>
         </select>
       </div>
       <div class="field rd-val-pane">
-        <span id="rd-meta" aria-live="polite">（点击左侧 key 查看类型 / 剩余生存时间 / 值）</span>
-        <pre class="out mono" id="rd-val" aria-live="polite">（未选择 key）</pre>
+        <span id="rd-meta" aria-live="polite">（点击左侧键查看类型 / 剩余生存时间 / 值）</span>
+        <pre class="out mono" id="rd-val" aria-live="polite">（未选择键）</pre>
       </div>
     </div>
-    <p class="note">仅显示您名下项目的库（每项目一个逻辑库，编号由平台分配）；管理员钥匙可见全部逻辑库（管理员视图）。仅排障用途：这是界面级/协作级隔离（防误看防误操作）——容器内应用持有原始连接仍可 SELECT 任意库，非安全边界；key 列表单次最多 200 条（可能截断），值超过 4KB 会被服务端截断。</p>
+    <p class="note">仅显示您名下项目的库（每项目一个逻辑库，编号由平台分配）；管理员钥匙可见全部逻辑库（管理员视图）。仅排障用途：这是界面级/协作级隔离（防误看防误操作）——容器内应用持有原始连接仍可 SELECT 任意库，非安全边界；键列表单次最多 200 条（可能截断），值超过 4KB 会被服务端截断。</p>
   </section>
 
   <!-- ———— 标签页 4：帮助 ———— -->
@@ -628,14 +620,13 @@
       <li>忘记密码：请联系管理员重置（控制台无法自助找回；重置不影响各设备已绑定的钥匙，管理员在「管理」页点「补发密码」即生成新的登录初始密码）。</li>
       <li>修改密码：登录后点顶部「修改密码」自助更换——需先输入当前密码校验，新密码经 OPAQUE 盲化上线、全程不明文；改完请用新密码重新登录（本机钥匙不受影响）。</li>
       <li>登录密码与镜像库密码是两把独立发放的密码：前者登录控制台 / CLI，后者在 docker push 推送镜像时使用。</li>
-      <li>本设备钥匙由浏览器自动生成并保存在 localStorage（属试验性存储）：清除浏览器数据即失效，届时重新密码登录即可；「忘记此设备」可主动清除（可选同时远程注销本机钥匙）。</li>
+      <li>本设备钥匙由浏览器自动生成并保存在 localStorage（属试验性存储）：清除浏览器数据即失效，届时重新密码登录即可。</li>
     </ul>
 
     <h2>专家路径：公钥与机器用户（CLI / CI）</h2>
     <ul class="note help-list">
-      <li>CLI 与控制台同一模型：<span class="mono">showroom login &lt;账号&gt;</span> 输一次密码即自动配置本机（含镜像库凭据），此后全部子命令免密码（gh/ssh 模型）；<span class="mono">showroom logout [--purge]</span> 退出（--purge 同时远程注销本机钥匙）。</li>
+      <li>CLI 与控制台同一模型：<span class="mono">showroom login &lt;账号&gt;</span> 输一次密码即自动配置本机（含镜像库凭据），此后全部子命令免密码（gh/ssh 模型）；<span class="mono">showroom logout</span> 退出（清本机并远程吊销钥匙）。</li>
       <li>机器对机器 / CI：不走密码，由管理员登记公钥（<span class="mono">showroomctl user-add &lt;账号&gt; --pubkey &lt;公钥串&gt;</span>）；此类钥匙不参与密码绑定钥匙的自动回收，生命周期人工管理。</li>
-      <li>控制台登录页的「钥匙登录（CLI / 机器用户）」折叠入口即此路径：用本机已有或导入的种子，公钥串交管理员登记。</li>
     </ul>
 
     <h2>镜像规范</h2>
@@ -684,7 +675,7 @@
       <thead><tr><th>控制台功能</th><th>CLI 等价命令</th></tr></thead>
       <tbody>
         <tr><td>账号密码登录（自动绑定本机）</td><td class="mono">showroom login &lt;账号&gt;</td></tr>
-        <tr><td>退出登录 / 忘记此设备</td><td class="mono">showroom logout [--purge]</td></tr>
+        <tr><td>退出登录</td><td class="mono">showroom logout</td></tr>
         <tr><td>修改密码（登录态自助）</td><td class="wrap">控制台顶部「修改密码」入口（CLI 暂无；管理员可代为重置，见下）</td></tr>
         <tr><td>生成密钥（专家：CI / 机器用户）</td><td class="mono">showroom keygen</td></tr>
         <tr class="admin-only hidden"><td>发放新账号（初始密码 / 管理员）</td><td class="mono">showroomctl user-add &lt;账号&gt; --gen-password [--admin]</td></tr>
@@ -699,11 +690,11 @@
       </tbody>
     </table></div>
 
-    <h2>常见错误</h2>
+    <h2>常见错误码</h2>
     <div class="tbl-wrap"><table>
-      <thead><tr><th>提示</th><th>含义与处理</th></tr></thead>
+      <thead><tr><th>错误码</th><th>含义与处理</th></tr></thead>
       <tbody>
-        <tr><td class="mono">E_AUTH</td><td class="wrap">登录凭据未通过验证（常见于钥匙过期/被回收、更换设备，或操作了非本人项目）。重新用账号密码登录即可自动修复；CLI/钥匙用户请联系管理员登记公钥；仍失败可用 <span class="mono">showroom doctor</span> 排查时钟偏差。</td></tr>
+        <tr><td class="mono">E_AUTH</td><td class="wrap">登录凭据校验未通过（常见于钥匙过期/被回收、更换设备，或操作了非本人项目）。重新用账号密码登录即可自动修复；CLI/钥匙用户请联系管理员登记公钥；仍失败可用 <span class="mono">showroom doctor</span> 排查时钟偏差。</td></tr>
         <tr><td class="mono">E_NAME</td><td class="wrap">命名不符合规则 <span class="mono">^[a-zA-Z0-9][a-zA-Z0-9-]{0,30}$</span> 或使用了保留名（v2/_api/_bootstrap/_console）。</td></tr>
         <tr><td class="mono">E_QUOTA</td><td class="wrap">超出限额：内存配额 / 导入体积 / 磁盘空间（扣除预留）不足；请调低内存配置、精简镜像，磁盘不足时可在「镜像库」删除旧镜像后重试。</td></tr>
         <tr><td class="mono">E_NOTFOUND</td><td class="wrap">展项或上传/下载会话不存在。</td></tr>
@@ -746,7 +737,7 @@
       <button type="button" id="pw-submit">确认修改</button>
       <span class="fb" id="pw-fb" aria-live="polite"></span>
     </div>
-    <p class="note">修改成功后请用新密码重新登录（本机钥匙不受影响，仍可点【免密码进入】继续使用）。新旧密码均只在本机参与 OPAQUE 盲化，全程不明文上线。</p>
+    <p class="note">修改成功后请使用新密码重新登录（本机钥匙随退出一并回收）。新旧密码均只在本机参与 OPAQUE 盲化，全程不明文上线。</p>
   </dialog>
 </template>
 
@@ -771,7 +762,7 @@
       <div class="tbl-wrap">
         <table id="ad-users-tbl">
           <thead><tr><th>钥匙 kid</th><th>管理员</th><th>登记时间</th><th>操作</th></tr></thead>
-          <tbody><tr><td colspan="4" class="note">未加载</td></tr></tbody>
+          <tbody><tr><td colspan="4" class="note">正在加载…</td></tr></tbody>
         </table>
       </div>
       <p class="note">管理员标记挂在钥匙（kid）上：设为管理员后该钥匙可访问本页全部管理功能；删除钥匙即刻失效；吊销整个账号会一并删除其名下全部钥匙与镜像库访问凭据。「未设密码」表示该账号尚无登录密码（密码登录不可用，钥匙登录不受影响）：点「补发密码」生成新的登录初始密码（仅显示一次，原密码即刻失效）；补发/改密均不动已绑定的钥匙。</p>
@@ -783,7 +774,7 @@
         <label class="row" for="ad-st-auto"><input type="checkbox" id="ad-st-auto">每 30 秒自动刷新</label>
         <span class="note" id="ad-st-fb" aria-live="polite"></span>
       </div>
-      <div id="ad-status" class="note" aria-live="polite">（未加载）</div>
+      <div id="ad-status" class="note" aria-live="polite">（正在加载…）</div>
 
       <div class="sep"></div>
       <!-- §15 主机编排：期望状态展示（host.env/policy/漂移/Redis 池）+ 两段式变更 + 扩容流入口 -->
@@ -804,7 +795,7 @@
       <h3>主机开关与 FRP（host.env 其余键 · 通用键值展示）</h3>
       <div class="tbl-wrap tbl-low"><table id="hs-kv-tbl">
         <thead><tr><th>键</th><th>当前值</th></tr></thead>
-        <tbody><tr><td colspan="2" class="note">未加载</td></tr></tbody>
+        <tbody><tr><td colspan="2" class="note">（正在加载…）</td></tr></tbody>
       </table></div>
 
       <h3>参数值（policy.env）</h3>
@@ -820,7 +811,7 @@
       </div>
 
       <h3>漂移清单与 Redis 池</h3>
-      <div id="hs-drift" aria-live="polite"><p class="note m-0">（未加载）</p></div>
+      <div id="hs-drift" aria-live="polite"><p class="note m-0">（正在加载…）</p></div>
       <div id="hs-pool" class="mt-3" aria-live="polite">
         <div id="hs-pool-warn" class="warnbar hidden">
           <span id="hs-pool-warn-txt"></span>
@@ -1000,7 +991,7 @@ function shimCStr(call, cap0) {
 
 // —— 消息条（错误统一顶部：「错误码：中文解释（含下一步动作）」）与行内反馈 ——
 const ERR_CN = {
-  E_AUTH: '登录凭据未通过验证（常见于钥匙过期/被回收、更换设备，或操作了非本人项目）：重新用账号密码登录即可自动修复；CLI/钥匙用户请联系管理员登记公钥',
+  E_AUTH: '登录凭据校验未通过（常见于钥匙过期/被回收、更换设备，或操作了非本人项目）：重新用账号密码登录即可自动修复；CLI/钥匙用户请联系管理员登记公钥',
   E_NAME: '命名不符合规则或使用了保留名；请按提示修正名称后重试',
   E_QUOTA: '超出平台限额（内存配额/导入体积/磁盘空间不足）；请调低内存配置、精简镜像，磁盘不足时可先删除旧镜像',
   E_NOTFOUND: '对象不存在（展项/会话）；请确认名称或重新发起',
@@ -1044,7 +1035,8 @@ function busy(btn, on, txt = '处理中…') {
 const fmtTime = (unixSec) => {
   if (!unixSec) return '\u2014';
   try {
-    return new Intl.DateTimeFormat('zh-CN', {month:'2-digit',day:'2-digit',hour:'2-digit',minute:'2-digit'}).format(new Date(unixSec * 1000));
+    // D1：展项表「更新」列带年份（YYYY/MM/DD HH:MM），跨年项目不再歧义
+    return new Intl.DateTimeFormat('zh-CN', { year: 'numeric', month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit' }).format(new Date(unixSec * 1000));
   } catch { return '\u2014'; } // 非法输入（服务端形状为 unix 秒）防御：不因单行时间戳中断整表渲染
 };
 const fmtGB = (n) => { // admin/status 磁盘字节（df -B1）→ 人读；非数字原样回显（前向兼容字符串单位）
@@ -1108,7 +1100,10 @@ function rowActionsHtml(p) {
   let html = open
     + (st.act.update ? b('update', '发新版本') : b('update', '发新版本', ' disabled'))
     + (st.act.logs ? b('logs', '日志') : b('logs', '日志', ' disabled'));
-  if (st.act.ss) html += b(st.act.ss, st.act.ss === 'stop' ? '停止' : '启动');
+  // B1：停止为危险操作——danger variant（红）+ 二次确认（见 onProjAction），与删除/重置同档警示
+  if (st.act.ss) html += st.act.ss === 'stop'
+    ? `<button class="act danger" data-act="stop" data-p="${q}">停止</button>`
+    : b(st.act.ss, '启动');
   if (st.act.rmOnly) html += b('rm', '删除');
   if (st.act.more) html += `<span class="more-wrap">
           <button class="act" data-act="more" data-p="${q}" aria-haspopup="menu" aria-expanded="false">更多 ▾</button>
@@ -1171,8 +1166,7 @@ function loadSeed() {
     unput(sp, spl);
   }
 }
-// 密钥指纹 = 公钥串载荷（b64）前 8 位
-const pubFp = () => state.pub.replace(/^ed25519:/, '').slice(0, 8);
+// 密钥指纹 = 公钥串载荷（b64）前 8 位（服务端/CLI 侧展示用；B6 后控制台不再展示）
 
 // —— 密钥无感管理（plan-16 §3）：无 sr.seed 即自动生成（登录前也一样），用户全程不可见 ——
 function ensureSeed() {
@@ -1351,109 +1345,15 @@ async function bootSelfTest() {
     }
   }
 }
-/** 「忘记此设备」（plan-16 §3）：清 sr.seed/sr.user；可选联动 key-selfrm 远端注销本机钥匙。 */
-async function onForgetDevice() {
-  if (!confirm('确认忘记此设备？将清除本机保存的钥匙与账号记忆（不影响服务端数据与其他设备）。')) return;
-  let note = '';
-  if (state.seed && NAME_RE.test(state.user || '')) {
-    if (confirm('是否同时在本平台注销本机钥匙（远程删除，其他设备不受影响）？服务端不可达时可跳过。')) {
-      try {
-        const w = await api('GET', '/_api/whoami');
-        await api('POST', '/_api/key-selfrm', { kid: w.kid || '' }); // 仅允许删除签名所用钥匙自身
-        note = '，并已远程注销本机钥匙';
-      } catch { note = '（远程注销未完成：服务端不可达或钥匙已失效；本机数据仍已清除）'; }
-    }
-  }
-  localStorage.removeItem('sr.seed');
-  localStorage.removeItem('sr.user');
-  state.seed = null; state.pub = ''; state.user = ''; state.kid = ''; state.loggedIn = false;
-  $('lg-user').value = ''; $('lg-pass').value = '';
-  $('lg-reenter').classList.add('hidden');
-  $('lg-fb').textContent = '';
-  refreshLoginChrome();
-  showMsg(`已忘记此设备${note}。请重新登录。`, 'ok');
-  ensureSeed();     // 无感基线：下一轮登录的候选钥匙即刻就绪
-  setupExpert();
-}
-function refreshLoginChrome() { // 「忘记此设备」仅在有记忆账号时出现
-  $('lg-forget').classList.toggle('hidden', !localStorage.getItem('sr.user'));
-}
-
-// —— 专家路径：钥匙登录（plan-16 §3 折叠）——本机已有 / 导入种子 → 自测 → 公钥登记+重检循环 ——
-const wiz = { choice: 'use' };
-function pickKeyChoice(v) {
-  wiz.choice = v;
-  for (const r of ['use', 'import']) $(`wz-r-${r}`).checked = r === v;
-  $('wz-import-box').classList.toggle('hidden', v !== 'import'); // 选「导入」才出现粘贴框
-  $('wz-seed-err').classList.toggle('hidden', v !== 'import');
-}
-function setupExpert() { // 折叠打开时刷新：本机指纹可见性与默认单选（种子由无感层保证存在）
-  if (!$('wz-l-use')) return; // 元素在模板内，克隆前不可达
-  loadSeed();
-  const has = !!state.seed;
-  $('wz-l-use').classList.toggle('hidden', !has);
-  if (has) $('wz-fp').textContent = pubFp();
-  $('wz-seed').value = '';
-  pickKeyChoice(has ? 'use' : 'import');
-}
-function enterVerify(auto) {
-  if (!$('wz-p3')) return;
-  $('wz-p3').classList.remove('hidden');
-  $('wz-v-fp').textContent = pubFp();
-  $('wz-pub').textContent = state.pub;
-  $('wz-pubbox').classList.add('hidden');
-  $('wz-v-fb').textContent = '';
-  if (auto) expertVerify();
-}
-async function expertVerify() { // 签名自测；E_AUTH → 公钥串展示 + 手动重检循环（专家路径保留）
-  if (!state.seed || !state.user) return;
-  $('wz-v-fb').textContent = '正在自动验证密钥（签名自测）…';
-  $('wz-recheck').disabled = true;
-  try {
-    await api('GET', '/_api/health');
-    enterApp(); // 通过 → 自动进入管理界面
-  } catch (e) {
-    $('wz-recheck').disabled = false;
-    if (e.error === 'E_AUTH') {
-      $('wz-v-fb').textContent = '未登记：密钥尚未被平台收录，公钥串见下方。';
-      $('wz-pubbox').classList.remove('hidden');
-    } else {
-      $('wz-v-fb').textContent = '';
-      apiFail('钥匙登录（连接探测）', e);
-    }
-  }
-}
-function onExpertKey() {
-  const user = $('lg-user').value.trim();
-  if (!NAME_RE.test(user)) return fieldErr('lg-user', `账号「${user}」不合法（须匹配 ^[a-z0-9][a-z0-9-]{0,30}$），请先在上方登录卡填写账号`);
-  state.user = user;
-  if (wiz.choice === 'use') {
-    if (!state.seed) return showMsg('本机没有已有密钥：请选「导入密钥种子」，或收起本折叠直接用账号密码登录');
-  } else { // 导入
-    const hex = $('wz-seed').value.trim().toLowerCase();
-    if (!/^[0-9a-f]{64}$/.test(hex)) return fieldErr('wz-seed', 'seed 必须是 64 位十六进制（32 字节），请粘贴 showroom keygen 导出的完整种子');
-    localStorage.setItem('sr.seed', hex);
-    showMsg('密钥已导入本机（试验性存储）。', 'ok');
-  }
-  loadSeed();
-  localStorage.setItem('sr.user', state.user); // 账号与种子一起记忆
-  enterVerify(true);
-}
+// B5/B6：原设备级密钥清除入口（登录窗与设置弹窗两处按钮及处理链）与原登录窗
+// 「CLI/机器用户折叠登录」入口已整体删除——控制台登录=账号+密码一种方式，
+// 状态机只有两态：登录态=控制台 / 登出或钥匙失效=登录窗（第三态入口不再保留）
 
 // —— 登录区事件 ——
-$('lg-srv').textContent = location.origin + '/_api';
+$('lg-srv').textContent = location.origin; // C3：只显示主机地址（/_api 为内部路径细节）
 $('lg-form').addEventListener('submit', onLoginSubmit);
 $('lg-user').addEventListener('input', () => fieldErr('lg-user', ''));
 $('lg-pass').addEventListener('input', () => fieldErr('lg-pass', ''));
-// 专家路径（lg-expert 折叠在登录卡内，静态 DOM）：模块级直接绑定
-$('lg-expert').addEventListener('toggle', setupExpert);
-for (const r of ['use', 'import']) $(`wz-r-${r}`).addEventListener('change', () => pickKeyChoice(r));
-$('wz-seed').addEventListener('input', () => fieldErr('wz-seed', ''));
-$('wz-verify').addEventListener('click', onExpertKey);
-$('wz-recheck').addEventListener('click', () => expertVerify());
-$('wz-copypub').addEventListener('click', () => copyText(state.pub, '公钥串'));
-$('wz-r-import').addEventListener('input', () => { $('wz-seed-err').classList.add('hidden'); });
-$('wz-r-use').addEventListener('input', () => { $('wz-seed-err').classList.add('hidden'); });
 $('lg-reenter').addEventListener('click', async () => { // 退出登录后：本机钥匙仍有效，免密码重进
   busy($('lg-reenter'), true, '进入中…');
   $('lg-fb').textContent = '正在验证本机钥匙…';
@@ -1461,7 +1361,6 @@ $('lg-reenter').addEventListener('click', async () => { // 退出登录后：本
   busy($('lg-reenter'), false);
   if (!state.loggedIn && !$('lg-fb').textContent) $('lg-fb').textContent = '本机钥匙未通过自测：请输入账号密码重新登录。';
 });
-$('lg-forget').addEventListener('click', onForgetDevice);
 /** 复制到剪贴板（优先 Clipboard API，降级 execCommand；均失败提示手动复制）。 */
 async function copyText(text, what) {
   try {
@@ -1591,9 +1490,14 @@ function enterApp() {
   $('msg').textContent = '';
   $('msg').className = '';
   $('login').classList.add('hidden');
-  if (!appBuilt) { buildApp();
-  // 密钥生命周期：60s 心跳 → whoami touch 续期；E_AUTH=钥匙过期/吊销 → 自动跳回登录
-  startHeartbeat(); startAutoRefresh(); appBuilt = true; }
+  // A2 根因修复：appBuilt 在 buildApp 内「模板克隆完成即置位」，wire* 各自 try/catch 隔离——
+  // 任何单点异常不再击穿后续初始化（登录误报失败/数据页按钮全死/心跳不启动/换号重复克隆 DOM 均由此消除）
+  if (!appBuilt) {
+    buildApp();
+    // 密钥生命周期：60s 心跳 → whoami touch 续期；E_AUTH=钥匙过期/吊销 → 自动跳回登录
+    try { startHeartbeat(); } catch (e) { console.warn('[showroom] startHeartbeat 启动失败（会话续期不可用）', e); }
+    try { startAutoRefresh(); } catch (e) { console.warn('[showroom] startAutoRefresh 启动失败', e); }
+  }
   // 第2轮xiaozhi P2：换号刷新——#hd-user 仅在 buildApp（首次进入）设置，logout 后密码登录新账号会残留旧账号名；
   // 每次进入都按 state.user 重写；数据页 Redis 作用域同步复位（rdDbsLoaded 置否 → ensureRedisDbs 按新账号重取）
   $('hd-user').textContent = state.user;
@@ -1661,6 +1565,12 @@ function startHeartbeat() {
   }, 60000); // 60s
 }
 
+// A3 回归锚点：模块级 let 不上 window——以 getter 暴露两个会话定时器，供无头浏览器断言「心跳/自动刷新已启动」
+if (typeof window !== 'undefined') {
+  Object.defineProperty(window, 'heartbeatTimer', { configurable: true, get: () => heartbeatTimer });
+  Object.defineProperty(window, 'autoRefreshTimer', { configurable: true, get: () => autoRefreshTimer });
+}
+
 function logout() {
   state.admin = false; state.boundAdmin = false; // P3：登出复位 admin 状态，防换账号短暂继承
   // 第2轮xiaozhi P3：顶部条消息随会话收尾清空（错误提示不跨会话驻留到下一次登录）
@@ -1668,8 +1578,9 @@ function logout() {
   $('msg').className = '';
   // 密钥生命周期：登出=清本机密钥+远程吊销（不留僵尸钥匙）
   // key-selfrm fire-and-forget：不阻塞 UI，失败靠 TTL 自然过期兜底
-  if (state.seed && state.user) {
-    api('POST', '/_api/auth/key-selfrm', {}).catch(() => {});
+  // （B5 修正：真实路由为 /_api/key-selfrm 且要求 kid=签名所用钥匙——原 /_api/auth/key-selfrm 为错误路径，一直静默失败）
+  if (state.seed && state.user && state.kid) {
+    api('POST', '/_api/key-selfrm', { kid: state.kid }).catch(() => {});
   }
   localStorage.removeItem('sr.seed');
   localStorage.removeItem('sr.user');
@@ -1689,12 +1600,10 @@ function logout() {
   stopEventsStream();               // 平台事件流同上
   $('app').classList.add('hidden');
   $('login').classList.remove('hidden');
-  // 密钥仍保留在本机（plan-16 §3：退出登录不删 seed）：可免密码重进，或密码登录切换账号
-  $('wz-p3').classList.add('hidden');
+  // B2 登出语义：上方已清本机钥匙（localStorage）并远程吊销（key-selfrm）——无密可免，
+  // 不再显示「免密码进入」；提示如实说明钥匙已回收，引导密码重登
   $('lg-pass').value = '';
-  $('lg-reenter').classList.remove('hidden');
-  refreshLoginChrome();
-  $('lg-fb').textContent = '已退出登录（本机钥匙仍保留）。可点【免密码进入】再次进入，或输入账号密码切换账号。';
+  $('lg-fb').textContent = '已退出登录，本机钥匙已回收。请输入账号密码重新登录。';
 }
 
 // —— 修改密码（plan-16 §2.2 收口）：当前密码本地校验（复用 OPAQUE 登录序列 login-begin + 本地
@@ -1738,8 +1647,8 @@ async function onPwChange() {
     $('pw-cur').value = ''; $('pw-new').value = ''; $('pw-new2').value = ''; // 用后即清，不留在 DOM
     if ($('dlg-pw').open) $('dlg-pw').close();
     showMsg('密码修改成功：请使用新密码重新登录。', 'ok');
-    logout(); // 收口：结束当前会话，引导新密码重登（本机钥匙仍有效，用户也可免密码进入）
-    $('lg-fb').textContent = '密码已修改：请输入新密码重新登录（本机钥匙仍有效，也可点【免密码进入】继续使用）。';
+    logout(); // 收口：结束当前会话，引导新密码重登（登出即回收本机钥匙，B2 同语义）
+    $('lg-fb').textContent = '密码已修改：请输入新密码重新登录（本机钥匙已随退出回收）。';
   } catch (e) {
     $('pw-fb').textContent = '';
     if (e && e.error === 'E_PW_CUR') fieldErr('pw-cur', '当前密码不正确（或该账号密码已被重置），请重输');
@@ -1778,10 +1687,10 @@ function buildApp() {
   $('msg').textContent = '';
   $('msg').className = '';
   $('app').append($('app-tpl').content.cloneNode(true));
+  appBuilt = true; // A2：模板克隆完成立即置位——此后任何单点异常都不会触发换号/重进时的重复克隆
 
-  // 专家路径事件绑定已上移模块级（lg-expert 折叠在登录卡静态 DOM 内）
   $('hd-user').textContent = state.user;
-  $('hd-srv').textContent = location.origin + '/_api';
+  $('hd-srv').textContent = location.origin; // C3：顶栏只显示主机地址
   $('hd-pempub').value = localStorage.getItem('sr.pempub') || '';
   $('hd-pempub').addEventListener('input', () => localStorage.setItem('sr.pempub', $('hd-pempub').value));
   // 设置（plan-17 S1）：PEM 收纳 + 对外访问域名 + 改密/忘记设备聚合入口
@@ -1789,7 +1698,6 @@ function buildApp() {
   $('dlg-settings-close').addEventListener('click', () => $('dlg-settings').close());
   $('pempub-copy').addEventListener('click', () => copyText(platformPem(), '平台公钥 PEM'));
   $('set-base').addEventListener('input', onSetBaseInput);
-  $('btn-settings-forget').addEventListener('click', onForgetDevice);
   $('btn-go-settings').addEventListener('click', () => openSettings(true));
   $('btn-base-note-settings').addEventListener('click', () => openSettings(false));
   refreshAdminBadge(); // 顶栏账号徽标的管理员角标（密码登录继承的 admin 此刻已可知）
@@ -1815,7 +1723,10 @@ function buildApp() {
     else if (!logsLive.want) stopLogsStream('已停止实时跟随（勾选后重连）');
   });
   $('btn-new-pub').addEventListener('click', () => activateTab('pub')); // 唯一常驻 CTA
-  wireTabs(); wireProjTab(); wireDbTab();
+  // A2：三个 wire* 各自 try/catch——单页绑定异常只降级对应页签（console.warn 记录页签名），不再雪崩全局
+  for (const [name, fn] of [['wireTabs', wireTabs], ['wireProjTab', wireProjTab], ['wireDbTab', wireDbTab]]) {
+    try { fn(); } catch (e) { console.warn(`[showroom] ${name} 事件绑定失败（对应页签功能可能不可用）`, e); }
+  }
 }
 const platformPem = () => $('hd-pempub').value.trim();
 /** PEM 就绪检查（plan-17 验收 6）：未配置 → 展示「去设置」内联引导。
@@ -1948,8 +1859,8 @@ function teardownAdmin() {
   $('admin-root')?.remove?.();
 }
 function wireAdminTab() {
-  $('ad-refresh').addEventListener('click', loadAdminUsers);
-  $('ad-st-refresh').addEventListener('click', refreshAdminStatus);
+  // 根因清理：#ad-refresh/#ad-st-refresh 按钮已随 c3b0558 删除（30s 自动刷新取代），
+  // 此前对不存在元素的 addEventListener 会在真浏览器抛 TypeError 并击穿后续全部管理页绑定
   $('ad-st-auto').addEventListener('change', () => { // 30 秒自动刷新开关
     clearInterval(adTimer); adTimer = null;
     if ($('ad-st-auto').checked) { refreshAdminStatus(); adTimer = setInterval(refreshAdminStatus, 30000); }
@@ -2024,7 +1935,7 @@ async function loadAdminUsers() { // 账号与钥匙表（§12.2：账号/钥匙
         </tr>`).join('') || '<tr><td colspan="4" class="note">（该账号没有钥匙）</td></tr>');
     }).join('') : '<tr><td colspan="4" class="note">暂无账号</td></tr>';
     $('ad-fb').textContent = `已加载 ${users.length} 个账号（${new Date().toLocaleTimeString([], { hour12: false })}）`;
-  } catch (e) { tb.innerHTML = ''; apiFail('账号与钥匙加载', e); } // 非管理员 404 E_AUTH 也走顶部条
+  } catch (e) { tb.innerHTML = '<tr><td colspan="4" class="note">加载失败 · <button type="button" class="act" data-act="retry-users">重试</button></td></tr>'; apiFail('账号与钥匙加载', e); } // D2：失败行内「重试」可点（非管理员 404 E_AUTH 也走顶部条）
 }
 // 管理动作：全部中文 confirm 写明影响（§12.2）
 const ADMIN_ACT = {
@@ -2042,6 +1953,7 @@ async function onAdminKeyAction(ev) {
   if (!btn || btn.disabled) return;
   const { act, user, kid } = btn.dataset;
   if (act === 'pwset') return onAdminPasswdSet(user); // plan-16 §1.5 补发：单独流（confirm + 一次性密码展示）
+  if (act === 'retry-users') { btn.disabled = true; return loadAdminUsers(); } // D2：加载失败行内重试
   const def = ADMIN_ACT[act];
   if (!def) return;
   if (!confirm(def.ask(user, kid))) return;
@@ -2363,11 +2275,12 @@ async function ensureImages(force = false) {
     imagesLoaded = true;
     dataMark('images');
     const adminView = j.admin_view ?? state.admin; // 服务端标注优先，回退 whoami 结论
-    $('img-sub').textContent = `${adminView ? '管理员视图 · ' : ''}已加载 ${images.length} 项 · ${new Date().toLocaleTimeString([], { hour12: false })}`; // 副题可点重取
+    $('img-scope').textContent = adminView ? '管理员视图' : ''; // B4：页标题旁徽章（取代副题文字前缀）
+    $('img-sub').textContent = `已加载 ${images.length} 项 · ${new Date().toLocaleTimeString([], { hour12: false })}`; // 副题可点重取
     $('dep-images-fb').textContent = '';
   } catch (e) {
     $('dep-images-fb').textContent = '镜像清单加载失败，可切到镜像库页点副题重试';
-    $('img-sub').textContent = '加载失败';
+    $('img-sub').textContent = '加载失败，点击重试'; // D2：副题本身可点（点击即强制重取）
     retryOnce('images', () => ensureImages(true)); // §3：3s 自动重试 1 次
   }
 }
@@ -2430,6 +2343,9 @@ function pickPubSource(v) {
   if (v === 'tar') fieldErr('dep-image', '');
 }
 /** 命中已有项目名 → 沿用上次发布参数（mem=服务端 conf 行；tag/cport=本机 sr.conf.* 记忆）。 */
+// C4：内存输入以 MiB 裸数字为准（如 256）；服务端 parse_mem 把裸数字按字节解释，故提交时补 m 后缀
+const memToUi = (v) => String(v ?? '').trim().replace(/^(\d+)[mM]$/, '$1');       // 「256m」→「256」（展示）
+const memFromUi = (v) => { const s = String(v ?? '').trim(); return /^\d+$/.test(s) ? `${s}m` : s; }; // 「256」→「256m」（提交）
 function onPubProjectChange() {
   const v = $('pub-project').value.trim();
   if (state.projects.some((x) => x.project === v)) pubPrefill(v);
@@ -2440,7 +2356,7 @@ function pubPrefill(project, opts = {}) {
   let conf = null;
   try { conf = JSON.parse(localStorage.getItem('sr.conf.' + project) || 'null'); } catch { /* 坏记录忽略 */ }
   let hit = false;
-  if (row && row.mem) { $('pub-mem').value = row.mem; hit = true; } // 服务端 conf 权威（GET /_api/projects）
+  if (row && row.mem) { $('pub-mem').value = memToUi(row.mem); hit = true; } // 服务端 conf 权威（GET /_api/projects）
   if (conf && conf.cport) { $('pub-cport').value = String(conf.cport); hit = true; } // 响应无 cport 字段 → 本地记忆补（字符串赋值）
   if (conf && conf.tag && !opts.keepTag) { $('pub-tag').value = conf.tag; hit = true; }
   const note = $('pub-pref-note');
@@ -2473,6 +2389,8 @@ async function refreshProjects(force = false) {
 }
 function renderProjects() {
   const tb = $('proj-tbl').querySelector('tbody');
+  // B4 管理员视图标注兑现：管理员且列表含非本人条目 → 页标题旁徽章（与数据页 #rd-scope 同款）
+  $('proj-scope').textContent = ((state.admin || state.boundAdmin) && state.projects.some((p) => p.user && p.user !== state.user)) ? '管理员视图' : '';
   if (!state.projects.length) { tb.innerHTML = '<tr><td colspan="7" class="note">暂无展项——点顶栏「+ 发布」发布新 Demo（选「本地 tar 文件」或「镜像库」源均可）。</td></tr>'; }
   else {
     const acts = state.projects.map((p) => {
@@ -2549,6 +2467,8 @@ async function onProjAction(ev) {
     return;
   }
   if (act === 'rm' && !confirm(`确认删除展项 ${project}？容器与路由即刻下线，数据库将一并删除，如需保留请先在数据页备份下载 .dump；删除后凭据一并清除，不可恢复。`)) return;
+  // B1：停止与删除/重置同款二次确认（危险操作警示对齐：按钮红 + confirm 写明影响）
+  if (act === 'stop' && !confirm(`确认停止展项 ${project}？容器即刻停止、对外不可访问（数据与凭据保留，可随时重新「启动」）。`)) return;
   // 第1轮UI审查P3：启停/回滚/删除请求期间按钮就地变「…中」并禁用（busy 状态），完成后恢复
   const ACT_BUSY_CN = { start: '启动中…', stop: '停止中…', rollback: '回滚中…', rm: '删除中…' }[act];
   if (ACT_BUSY_CN) busy(btn, true, ACT_BUSY_CN); else btn.disabled = true;
@@ -2644,7 +2564,7 @@ async function deployRun(mode) {
     dpSet(3, 'on');
     dpText('③ 发布中…');
     const body = { project, tag, container_port: parseInt($('pub-cport').value, 10) || 8080 };
-    const memv = $('pub-mem').value.trim();
+    const memv = memFromUi($('pub-mem').value); // C4：裸数字按 MiB 提交（补 m 后缀，服务端字节语义不变）
     if (memv) body.mem = memv;
     const j = await api('POST', '/_api/publish', body);
     try { localStorage.setItem('sr.conf.' + project, JSON.stringify({ tag, cport: parseInt($('pub-cport').value, 10) || 8080, ts: Date.now() })); } catch { /* 存储不可写忽略 */ } // plan-17 §5：下次发布/「更新」预填
@@ -2968,8 +2888,10 @@ async function onResumeUpload() {
 // ================ 标签页 2：数据库（SPEC §9） ================
 function wireDbTab() {
   // Redis 浏览（§10.3；S2 自状态页迁入数据页）
-  $('rd-refresh').addEventListener('click', refreshRedisKeys);
+  // A1 根因清理：#rd-refresh 按钮已随 c3b0558 删除（30s 自动刷新取代），此处死引用曾致
+  // wireDbTab 抛 TypeError → buildApp/enterApp 雪崩（登录误报失败等 4 个 P0）；查询入口=回车/选库
   $('rd-q').addEventListener('keydown', (ev) => { if (ev.key === 'Enter') { ev.preventDefault(); refreshRedisKeys(); } });
+  $('rd-db').addEventListener('change', () => refreshRedisKeys()); // C2：选库即自动加载键列表
   $('rd-keys').addEventListener('change', onRedisKeyPick);
   $('btn-db-tables').addEventListener('click', onDbTables);
   $('btn-db-preview').addEventListener('click', onDbPreview);
@@ -3374,13 +3296,13 @@ async function refreshRedisKeys() {
     const keys = j.keys || [];
     $('rd-keys').innerHTML = keys.length
       ? keys.map((k) => `<option value="${esc(k)}">${esc(k)}</option>`).join('')
-      : '<option value="">（无匹配 key）</option>';
-    $('rd-count').textContent = `共 ${keys.length} 个 key（可能截断）`;
-    $('rd-meta').textContent = '（点击左侧 key 查看类型 / 剩余生存时间 / 值）';
-    $('rd-val').textContent = '（未选择 key）';
+      : '<option value="">（无匹配键）</option>';
+    $('rd-count').textContent = `共 ${keys.length} 个键（可能截断）`;
+    $('rd-meta').textContent = '（点击左侧键查看类型 / 剩余生存时间 / 值）';
+    $('rd-val').textContent = '（未选择键）';
   } catch (e) {
     $('rd-keys').innerHTML = ''; $('rd-count').textContent = '';
-    apiFail('Redis key 列表获取', e);
+    apiFail('Redis 键列表获取', e);
   }
 }
 async function onRedisKeyPick() {
@@ -3407,8 +3329,6 @@ async function onRedisKeyPick() {
 state.user = localStorage.getItem('sr.user') || '';
 ensureSeed();
 $('lg-user').value = state.user;
-refreshLoginChrome();
-setupExpert();
 if (state.seed && NAME_RE.test(state.user)) bootSelfTest();
 else if (state.user) $('lg-pass').focus?.();
 else $('lg-user').focus?.();
