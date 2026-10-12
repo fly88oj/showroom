@@ -167,6 +167,10 @@
   .tbl-xwrap { min-width: 0; }
   @media (max-width: 900px) { .tbl-xwrap { overflow-x: auto; } }
   #proj-tbl td.wrap { overflow-wrap: anywhere; } /* B3：URL 列长串可断行 */
+  /* R5b：字段说明藏 ❓ 图标（hover 出全文）——长括注 label 撑乱栅格基线，禁入布局 */
+  .q { display: inline-flex; align-items: center; justify-content: center; width: 15px; height: 15px; margin-left: 4px;
+       border: 1px solid var(--bd-input); border-radius: 50%; color: var(--fg-dim); font-size: 11px; cursor: help; user-select: none; }
+  .q:hover { color: var(--fg); border-color: var(--fg-dim); }
   .grid { display: flex; flex-wrap: wrap; gap: var(--sp-4); align-items: flex-end; } /* 不限 form：数据页/管理页 grid 同样横排（原 form .grid 使非表单区竖排堆叠） */
   .grid > .grow { flex: 1 1 20em; min-width: 0; } /* 横排后 field 收缩到 min-content 的字段（如数据页项目名）撑开 */
   /* 滚动容器不外溢滚动链 */
