@@ -284,3 +284,6 @@
   @media (prefers-reduced-motion: reduce) {
     *, *::before, *::after { transition: none !important; animation: none !important; scroll-behavior: auto !important; }
   }
+  /* R8：Redis 双栏内容盒共线——pre 默认 margin-block 使右值框低于左列表 12px */
+  .rd-panes pre.out, .rd-panes select { margin-top: 0; }
+  .rd-val-pane > pre.out { margin: 0; }
