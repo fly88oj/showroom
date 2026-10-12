@@ -3066,7 +3066,8 @@ async function startLogsStream() {
   const project = logsLive.project;
   logsLive.ac = new AbortController();
   const ac = logsLive.ac;
-  $('st-logs-fb').textContent = '已连接';  try {
+  $('st-logs-fb').textContent = ''; // 成功态静默（R4 同一信息只出现一次；仅在断连/结束时说话）
+  try {
     await consumeNdjson(`/_api/logs-stream?project=${encodeURIComponent(project)}&tail=100`, (j) => {
       if (j && typeof j.l === 'string') logsAppend(j.t, j.l);
     }, ac.signal);
