@@ -774,9 +774,9 @@ $s('pub-project').value = 'demo'; // 还原
 {
   const rowHtml = $s('proj-tbl:q').innerHTML || '';
   const idx = (t) => rowHtml.indexOf(t);
-  ok(idx('>打开<') >= 0 && idx('>更新<') > idx('>打开<') && idx('>日志<') > idx('>更新<')
+  ok(idx('>打开<') >= 0 && idx('>发新版本<') > idx('>打开<') && idx('>日志<') > idx('>发新版本<')
     && (idx('>停止<') > idx('>日志<') || idx('>启动<') > idx('>日志<')) && idx('更多') > idx('>日志<'),
-    'S4：行操作固定顺序 打开·更新·日志·启动/停止·更多▾（§4）');
+    'S4：行操作固定顺序 打开·发新版本·日志·启动/停止·更多▾（§4；视觉QA P2-6「更新」改「发新版本」）');
   ok(idx('回滚到上一版本') > idx('更多') && idx('>环境变量<') > idx('回滚') && idx('>数据<') > idx('>环境变量<') && idx('>删除<') > idx('>数据<'),
     'S4：更多▾菜单项序 回滚·环境变量·数据·删除');
   ok(rowHtml.includes('role="menu"') && rowHtml.includes('aria-haspopup'), 'S4：更多菜单 role=menu/aria-haspopup');
