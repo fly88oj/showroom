@@ -808,6 +808,42 @@ pub fn bound_keys_gc(root: &Path, user: &str, keep: usize, exclude: Option<&str>
     removed
 }
 
+/// B7 存量清扫（user_list 每次触发）：①过期绑定钥匙补扫吊销（TTL 是惰性吊销——死设备
+/// 的钥匙永不再次认证就永不清理，管理页会一直看到僵尸行）；②无 .bound 的永久钥匙
+/// （B7 前预登记机制存量——发放入口已删，这里清存量即绝迹，且它们绕过 TTL 是安全残留）；
+/// ③孤儿标记（.bound/.admin 无对应 .pub）。返回清除的 kid 数。
+pub fn sweep_stale_keys(root: &Path, user: &str) -> usize {
+    let dir = tokens_dir(root, user);
+    let Ok(rd) = fs::read_dir(&dir) else { return 0 };
+    let kids: std::collections::BTreeSet<String> = rd.filter_map(|e| e.ok())
+        .map(|e| e.path())
+        .filter_map(|p| p.file_stem().and_then(|o| o.to_str()).map(|s| s.to_string()))
+        .collect();
+    let mut swept = 0usize;
+    for kid in kids {
+        let (has_pub, has_bound) = (
+            dir.join(format!("{kid}.pub")).exists(),
+            dir.join(format!("{kid}.bound")).exists(),
+        );
+        if has_pub && has_bound {
+            bound_key_alive(root, user, &kid); // 过期即吊销（内部删 .pub + .bound）
+            if !dir.join(format!("{kid}.pub")).exists() { swept += 1; }
+        } else if has_pub {
+            // B7 前旧机制永久钥匙：清存量（连同 admin 标记）
+            let _ = fs::remove_file(dir.join(format!("{kid}.pub")));
+            let _ = fs::remove_file(admin_marker_path(root, user, &kid));
+            eprintln!("showroomctl: legacy permanent key {user}/{kid} removed (pre-B7 leftover, bypassed TTL)");
+            swept += 1;
+        } else {
+            // 孤儿标记：组删除不彻底的残留
+            let _ = fs::remove_file(dir.join(format!("{kid}.bound")));
+            let _ = fs::remove_file(admin_marker_path(root, user, &kid));
+            swept += 1;
+        }
+    }
+    swept
+}
+
 /// 读取用户登录注册记录（pass.opaque，b64 一行）；无记录/不可读 = None
 ///（存量用户未设密码 → 登录走 UnknownUser 同形态，plan-16 §6.6）。
 pub fn read_pass_opaque(root: &Path, user: &str) -> Option<String> {
@@ -2053,5 +2089,33 @@ Mon 2026-10-12 00:00:00 +08  1h 32min Sun 2026-10-10 23:00:12 +08   2h 3min ago 
         fs::create_dir_all(users_dir(&root, "bob")).unwrap();
         fs::write(pass_opaque_path(&root, "bob"), "  \n").unwrap();
         assert_eq!(read_pass_opaque(&root, "bob"), None, "空白也是未设密码");
+    }
+
+    #[test]
+    fn sweep_stale_keys_three_paths() {
+        let root = troot("sweep-stale");
+        let dir = tokens_dir(&root, "alice");
+        fs::create_dir_all(&dir).unwrap();
+        // ① 活钥匙（mtime=now，30min 内）——保留
+        fs::write(dir.join("live1234.pub"), "x").unwrap();
+        fs::write(dir.join("live1234.bound"), "").unwrap();
+        // ② 过期绑定钥匙（mtime 老于 TTL）——吊销（.pub+.bound 全删）
+        fs::write(dir.join("dead5678.pub"), "x").unwrap();
+        fs::write(dir.join("dead5678.bound"), "").unwrap();
+        let old = std::time::SystemTime::now() - std::time::Duration::from_secs(BOUND_KEY_TTL_SECS + 600);
+        let f = std::fs::File::options().append(true).open(dir.join("dead5678.bound")).unwrap();
+        f.set_modified(old).unwrap();
+        // ③ 旧机制永久钥匙（无 .bound）+ 孤儿 admin 标记
+        fs::write(dir.join("perm0000.pub"), "x").unwrap();
+        fs::write(dir.join("orphan111.admin"), "").unwrap();
+
+        let swept = sweep_stale_keys(&root, "alice");
+        assert_eq!(swept, 3, "清 3：过期+旧机制+孤儿");
+        assert!(dir.join("live1234.pub").exists(), "活钥匙保留");
+        assert!(dir.join("live1234.bound").exists());
+        assert!(!dir.join("dead5678.pub").exists(), "过期钥匙吊销");
+        assert!(!dir.join("dead5678.bound").exists());
+        assert!(!dir.join("perm0000.pub").exists(), "B7 旧机制永久钥匙清除");
+        assert!(!dir.join("orphan111.admin").exists(), "孤儿标记清除");
     }
 }

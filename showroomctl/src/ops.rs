@@ -769,6 +769,7 @@ pub fn user_list(root: &Path) -> Vec<UserInfo> {
     let mut out = users
         .into_iter()
         .map(|user| {
+            state::sweep_stale_keys(root, &user); // 管理页每次查看即清扫（过期僵尸/旧机制存量/孤儿标记）
             let keys = state::user_keys_with_kid(root, &user)
                 .into_iter()
                 .map(|(kid, _)| UserKeyInfo {
@@ -890,6 +891,8 @@ mod tests {
         let dir = state::tokens_dir(root, user);
         fs::create_dir_all(&dir).unwrap();
         fs::write(dir.join(format!("{kid}.pub")), k.pub_string()).unwrap();
+        // B7 后真实形状：登录绑定钥匙必有 .bound（无 .bound=旧机制存量，user_list 清扫会删）
+        fs::write(dir.join(format!("{kid}.bound")), "").unwrap();
         if admin {
             fs::write(state::admin_marker_path(root, user, &kid), "").unwrap();
         }
@@ -1046,7 +1049,7 @@ mod tests {
     #[test]
     fn key_bind_semantics() {
         let root = troot("key-bind");
-        // alice 已有一把 admin 钥（CI 路径，无 .bound）
+        // alice 已有一把 admin 钥（B7 后统一密码绑定路径，put_key 现写 .bound）
         let admin_kid = put_key(&root, "alice", true);
         // 绑 5 把（密码路径）
         let mut kids = vec![];
@@ -1057,9 +1060,9 @@ mod tests {
             assert!(state::bound_marker_path(&root, "alice", &kid).exists());
             kids.push(kid);
         }
-        // 第 6 把：GC 保 5 弃旧——总数守恒在 BOUND_KEYS_MAX=5。先跨秒再绑，保证新钥匙
-        // mtime 严格最新（file_mtime 秒级精度；前 5 把彼此并列无妨，kid 字典序定序确定），
-        // 淘汰者必在旧 5 把中，故只断言数量与新钥匙保留、不断言具体淘汰者。
+        // 第 7 把：GC 保 5 弃旧——总数守恒在 BOUND_KEYS_MAX=5。先跨秒再绑，保证新钥匙
+        // mtime 严格最新（file_mtime 秒级精度；并列无妨，kid 字典序定序确定），
+        // 淘汰者必在旧 6 把中，故只断言数量与新钥匙保留、不断言具体淘汰者。
         std::thread::sleep(std::time::Duration::from_millis(1100));
         let k6 = showroom_common::UserKey::generate();
         let (kid6, _) = key_bind(&root, "alice", &k6.pub_string()).unwrap();
@@ -1070,11 +1073,9 @@ mod tests {
             .count();
         assert_eq!(bound_left, 5, "GC 后恰好剩 5 把 .bound");
         assert!(dir.join(format!("{kid6}.pub")).exists(), "新绑钥匙永不淘汰");
-        let survived = kids.iter().filter(|k| **k != kid6 && dir.join(format!("{k}.pub")).exists()).count();
-        assert_eq!(survived, 4, "5 把旧绑定钥匙恰幸存 4 把");
-        // CI admin 钥不受 GC
-        assert!(state::tokens_dir(&root, "alice").join(format!("{admin_kid}.pub")).exists());
-        assert!(state::admin_marker_path(&root, "alice", &admin_kid).exists());
+        let prev: Vec<&String> = std::iter::once(&admin_kid).chain(kids.iter()).collect();
+        let survived = prev.iter().filter(|k| ***k != kid6 && dir.join(format!("{}.pub", k)).exists()).count();
+        assert_eq!(survived, 4, "旧 6 把（admin+5 绑定）恰幸存 4 把");
 
         // 幂等：同钥匙重绑 = ok（重写 .pub + 补标记，不报错不 GC 误删）
         let before = state::user_keys_with_kid(&root, "alice").len();
