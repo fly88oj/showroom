@@ -661,7 +661,7 @@ await sleep(60);
 ok(($s('rd-db').innerHTML || '').includes('<option value="0">'), 'redis-dbs：填充 DB 下拉');
 ok(($s('rd-keys').innerHTML || '').includes('sr_demo'), 'redis-keys：键列表渲染（前缀过滤请求）');
 ok($s('rd-count').textContent === '共 1 个键', '「共 N 个键」提示（C2：Redis 文案统一「键」；「可能截断」只留在静态说明）');
-ok(($s('rd-scope').textContent || '') === '', '§13.2 普通用户：DB 下拉无「管理员视图」标注');
+ok(!els.has('rd-scope'), '§13.2 R4 裁决：管理员视图徽章已删（顶栏「管」角标唯一，同一信息只出现一次）');
 $s('rd-keys').value = 'sr_demo';
 fire($s('rd-keys'), 'change');
 await sleep(60);
@@ -1063,9 +1063,9 @@ await sleep(60); // whoami 异步返回
 ok(els.has('ad-users-tbl') && !els.has('ad-st-auto'),
   'whoami admin=true：管理区 DOM 渲染（第五「管理」标签随 whoami 构建）；自动刷新恒开无开关（R4）');
 
-// —— §13.1/§13.2 管理员视图：镜像清单（whoami 回退标注）+ Redis 浏览（admin_view 标注） ——
-ok(await waitFor(() => ($s('img-scope').textContent || '') === '管理员视图', 5000),
-  'B4：admin 钥匙镜像库页标题旁「管理员视图」徽章（服务端 admin_view 标注）');
+// —— §13.1/§13.2 管理员全量视角：镜像清单（whoami 回退）+ Redis 库（admin_view 全量）——
+ok(!els.has('img-scope') && !els.has('proj-scope'),
+  'R4 裁决：镜像库/展项列表标题旁无「管理员视图」徽章（顶栏「管」角标唯一）');
 ok(($s('dl-images').innerHTML || '').includes('bob/other'), 'admin 钥匙：镜像清单含他人镜像（全量）');
 
 // —— 管理页：账号与钥匙表 + 平台状态面板（§12.2） ——
@@ -1305,7 +1305,8 @@ ok($s('dlg-redis-x').open === false, '扩容对话框关闭');
 // —— §13.2 Redis 浏览管理员视图（S2：Redis 已迁数据页；服务端 admin_view 标注路径） ——
 clickTab('db');
 await sleep(80);
-ok($s('rd-scope').textContent === '管理员视图', 'admin 钥匙：Redis 浏览 DB 下拉标注「管理员视图」（全量逻辑库）');
+ok(($s('rd-db').innerHTML || '').includes('<option value="3">'),
+  'admin 钥匙：Redis DB 下拉全量（含 dbs 0-3；R4 裁决后无徽章，全量视角由数据本身体现）');
 clickTab('proj');
 whoamiAdmin = false;
 
@@ -1427,11 +1428,11 @@ ok(keyBindBodies.at(-1).user === 'bob' && keyBindBodies.at(-1).pubkey === pubOf(
 ok(store.get('sr.seed') === seed4 && store.get('sr.user') === 'bob', '沿用同一 seed，记忆新账号');
 ok(hidden('login') && shown('app') && $s('hd-user').textContent === 'bob', '进入管理壳（回显新账号）');
 ok(($s('msg').textContent || '').includes('继承管理员'), 'admin 账号密码登录：显式提示新钥匙继承管理员权限');
-// —— 4c-2. 换号顶栏刷新 + 退出清顶部条（第2轮xiaozhi P2/P3）：logout → 密码登录另一账号 → #hd-user/rd-scope 即时复位 ——
+// —— 4c-2. 换号顶栏刷新 + 退出清顶部条（第2轮xiaozhi P2/P3）：logout → 密码登录另一账号 → #hd-user/即时复位 ——
 whoamiAdmin = true;
-clickTab('db'); // bob 视角先点亮数据页「管理员视图」标注（换号前作旧值残留的对照）
+clickTab('db'); // bob 视角点亮数据页（换号前作旧值残留的对照）
 await sleep(80);
-ok($s('rd-scope').textContent === '管理员视图', '换号前置：bob 数据页标注管理员视图');
+ok(($s('rd-db').innerHTML || '').includes('<option value="0">'), '换号前置：bob 数据页 DB 下拉已加载（全量 0-3）');
 clickTab('proj');
 whoamiAdmin = false;
 click('btn-logout');
@@ -1443,8 +1444,8 @@ fire($s('lg-form'), 'submit', { preventDefault() {} });
 await sleep(200);
 ok(hidden('login') && shown('app') && $s('hd-user').textContent === 'alice',
   '换号重登：顶栏 #hd-user 即时显示新账号（不残留旧账号名 bob）');
-ok(($s('rd-scope').textContent || '') === '',
-  '换号重登：数据页 Redis 作用域复位（不残留旧账号的管理员视图标注，DB 列表按新账号重取）');
+ok(($s('rd-db').innerHTML || '') === '',
+  '换号重登：数据页 Redis 作用域复位（DB 列表清空按新账号重取，不残留旧账号数据）');
 // —— 4d. whoami 失败（404 E_AUTH）：顶部条报错、管理标签不渲染 ——
 whoamiFail = true; // §12.2：whoami 404 E_AUTH → 顶部条报错、管理标签不渲染
 click('btn-logout');

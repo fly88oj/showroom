@@ -363,7 +363,7 @@
 
   <!-- ———— 标签页 1：展项管理 ———— -->
   <section id="tab-proj" role="tabpanel" aria-labelledby="tabbtn-proj">
-    <h2>展项列表 <span id="proj-scope" class="badge"></span></h2>
+    <h2>展项列表</h2>
     <div class="warnbar hidden" id="proj-base-note">正在用内网地址展示 URL：可在<button type="button" id="btn-base-note-settings" class="act">设置</button>中配置「对外访问域名」（公网域名）。</div>
     <div class="row">
       <span class="sub" id="proj-fb"></span>
@@ -480,11 +480,11 @@
 
   <!-- ———— 标签页 3：镜像库（plan-17 §1：镜像清单/删除/断点续传收纳） ———— -->
   <section id="tab-img" class="hidden" role="tabpanel" aria-labelledby="tabbtn-img">
-    <h2>镜像库 <span id="img-scope" class="badge"></span><span class="sub" id="img-sub"></span></h2>
+    <h2>镜像库 <span class="sub" id="img-sub"></span></h2>
     <!-- C7：长说明段折叠（details/summary，与发布页「高级说明」同款） -->
     <details class="fold">
       <summary>镜像库说明（可见范围 · 删除语义）</summary>
-      <p class="note">镜像清单从已上传入库的镜像加载（发布页选「镜像库」源时下拉同此数据，自动加载）；默认仅列出您名下的镜像，管理员钥匙可见全部账号的镜像并标注「管理员视图」。每行可删除不再使用的旧镜像：删除即触发回收（秒级释放磁盘），正在运行的展项不受影响，但其回滚/重建将失效。</p>
+      <p class="note">镜像清单从已上传入库的镜像加载（发布页选「镜像库」源时下拉同此数据，自动加载）；默认仅列出您名下的镜像，管理员可见全部账号的镜像。每行可删除不再使用的旧镜像：删除即触发回收（秒级释放磁盘），正在运行的展项不受影响，但其回滚/重建将失效。</p>
     </details>
     <!-- §14.3 镜像清单：与发布表单「镜像库」下拉同源 /_api/images 数据；每行「删除」走 POST /_api/image-rm（内联 GC，秒级回收磁盘） -->
     <div class="tbl-wrap tbl-low mt-3"><!-- 视觉QA P1-7：介绍段→表头 3px → 12px -->
@@ -582,10 +582,10 @@
     <p class="fb" id="db-fb" aria-live="polite"></p>
 
     <div class="sep"></div>
-    <!-- §13.2/13.3（plan-17 S2 自状态页迁入）：DB 下拉来自 /_api/redis-dbs（服务端按用户过滤；admin 全量标注「管理员视图」） -->
+    <!-- §13.2/13.3（plan-17 S2 自状态页迁入）：DB 下拉来自 /_api/redis-dbs（服务端按用户过滤；admin 全量） -->
     <h2>Redis 浏览（仅显示您名下项目的库）</h2>
     <div class="row">
-      <label class="field" for="rd-db"><span>逻辑库（DB）<span id="rd-scope" class="badge"></span></span><select id="rd-db"></select></label>
+      <label class="field" for="rd-db"><span>逻辑库（DB）</span><select id="rd-db"></select></label>
       <label class="field" for="rd-q"><span>键前缀过滤（回车查询）</span>
         <input type="text" id="rd-q" class="mono" placeholder="如 sr_demo_ 或留空…"></label>
       <!-- 自动加载（选库/输入前缀后回车自动查询 -->
@@ -604,7 +604,7 @@
         <pre class="out mono" id="rd-val" aria-live="polite">（未选择键）</pre>
       </div>
     </div>
-    <p class="note">每项目一个逻辑库，编号由平台分配；管理员钥匙可见全部逻辑库（管理员视图）。仅排障用途：这是界面级/协作级隔离（防误看防误操作）——容器内应用持有原始连接仍可 SELECT 任意库，非安全边界；键列表单次最多 200 条（可能截断），值超过 4KB 会被服务端截断。</p>
+    <p class="note">每项目一个逻辑库，编号由平台分配；管理员可见全部逻辑库。仅排障用途：这是界面级/协作级隔离（防误看防误操作）——容器内应用持有原始连接仍可 SELECT 任意库，非安全边界；键列表单次最多 200 条（可能截断），值超过 4KB 会被服务端截断。</p>
   </section>
 
   <!-- ———— 标签页 4：帮助 ———— -->
@@ -1464,10 +1464,10 @@ function enterApp() {
     try { startAutoRefresh(); } catch (e) { console.warn('[showroom] startAutoRefresh 启动失败', e); }
   }
   // 第2轮xiaozhi P2：换号刷新——#hd-user 仅在 buildApp（首次进入）设置，logout 后密码登录新账号会残留旧账号名；
-  // 每次进入都按 state.user 重写；数据页 Redis 作用域同步复位（rdDbsLoaded 置否 → ensureRedisDbs 按新账号重取）
+  // 每次进入都按 state.user 重写；数据页 Redis 作用域同步复位（rdDbsLoaded 置否 + 清旧选项 → ensureRedisDbs 按新账号重取）
   $('hd-user').textContent = state.user;
   rdDbsLoaded = false;
-  $('rd-scope').textContent = '';
+  $('rd-db').innerHTML = ''; // 换号复位：清旧账号 DB 选项（R4 断言暴露的真残留）
   $('app').classList.remove('hidden');
   // plan-17 §3：登录即 4 路并发（projects/images/space/whoami），任一路失败不阻断其余（allSettled）
   let focusGuided = false;
@@ -1785,12 +1785,12 @@ async function syncAdmin() {
     clearTimeout(whoamiTimer);
     whoamiTimer = setTimeout(() => { if (state.loggedIn) syncAdmin(); }, 60000); // §3：? 60s 周期重试
   }
-  state.admin = isAdmin; // §13.1/§13.2：镜像清单与 Redis 浏览据此标注「管理员视图」
+  state.admin = isAdmin; // §13.1/§13.2：管理员可见全量（镜像清单/Redis 库；身份由顶栏「管」角标表达）
   // 第2轮xiaozhi P3：帮助页 CLI 对照表的 user-add/user-passwd 为管理员命令——按 whoami 结论显隐（非 admin 默认隐藏，防误导）
   for (const el of document.querySelectorAll('#app .admin-only')) el.classList.toggle('hidden', !isAdmin);
   refreshAdminBadge(); // whoami 落定后同步顶栏角标（纯呈现；管理员与否只看「管」角标，无第三徽标——R4 用户裁决去冗余）
   if (state.projects.length) renderProjects(); // 第1轮UI审查P2：whoami 落定后重判「非本人项目」行操作显隐（列表已加载才重渲，不清加载中占位）
-  if (isAdmin && imagesLoaded) ensureImages(true); // whoami 晚于首次清单加载时重取，刷新管理员视图标注
+  if (isAdmin && imagesLoaded) ensureImages(true); // whoami 晚于首次清单加载时重取（admin 全量视角）
   if (isAdmin && !adminBuilt) { buildAdminTab(); adminBuilt = true; }
   else if (!isAdmin && adminBuilt) { // 权限被收回：拆除管理 DOM 并回到普通标签
     teardownAdmin(); adminBuilt = false;
@@ -2192,8 +2192,7 @@ async function ensureImages(force = false) {
     renderImageList(images); // §14.3：清单容器（删除按钮挂此）与 ComboBox 同源同刷
     imagesLoaded = true;
     dataMark('images');
-    const adminView = j.admin_view ?? state.admin; // 服务端标注优先，回退 whoami 结论
-    $('img-scope').textContent = adminView ? '管理员视图' : ''; // B4：页标题旁徽章（取代副题文字前缀）
+    // B4 徽章已随 R4 用户裁决移除（管理员身份由顶栏「管」角标表达，同一信息只出现一次）
     $('img-sub').textContent = ''; // 成功不写「已加载 N 项」计数（清单即数据；自动刷新兜底，无手动重取入口）
     $('dep-images-fb').textContent = '';
   } catch (e) {
@@ -2307,8 +2306,7 @@ async function refreshProjects(force = false) {
 }
 function renderProjects() {
   const tb = $('proj-tbl').querySelector('tbody');
-  // B4 管理员视图标注兑现：管理员且列表含非本人条目 → 页标题旁徽章（与数据页 #rd-scope 同款）
-  $('proj-scope').textContent = ((state.admin || state.boundAdmin) && state.projects.some((p) => p.user && p.user !== state.user)) ? '管理员视图' : '';
+  // B4 徽章已随 R4 用户裁决移除（管理员身份由顶栏「管」角标表达，同一信息只出现一次）
   if (!state.projects.length) { tb.innerHTML = '<tr><td colspan="7" class="note">暂无展项——点顶栏「+ 发布」发布新展项（选「本地 tar 文件」或「镜像库」源均可）。</td></tr>'; }
   else {
     const acts = state.projects.map((p) => {
@@ -2370,7 +2368,7 @@ async function onProjAction(ev) {
   if (!btn || btn.disabled) return;
   const { act, p: project } = btn.dataset;
   if (act === 'env') return showEnvDlg(project);
-  if (act === 'logs') { closeMoreMenu(); return openDrawer(project); } // plan-17 §1：日志随行抽屉展开（J3 ≤2 点击）
+  if (act === 'logs') { closeMoreMenu(); return drawerRow.dataset.drawer === project ? closeDrawer() : openDrawer(project); } // ▾ 开关语义：再点同项目即收起（R4 用户反馈"收不起来"）
   if (act === 'more') return toggleMoreMenu(btn);
   if (act === 'retry-projects') { btn.disabled = true; return refreshProjects(true); } // 内联重试（§3）
   closeMoreMenu();
@@ -3158,16 +3156,20 @@ function openDrawer(project) {
   if (row && row.after) row.after(drawerRow); else $('proj-tbl').querySelector('tbody')?.append?.(drawerRow);
   drawerRow.hidden = false;
   drawerRow.dataset.drawer = project;
+  row?.querySelector('button[data-act="logs"]')?.setAttribute?.('aria-expanded', 'true');
   pickLogs(project);
 }
 function closeDrawer() {
   drawerRow.hidden = true; // 收起=隐藏挂回 tbody（元素常驻文档，st-logs* 始终可寻址）
+  if (drawerRow.dataset.drawer) {
+    $('proj-tbl')?.querySelector(`tr[data-row="${drawerRow.dataset.drawer}"] button[data-act="logs"]`)?.setAttribute?.('aria-expanded', 'false');
+  }
   drawerRow.dataset.drawer = '';
   if (logsLive.project) stopLogsStream(); // 收起即断（§3）
   logsLive.project = null;
 }
 
-// —— Redis 浏览（SPEC §13.2/13.3：DB 下拉仅列自己的（admin 全量标注「管理员视图」）；错误一律走顶部条）——
+// —— Redis 浏览（SPEC §13.2/13.3：DB 下拉仅列自己的（admin 全量）；错误一律走顶部条）——
 let rdDbsLoaded = false;
 async function ensureRedisDbs() {
   if (rdDbsLoaded) return;
@@ -3176,14 +3178,11 @@ async function ensureRedisDbs() {
     const dbs = (j.dbs ?? []).map(Number).filter(Number.isInteger);
     if (!dbs.length) {
       $('rd-db').innerHTML = '';
-      $('rd-scope').textContent = '';
       $('rd-count').textContent = '您名下暂无可浏览的逻辑库（发布项目后自动分配）';
       return;
     }
     $('rd-db').innerHTML = dbs.map((n) => `<option value="${n}">${n}</option>`).join('');
-    const adminView = j.admin_view ?? state.admin; // 服务端标注优先，回退 whoami 结论
-    $('rd-scope').textContent = adminView ? '管理员视图' : ''; // §13.2：admin 全量时显式标注
-    rdDbsLoaded = true;
+    rdDbsLoaded = true; // 管理员视图标注已随 R4 裁决移除（顶栏「管」角标唯一）
   } catch (e) { apiFail('Redis 库编号获取', e); }
 }
 async function refreshRedisKeys() {
