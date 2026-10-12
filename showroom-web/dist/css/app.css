@@ -30,7 +30,7 @@
   /* 视觉QA P0-1：帮助页区块标题（h2）与其他页 H3 区块同为 28px 上距——全局 h2 margin-top:0 在此页造成间距倒挂；
      首个 h2 是面板第一个子元素，28px 会顶出面板顶部死空白（R4 用户复核），first-child 归零 */
   #tab-help h2 { margin-top: 28px; }
-  #tab-help .hpanel > h2:first-child { margin-top: 0; }
+  #tab-help .hpanel > h2:first-child { margin-top: 0 !important; }
   /* 视觉QA P1-1：分组/区块题（断点续传、操作输出等）与卡片题（h2）同色 --fg-head，消除 rogue 色 */
   .fs > h3, #tab-db > h3, #tab-admin h3 { color: var(--fg-head); }
   .mono { font-family: ui-monospace, "SF Mono", Consolas, monospace; font-size: 12px; font-variant-numeric: tabular-nums; }
