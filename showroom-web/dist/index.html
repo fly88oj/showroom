@@ -33,7 +33,7 @@
   }
   /* —— 字号刻度：页面标题 18 / 卡片标题 14 semibold / 正文与控件 14 / 辅助 12 dim / 等宽 12 —— */
   h1 { font-size: 18px; font-weight: 700; margin: 0; color: var(--fg); }
-  h2 { font-size: 15px; font-weight: 600; margin: 0 0 var(--sp-3); color: var(--fg-head); } /* plan-17 §7：卡片题 15/600 */
+  h2 { font-size: 14px; font-weight: 600; margin: 0 0 var(--sp-3); color: var(--fg-head); } /* plan-17 §7 卡片题；第1轮UI审查P3：15px→14px 与正文/控件同级（原 h2 { font-size: 15px; font-weight: 600; }） */
   h3 { font-size: 14px; font-weight: 600; margin: var(--sp-4) 0 var(--sp-2); color: var(--fg); }
   .mono { font-family: ui-monospace, "SF Mono", Consolas, monospace; font-size: 12px; font-variant-numeric: tabular-nums; }
   .note { color: var(--fg-dim); font-size: 12px; margin: var(--sp-1) 0 0; }
@@ -116,6 +116,22 @@
   th { color: var(--fg-dim); font-size: 12px; font-weight: 600; position: sticky; top: 0; background: var(--bg-card); }
   td .act { margin-right: var(--sp-1); padding: 2px 8px; font-size: 12px; }
   td.wrap { white-space: normal; overflow-wrap: break-word; word-break: normal; } /* break-word：长串可断但不硬折单词 */
+  /* 第1轮UI审查P2：环境变量模态列宽——键 30% / 当前值 40% / 用途 30%（fixed 布局锁定比例；单元格可换行，中文用途说明横排折行不挤列） */
+  #env-tbl { table-layout: fixed; }
+  #env-tbl th, #env-tbl td { white-space: normal; overflow-wrap: break-word; word-break: normal; }
+  #env-tbl th:nth-child(1), #env-tbl td:nth-child(1) { width: 30%; }
+  #env-tbl th:nth-child(2), #env-tbl td:nth-child(2) { width: 40%; }
+  #env-tbl th:nth-child(3), #env-tbl td:nth-child(3) { width: 30%; }
+  /* 第1轮UI审查P2：工具下载表——说明列（第2列）换行收窄，「大小/下载」列锁定宽度完整显示（容器 .tbl-wrap overflow:auto 兜底横滚） */
+  #tool-tbl { table-layout: fixed; }
+  #tool-tbl td { white-space: normal; overflow-wrap: break-word; word-break: normal; }
+  #tool-tbl td:nth-child(3), #tool-tbl td:nth-child(4) { white-space: nowrap; }
+  #tool-tbl th:nth-child(1), #tool-tbl td:nth-child(1) { width: 20%; }
+  #tool-tbl th:nth-child(2), #tool-tbl td:nth-child(2) { width: 52%; }
+  #tool-tbl th:nth-child(3), #tool-tbl td:nth-child(3) { width: 12%; }
+  #tool-tbl th:nth-child(4), #tool-tbl td:nth-child(4) { width: 16%; }
+  /* 第1轮UI审查P2：非本人项目操作区——灰色文字标签（替代对他人项目必然 E_AUTH 失败的无效按钮） */
+  .not-mine { color: var(--fg-dim); font-size: 12px; }
   .tbl-wrap { overflow: auto; max-height: 60vh; border: 1px solid var(--bd); border-radius: var(--r); }
   .tbl-low { max-height: 22vh; } .tbl-mid { max-height: 26vh; }
   /* 展项表页面级滚动：取消容器裁剪——行内「更多 ▾」菜单（absolute）不再被 overflow 截断 */
@@ -370,7 +386,7 @@
             <input type="file" id="pub-file" aria-describedby="pub-file-err"></label>
         </span>
         <span class="field hidden" id="pub-src-reg-box">
-          <label class="field" for="dep-image"><span>镜像（ComboBox：输入前缀过滤；清单来自 <span class="mono">/_api/images</span>，自动加载）</span>
+          <label class="field" for="dep-image"><span>镜像（从已上传的镜像中选择：输入前缀过滤，自动加载）</span>
             <input type="text" id="dep-image" list="dl-images" size="34" class="mono" placeholder="输入前缀过滤，如 alice/demo:…" aria-describedby="dep-image-err"></label>
           <span class="fb" id="dep-images-fb" aria-live="polite"></span>
         </span>
@@ -383,6 +399,8 @@
         <button type="submit" id="pub-submit">发布</button>
         <button type="button" id="btn-upload-only" title="同一 tar：只压缩上传入库，不部署；稍后到本页选「镜像库」源发布">仅上传</button>
       </div>
+      <!-- 第1轮UI审查P1：空间条在发布页可见（镜像 tar 上传发生在本页；与镜像库页 #space-note 同数据同刷新） -->
+      <p class="note mt-2" id="pub-space-note" aria-live="polite">可用空间（已扣预留）：…</p>
       <p class="note hidden" id="pub-pref-note" aria-live="polite"></p>
       <p class="ferr" id="pub-project-err" aria-live="polite"></p>
       <p class="ferr" id="pub-tag-err" aria-live="polite"></p>
@@ -428,7 +446,7 @@
   <!-- ———— 标签页 3：镜像库（plan-17 §1：镜像清单/删除/断点续传收纳） ———— -->
   <section id="tab-img" class="hidden" role="tabpanel" aria-labelledby="tabbtn-img">
     <h2>镜像库 <button type="button" id="img-sub" class="sub" title="点击重新加载镜像清单（自动加载）" aria-label="重新加载镜像清单"></button></h2>
-    <p class="note">镜像清单来自 <span class="mono">/_api/images</span>（发布页选「镜像库」源时下拉同此数据，自动加载）；默认仅列出您名下的镜像，管理员钥匙可见全部账号的镜像并标注「管理员视图」。每行可删除不再使用的旧镜像：删除即触发回收（秒级释放磁盘），正在运行的展项不受影响，但其回滚/重建将失效。</p>
+    <p class="note">镜像清单从已上传入库的镜像加载（发布页选「镜像库」源时下拉同此数据，自动加载）；默认仅列出您名下的镜像，管理员钥匙可见全部账号的镜像并标注「管理员视图」。每行可删除不再使用的旧镜像：删除即触发回收（秒级释放磁盘），正在运行的展项不受影响，但其回滚/重建将失效。</p>
     <!-- §14.3 镜像清单：与发布表单「镜像库」下拉同源 /_api/images 数据；每行「删除」走 POST /_api/image-rm（内联 GC，秒级回收磁盘） -->
     <div class="tbl-wrap tbl-low">
       <table id="img-list">
@@ -594,7 +612,7 @@
         </tr>
       </tbody>
     </table></div>
-    <p class="note">下载走与控制台其余操作相同的签名通道（<span class="mono">GET /_api/tool/&lt;文件名&gt;</span>）；文件大小在首次下载后显示。CLI 首次使用：<span class="mono">./showroom login &lt;账号&gt;</span> 输一次密码即自动配置本机。</p>
+    <p class="note">下载走与控制台其余操作相同的签名鉴权通道；文件大小在首次下载后显示。CLI 首次使用：<span class="mono">./showroom login &lt;账号&gt;</span> 输一次密码即自动配置本机。</p>
 
     <h2>CLI 命令对照</h2>
     <div class="tbl-wrap"><table>
@@ -1010,11 +1028,16 @@ function rowStatusHtml(p) {
   const st = projState(p);
   return `<td class="${st.cls}" title="${esc(st.tip)}"><span class="${st.breath ? 'st-breath' : ''}">●</span> ${esc(st.label)}</td>`;
 }
+/** 第1轮UI审查P2：非本人项目判定——p.user 存在且非本人、且既非 whoami 管理员也非密码登录继承管理员时，
+ *  行内操作（更新/停止/删除等）对该项目必然 E_AUTH 失败：渲染为灰色「非本人项目」标签而非无效按钮。 */
+const notMine = (p) => !!(p && p.user && state.user && p.user !== state.user && !(state.admin || state.boundAdmin));
 function rowActionsHtml(p) {
   const st = projState(p);
   const q = esc(p.project);
   const b = (act, label, extra = '') => `<button class="act" data-act="${act}" data-p="${q}"${extra}>${label}</button>`;
   const open = `<a class="act" href="${esc(externalUrl(p))}" target="_blank" rel="noopener" title="新标签打开 ${q}">打开</a>`;
+  if (notMine(p)) // 展项对外可看（保留「打开」）；管理操作仅所有者与管理员可执行
+    return `${open}<span class="not-mine" title="仅项目所有者与管理员可更新/停止/删除">非本人项目</span>`;
   if (st.act.deploy) // 待部署：部署（→发布页预填项目名）·删除；日志禁用占位（§4）
     return `${open}${b('deploy-row', '部署', ' title="到发布页预填该项目并选择镜像拉起"')}${b('logs', '日志', ' disabled')}${b('rm', '删除')}`;
   let html = open
@@ -1714,7 +1737,7 @@ function activateTab(name) {
   }
   for (const s of tabs) $(`tab-${s}`).classList.toggle('hidden', s !== name);
   if (name === 'proj') { refreshProjects(); refreshSpace(); } // TTL 内跳过（plan-17 §3）
-  if (name === 'pub') ensureImages();                       // 发布页镜像下拉数据源（TTL 300s）
+  if (name === 'pub') { ensureImages(); refreshSpace(true); } // 发布页：镜像下拉数据源（TTL 300s）+ 空间条强制校准（第1轮UI审查P1：tar 上传准入信息在本页可见）
   if (name === 'img') { ensureImages(); refreshSpace(true); } // 镜像库：清单（TTL）+ 空间条强制校准（上传准入关键信息，§14.1 进入本区即刷新）
   if (name === 'proj') { evLive.want = true; startEventsStream(); } // 展项页可见即订阅（§3）
   else stopEventsStream();                                  // 离页退订（服务端收尸 docker events 子进程）
@@ -1768,6 +1791,7 @@ async function syncAdmin() {
   state.admin = isAdmin; // §13.1/§13.2：镜像清单与 Redis 浏览据此标注「管理员视图」
   const role = $('hd-role'); if (role) role.textContent = isAdmin ? '管理员' : '发布者'; // plan-17 §1 角色徽标（whoami 未回=?）
   refreshAdminBadge(); // whoami 落定后同步顶栏角标（纯呈现）
+  if (state.projects.length) renderProjects(); // 第1轮UI审查P2：whoami 落定后重判「非本人项目」行操作显隐（列表已加载才重渲，不清加载中占位）
   if (isAdmin && imagesLoaded) ensureImages(true); // whoami 晚于首次清单加载时重取，刷新管理员视图标注
   if (isAdmin && !adminBuilt) { buildAdminTab(); adminBuilt = true; }
   else if (!isAdmin && adminBuilt) { // 权限被收回：拆除管理 DOM 并回到普通标签
@@ -2240,15 +2264,18 @@ async function onImageRm(ev) {
   btn.disabled = false;
 }
 // —— §14.1 空间条：GET /_api/space → 「可用空间（已扣预留）：X GB」（GB 一位小数）；失败静默降级 ——
+// 第1轮UI审查P1：空间条双落点——镜像库页 #space-note 与发布页 #pub-space-note（tar 上传发生在发布页，须就地可见）
 async function refreshSpace(force = false) {
   if (!force && dataFresh('space')) return; // plan-17 §3：TTL 60s
+  let txt;
   try {
     const j = await api('GET', '/_api/space');
     const freeMb = Number(j.available_mb) - Number(j.reserve_mb); // 显示口径＝可用−预留（SPEC §14.1）
     if (!Number.isFinite(freeMb)) throw new Error('bad space payload');
-    $('space-note').textContent = `可用空间（已扣预留）：${(freeMb / 1024).toFixed(1)} GB`;
+    txt = `可用空间（已扣预留）：${(freeMb / 1024).toFixed(1)} GB`;
     dataMark('space');
-  } catch { $('space-note').textContent = '空间信息不可用'; } // 静默降级：不上顶部条、不阻断上传表单
+  } catch { txt = '空间信息不可用'; } // 静默降级：不上顶部条、不阻断上传表单
+  for (const id of ['space-note', 'pub-space-note']) { const el = $(id); if (el) el.textContent = txt; }
 }
 // —— 镜像库源：选中镜像 → 自动带出项目与标签到发布表单（形如 user/project:tag；可手改） ——
 function onImagePick() {
@@ -2326,7 +2353,9 @@ function renderProjects() {
       <td class="mono">${esc(p.tag)}</td>
       <td class="mono num">${esc(fmtTime(p.updated))}</td>
       <td>${rowActionsHtml(p)}</td>
-      <td><button class="act" data-act="logs" data-p="${q}" title="展开日志抽屉" aria-expanded="false">▾</button></td>
+      <td>${notMine(p)
+        ? '<button class="act" disabled title="非本人项目：仅所有者与管理员可查看日志">▾</button>'
+        : `<button class="act" data-act="logs" data-p="${q}" title="展开日志抽屉" aria-expanded="false">▾</button>`}</td>
     </tr>`;
     }).join('');
     tb.innerHTML = acts;
@@ -2389,13 +2418,15 @@ async function onProjAction(ev) {
     return;
   }
   if (act === 'rm' && !confirm(`确认删除展项 ${project}？容器与路由即刻下线，数据库将一并删除，如需保留请先在数据页备份下载 .dump；删除后凭据一并清除，不可恢复。`)) return;
-  btn.disabled = true;
+  // 第1轮UI审查P3：启停/回滚/删除请求期间按钮就地变「…中」并禁用（busy 状态），完成后恢复
+  const ACT_BUSY_CN = { start: '启动中…', stop: '停止中…', rollback: '回滚中…', rm: '删除中…' }[act];
+  if (ACT_BUSY_CN) busy(btn, true, ACT_BUSY_CN); else btn.disabled = true;
   try {
     const j = await api('POST', `/_api/${act}`, { project });
     $('proj-fb').textContent = `已${ACT_CN[act]} ${project}${j.url ? `，访问地址 ${externalUrl({ project })}` : ''}`;
     refreshProjects(true); // 写操作强制失效（plan-17 §3）
   } catch (e) { apiFail(`${ACT_CN[act]} ${project}`, e); }
-  btn.disabled = false;
+  finally { if (ACT_BUSY_CN) busy(btn, false); else btn.disabled = false; }
 }
 
 // —— 发布（可选先走 §8.1 分片上传）——
