@@ -290,11 +290,6 @@ pub fn render_caddyfile(mw: &BTreeSet<String>, lan: &str, public: &str) -> Strin
          \t}\n\
          \t# 展项路由（showroomctl 按项目生成到 state/routes/<project>.caddy 并 reload）\n\
          \timport /srv/showroom/state/routes/*.caddy\n\
-             \t# /_bootstrap：CLI / Skill 分发（R8：移入共用片段——公网隧道用户同样可下载，公开产物无泄露面）\n\
-             \thandle_path /_bootstrap/* {\n\
-             \t\troot * /srv/showroom/_bootstrap\n\
-             \t\tfile_server\n\
-             \t}\n\
          \t# 根路径与未匹配路径一律 404（零信息暴露：不重定向、不暴露站点信息）\n\
          }\n\
          \n\
@@ -1460,7 +1455,7 @@ mod tests {
         assert!(a.contains("http://:8080, :8081 {"), "site B 双端口（8080=旧隧道遗留，8081=frpc local_port；R7：8081 曾因重渲染丢失致公网断连）");
         assert!(a.contains("precompressed zstd gzip"), "file_server precompressed 恒渲染（zstd+gzip 双格式：代理客户端常只发 gzip）");
         assert!(a.contains("import /srv/showroom/state/routes/*.caddy"));
-        assert!(a.contains("handle_path /_bootstrap/* {"));
+        assert!(!a.contains("handle_path /_bootstrap"), "R8 用户裁决：CLI/Skill 仅登录后经 /_api/tool/* 可下载——静态匿名分发不进任何面");
 
         let b = render_caddyfile(&no_reg, "lan.example", "pub.example");
         assert!(!b.contains("handle /v2/*"), "registry 缺 → 无 /v2 块");
@@ -1489,11 +1484,6 @@ mod tests {
              \t}\n\
              \t# 展项路由（showroomctl 按项目生成到 state/routes/<project>.caddy 并 reload）\n\
              \timport /srv/showroom/state/routes/*.caddy\n\
-             \t# /_bootstrap：CLI / Skill 分发（R8：移入共用片段——公网隧道用户同样可下载，公开产物无泄露面）\n\
-             \thandle_path /_bootstrap/* {\n\
-             \t\troot * /srv/showroom/_bootstrap\n\
-             \t\tfile_server\n\
-             \t}\n\
              \t# 根路径与未匹配路径一律 404（零信息暴露：不重定向、不暴露站点信息）\n\
              }\n\
              \n\
