@@ -538,7 +538,7 @@
       <label class="field" for="rd-db"><span>逻辑库（DB）<span id="rd-scope" class="badge"></span></span><select id="rd-db"></select></label>
       <label class="field" for="rd-q"><span>key 前缀过滤（回车或点「刷新」）</span>
         <input type="text" id="rd-q" class="mono" placeholder="如 sr_demo_ 或留空…"></label>
-      <button id="rd-refresh">刷新 key 列表</button>
+      <!-- 自动加载（选库/输入前缀后回车自动查询 -->
       <span class="note" id="rd-count" aria-live="polite"></span>
     </div>
     <div class="row rd-panes">
@@ -699,7 +699,7 @@
       <div class="sep"></div>
       <h2>账号与钥匙</h2>
       <div class="row">
-        <button id="ad-refresh">刷新</button>
+        <!-- 自动刷新（管理员数据源 30s 定时与事件驱动，无需手动刷新 -->
         <button id="ad-user-add">发放新账号</button>
         <span class="fb" id="ad-fb" aria-live="polite"></span>
       </div>
@@ -714,7 +714,7 @@
       <div class="sep"></div>
       <h2>平台状态</h2>
       <div class="row">
-        <button id="ad-st-refresh">立即刷新</button>
+        <!-- 自动刷新 -->
         <label class="row" for="ad-st-auto"><input type="checkbox" id="ad-st-auto">每 30 秒自动刷新</label>
         <span class="note" id="ad-st-fb" aria-live="polite"></span>
       </div>
@@ -1525,7 +1525,7 @@ function enterApp() {
   $('login').classList.add('hidden');
   if (!appBuilt) { buildApp();
   // 密钥生命周期：60s 心跳 → whoami touch 续期；E_AUTH=钥匙过期/吊销 → 自动跳回登录
-  startHeartbeat(); appBuilt = true; }
+  startHeartbeat(); startAutoRefresh(); appBuilt = true; }
   $('app').classList.remove('hidden');
   // plan-17 §3：登录即 4 路并发（projects/images/space/whoami），任一路失败不阻断其余（allSettled）
   let focusGuided = false;
@@ -1553,6 +1553,25 @@ document.addEventListener?.('visibilitychange', () => {
 });
 
 let heartbeatTimer = null;
+
+// ═══ 全局自动刷新（30s 周期）：按当前可见标签只刷新对应数据源，零手动操作 ═══
+let autoRefreshTimer = null;
+function startAutoRefresh() {
+  clearInterval(autoRefreshTimer);
+  autoRefreshTimer = setInterval(async () => {
+    if (!state.loggedIn) return;
+    const tab = document.querySelector('#tabs button[aria-selected="true"]')?.dataset?.tab || currentTab;
+    try {
+      switch (tab) {
+        case 'proj': await refreshProjects(true); break;
+        case 'img': await ensureImages(true); await refreshSpace(); break;
+        case 'data': await refreshSpace(); break;
+        case 'admin': await loadAdminUsers(); await refreshAdminStatus(); break;
+      }
+    } catch (e) { /* 静默重试下轮 */ }
+  }, 30000);
+}
+
 function startHeartbeat() {
   clearInterval(heartbeatTimer);
   heartbeatTimer = setInterval(async () => {
