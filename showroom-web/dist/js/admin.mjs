@@ -246,7 +246,7 @@ async function issueUser(body) {
 }
 async function onUserAdd() { // 主路径（plan-16 §1.5 + B7）：账号 + 打开对话框时自动生成的初始密码 → user-add {user,password}
   const user = $('ad-na-user').value.trim();
-  if (!NAME_RE.test(user)) return fieldErr('ad-na-user', `账号名「${user}」不合法（须匹配 ^[a-z0-9][a-z0-9-]{0,30}$），请修改后重试`);
+  if (!NAME_RE.test(user)) return fieldErr('ad-na-user', user === '' ? '请输入账号名' : '账号名仅限小写字母、数字与连字符，请修改后重试');
   const body = { user, password: naGenPw };
   if ($('ad-na-admin').checked) body.admin = true; // 「同时授予管理员」勾选才携带
   busy($('ad-na-submit'), true, '发放中…');

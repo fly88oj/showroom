@@ -48,7 +48,7 @@ export const state = { seed: null, pub: '', user: '', loggedIn: false, projects:
 
 // —— 发布（可选先走 §8.1 分片上传）——
 export function checkProj(project) {
-  if (!PROJ_RE.test(project) || RESERVED.has(project)) return `项目「${project}」不合法（须匹配 ^[a-zA-Z0-9][a-zA-Z0-9-]{0,30}$，保留名：${[...RESERVED].join(' ')}）`;
+  if (!PROJ_RE.test(project) || RESERVED.has(project)) return project === '' ? '请先填写项目名' : '项目名仅限字母、数字与连字符（且不得使用系统保留名），请修改后重试';
   return null;
 }
 

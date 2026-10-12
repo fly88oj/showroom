@@ -1049,7 +1049,7 @@ ok(!($s('dp-text').textContent || '').includes('分片'), 'F9：上传失败文�
   ok(($s('dp-url').textContent || '').includes('/demo/'), '镜像库源：完成大字 URL 含访问地址');
   $s('pub-project').value = 'bad_name!';
   fire($s('pub-form'), 'submit', { preventDefault() {} });
-  ok(($s('pub-project-err').textContent || '').includes('不合法'), '发布表单：项目校验为字段内联错误');
+  ok(($s('pub-project-err').textContent || '').includes('项目名仅限'), '发布表单：项目校验为字段内联错误（R5b：用户语言，无正则/保留名）');
   fire($s('pub-src-tar'), 'change');
   ok(!hidden('pub-src-file-box') && hidden('pub-src-reg-box') && !$s('btn-upload-only').disabled, '切回 tar 源：文件框恢复、仅上传可用');
   $s('pub-project').value = 'demo'; // 还原

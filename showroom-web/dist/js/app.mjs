@@ -17,7 +17,7 @@ async function onLoginSubmit(ev) {
   ev.preventDefault();
   clearErrs('lg-user', 'lg-pass');
   const user = $('lg-user').value.trim();
-  if (!NAME_RE.test(user)) return fieldErr('lg-user', `账号「${user}」不合法（须匹配 ^[a-z0-9][a-z0-9-]{0,30}$），请修改后重试`);
+  if (!NAME_RE.test(user)) return fieldErr('lg-user', user === '' ? '请输入账号' : '账号名仅限小写字母、数字与连字符，请修改后重试');
   const pass = $('lg-pass').value;
   if (!pass) return fieldErr('lg-pass', '请输入密码；忘记密码请联系管理员重置');
   busy($('lg-submit'), true, '登录中…');
