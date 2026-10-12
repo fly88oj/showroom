@@ -1758,7 +1758,8 @@ async function syncAdmin() {
     isAdmin = !!j.admin;
     clearTimeout(whoamiTimer);
   } catch (e) {
-    return; // P2：whoami 网络失败 ≠ 权限收回，保留 '?' 徽标等待重试
+    showMsg('身份查询暂时失败（网络异常或服务不可用），将在约 60 秒后自动重试；当前管理功能保持不变。', 'warn');
+    return; // P2：whoami 网络失败 ≠ 权限收回，保留现有状态等待重试
     apiFail('身份查询（whoami）', e);
     const role = $('hd-role'); if (role) role.textContent = '?'; // 徽标回落 ?
     clearTimeout(whoamiTimer);
