@@ -1236,7 +1236,7 @@ await sleep(60);
 const hsPv = hostPostBodies.find((b) => b.confirm === false);
 ok(hsPv && hsPv.host_env && hsPv.host_env.MIDDLEWARE === 'postgres redis registry',
   '查看变更：POST confirm=false（开关合成空格集合）');
-ok(hsPv && hsPv.host_env.FRP === 'running' && hsPv.host_env.CADDY === true, '查看变更：host_env 其余键全量透传（含 FRP）');
+ok(hsPv && hsPv.host_env.FRP === 'running' && hsPv.host_env.CADDY === 'yes', '查看变更：host_env 其余键全量透传（FRP 字符串透传 / CADDY bool→yes/no 字符串规范化）');
 ok(hsPv && hsPv.policy && hsPv.policy.RESERVE_MEM_MB === 2048 && hsPv.policy.REDIS_DBS === 256,
   '查看变更：policy 全量回传（改值覆写、REDIS_DBS 原样——它只走扩容流）');
 ok(!hostPostBodies.some((b) => b.confirm === true), '两段式：无 confirm 不执行（无 confirm=true 请求）');

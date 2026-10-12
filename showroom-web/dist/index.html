@@ -2050,6 +2050,12 @@ function renderHostState(j) {
 function hostPostBody(confirm) {
   const he = { ...(hostState?.host_env || {}) };
   he.MIDDLEWARE = MW_NAMES.filter((n) => $(`hs-mw-${n}`).checked).join(' ');
+  // bool 类键：服务端 AdminHostEnvBody 期待字符串（CADDY=yes/no、TUNING=sysctl/none、DEDUP=weekly/none）
+  // GET 回来的值可能已是 bool（服务端 to_json 序列化）——统一转回服务端期待的字符串
+  const toYesNo = (v, y, n) => (v === true || v === y || v === 'yes' || v === 'true') ? y : n;
+  he.CADDY = typeof he.CADDY === 'boolean' ? toYesNo(he.CADDY, 'yes', 'no') : String(he.CADDY ?? 'yes');
+  he.TUNING = typeof he.TUNING === 'boolean' ? toYesNo(he.TUNING, 'sysctl', 'none') : String(he.TUNING ?? 'sysctl');
+  he.DEDUP = typeof he.DEDUP === 'boolean' ? toYesNo(he.DEDUP, 'weekly', 'none') : String(he.DEDUP ?? 'weekly');
   const policy = { ...(hostState?.policy || {}) };
   for (const [id, key] of [['hs-p-disk', 'DISK_RESERVE_GB'], ['hs-p-mem', 'RESERVE_MEM_MB'], ['hs-p-factor', 'UPLOAD_SPACE_FACTOR']]) {
     const v = $(id).value.trim();
