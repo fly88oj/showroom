@@ -166,12 +166,13 @@ exec duperemove -d --hashfile=\"$ROOT/state/dedup.hash\" \"$ROOT\"
 pub const PRECOMPRESS_PATH: &str = "/usr/local/bin/showroom-precompress";
 pub const PRECOMPRESS_SCRIPT: &str = "\
 #!/usr/bin/env bash
-# _console 静态资源 zstd -19 预压缩（Caddy file_server precompressed 直接下发 .zst；
+# _console 静态资源 zstd+gzip 双预压缩（Caddy file_server precompressed 直接下发；代理链路 Accept-Encoding 常被收敛为 gzip）
 # 递归覆盖 css/ js/ 等子目录——控制台拆分 ES Modules 后静态面是多文件树）
 set -euo pipefail
 DIR=\"${1:-${SHOWROOM_ROOT:-/srv/showroom}/_console}\"
 cd \"$DIR\"
-find . -type f ! -name '*.zst' -print0 | xargs -0 -r zstd -19 -k -q -f
+find . -type f ! -name '*.zst' ! -name '*.gz' -print0 | xargs -0 -r zstd -19 -k -q -f
+find . -type f ! -name '*.zst' ! -name '*.gz' -print0 | xargs -0 -r gzip -9 -k -f
 ";
 
 /// frpc 下载源（ChmlFrp linux/amd64；URL 可能回 HTML 壳——FrpcFetch 执行时 file 校验 ELF，
@@ -284,7 +285,7 @@ pub fn render_caddyfile(mw: &BTreeSet<String>, lan: &str, public: &str) -> Strin
          \thandle_path /_console/* {\n\
          \t\troot * /srv/showroom/_console\n\
          \t\tfile_server {\n\
-         \t\t\tprecompressed zstd\n\
+         \t\t\tprecompressed zstd gzip\n\
          \t\t}\n\
          \t}\n\
          \t# 展项路由（showroomctl 按项目生成到 state/routes/<project>.caddy 并 reload）\n\
@@ -315,7 +316,7 @@ pub fn render_caddyfile(mw: &BTreeSet<String>, lan: &str, public: &str) -> Strin
         s.push_str(
             "\n# ————— site B：公网面（frp 等公网隧道流量命中的站点）—————\n\
              # 公网发布走加密 import 通道，不放 /v2；/_bootstrap 返回 404。\n\
-             http://:8080 {\n\
+             http://:8080, :8081 {\n\
              \timport showroom-app\n\
              }\n",
         );
@@ -1458,15 +1459,15 @@ mod tests {
         assert!(a.contains("http://lan.example {"));
         assert!(a.contains("handle /v2/* {"), "registry 在集合 → site A 有 /v2");
         assert!(a.contains("reverse_proxy 127.0.0.1:5000"));
-        assert!(a.contains("http://:8080 {"), "PUBLIC_HOST 非空 → site B 纯端口匹配");
-        assert!(a.contains("precompressed zstd"), "file_server precompressed 恒渲染");
+        assert!(a.contains("http://:8080, :8081 {"), "site B 双端口（8080=旧隧道遗留，8081=frpc local_port；R7：8081 曾因重渲染丢失致公网断连）");
+        assert!(a.contains("precompressed zstd gzip"), "file_server precompressed 恒渲染（zstd+gzip 双格式：代理客户端常只发 gzip）");
         assert!(a.contains("import /srv/showroom/state/routes/*.caddy"));
         assert!(a.contains("handle_path /_bootstrap/* {"));
 
         let b = render_caddyfile(&no_reg, "lan.example", "pub.example");
         assert!(!b.contains("handle /v2/*"), "registry 缺 → 无 /v2 块");
         assert!(!b.contains("127.0.0.1:5000"), "registry 缺 → 不反代 registry");
-        assert!(b.contains("http://:8080 {"));
+        assert!(b.contains("http://:8080, :8081 {"));
 
         let c = render_caddyfile(&full, "lan.example", "");
         assert!(!c.contains("site B"), "PUBLIC_HOST 空 → 不渲染 site B");
@@ -1485,7 +1486,7 @@ mod tests {
              \thandle_path /_console/* {\n\
              \t\troot * /srv/showroom/_console\n\
              \t\tfile_server {\n\
-             \t\t\tprecompressed zstd\n\
+             \t\t\tprecompressed zstd gzip\n\
              \t\t}\n\
              \t}\n\
              \t# 展项路由（showroomctl 按项目生成到 state/routes/<project>.caddy 并 reload）\n\
@@ -1509,7 +1510,7 @@ mod tests {
              \n\
              # ————— site B：公网面（frp 等公网隧道流量命中的站点）—————\n\
              # 公网发布走加密 import 通道，不放 /v2；/_bootstrap 返回 404。\n\
-             http://:8080 {\n\
+             http://:8080, :8081 {\n\
              \timport showroom-app\n\
              }\n"
         );
