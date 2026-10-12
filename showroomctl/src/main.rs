@@ -167,7 +167,7 @@ enum MiddlewareCmd {
 
 #[derive(Subcommand)]
 enum AdminCmd {
-    /// 账号 / 钥匙（kid+admin+登记时间）/ 项目数清单
+    /// 账号 / 钥匙（kid+登记时间）/ 项目数清单（admin 为账号级）
     Users,
     /// 服务 / 磁盘 / 内存 / 容器 / timers 状态面板（GET /_api/admin/status 同源）
     Status,

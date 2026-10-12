@@ -413,13 +413,29 @@ async fn dispatch(
             blk(move || ops::user_set_admin(&root, &req.user, req.admin)).await?;
             Ok(Json(json!({"ok": true})))
         }
-        // 兼容垫片：旧 key-admin 路由（web 批次同步后移除）——kid 忽略，语义即 user-admin
-        ("POST", "/_api/admin/key-admin", Collected::Mem(b)) => {
+        // R5 D2：旧 key-admin 兼容垫片路由已移除（web 已同步走 user-admin；admin 恒为账号级）
+
+        // R5 E2：全部项目（管理页「全部项目」面板）——admin_guard + ops::ps 全量，
+        // 每行附 owner=user（to_json 自带）；/_api/projects 仍只回本人（32c3484 裁决不回退）
+        ("GET", "/_api/admin/projects", _) => {
             admin_guard(s, &user, &kid)?;
-            let req: AdminUserAdminReq = jbody(b)?;
             let root = s.root.clone();
-            blk(move || ops::user_set_admin(&root, &req.user, req.admin)).await?;
-            Ok(Json(json!({"ok": true})))
+            let v = blk(move || {
+                let disabled = middleware::disabled_middleware(&root);
+                let v: Vec<_> = ops::ps(&root)
+                    .into_iter()
+                    .map(|(p, c, st)| {
+                        let mut row = c.to_json(&p, &st);
+                        if !disabled.is_empty() {
+                            row["middleware_disabled"] = json!(disabled);
+                        }
+                        row
+                    })
+                    .collect();
+                Ok(Json(json!({"projects": v})))
+            })
+            .await?;
+            Ok(v)
         }
 
         ("GET", "/_api/admin/status", _) => {
@@ -2101,6 +2117,66 @@ mod tests {
         assert_eq!(c, 400);
         assert!(b.starts_with(br#"{"error":"E_NAME""#));
         assert!(String::from_utf8_lossy(&b).contains("gen_password"), "E_NAME 须带新示例指引");
+        let _ = std::fs::remove_dir_all(&s.root);
+    }
+
+    // R5 E2：GET /_api/admin/projects——admin_guard 拦非管理员（404 与 E_AUTH 逐字节一致）；
+    // 管理员得跨用户全量（每行附 owner=user）；/_api/projects 仍只回本人（32c3484 裁决不回退）。
+    // R5 D2：key-admin 兼容垫片路由已移除——任何签名者均 404 E_AUTH 同体。
+    #[tokio::test]
+    async fn admin_projects_endpoint_and_key_admin_shim_removed() {
+        let root = troot("admp");
+        // 两个账号各一个项目（conf 层；docker 实况不可用时 status 回落 missing，不影响断言）
+        for (p, user) in [("demo1", "alice"), ("demo2", "bob")] {
+            let c = crate::state::Conf {
+                user: user.into(), tag: "v1".into(), port: 8100, cport: 8080,
+                mem: "256m".into(), cpu: 1.0, redisdb: 0, updated: 1,
+                stopped: false, legacyslot: None,
+            };
+            c.save(&root, p).unwrap();
+        }
+        let admin_key = showroom_common::UserKey::generate();
+        crate::ops::user_add(&root, "root", true, crate::ops::InitPw::Gen).unwrap();
+        crate::ops::key_bind(&root, "root", &admin_key.pub_string()).unwrap();
+        let plain_key = showroom_common::UserKey::generate();
+        crate::ops::user_add(&root, "alice", false, crate::ops::InitPw::Gen).unwrap();
+        crate::ops::key_bind(&root, "alice", &plain_key.pub_string()).unwrap();
+        let s: S = Arc::new(test_state(root.clone()));
+
+        // 非管理员 → 404 E_AUTH 同体（不泄露端点存在）
+        let (c, b) = call(&s, "GET", "/_api/admin/projects", b"",
+            &[("Authorization", authz("alice", &plain_key, "GET", "/_api/admin/projects", b"").as_str())]).await;
+        assert_eq!((c, b.as_slice()), (404, E_AUTH_BODY));
+
+        // 管理员 → 跨用户全量，每行附 owner=user
+        let (c, b) = call(&s, "GET", "/_api/admin/projects", b"",
+            &[("Authorization", authz("root", &admin_key, "GET", "/_api/admin/projects", b"").as_str())]).await;
+        assert_eq!(c, 200, "{}", String::from_utf8_lossy(&b));
+        let v: Value = serde_json::from_slice(&b).unwrap();
+        let projects = v["projects"].as_array().unwrap();
+        assert_eq!(projects.len(), 2, "{projects:?}");
+        assert!(projects.iter().any(|p| p["project"] == "demo1" && p["user"] == "alice"), "owner=user 附行");
+        assert!(projects.iter().any(|p| p["project"] == "demo2" && p["user"] == "bob"), "跨账号全量");
+
+        // /_api/projects 仍只回本人（alice 只见 demo1）
+        let (c, b) = call(&s, "GET", "/_api/projects", b"",
+            &[("Authorization", authz("alice", &plain_key, "GET", "/_api/projects", b"").as_str())]).await;
+        assert_eq!(c, 200);
+        let v: Value = serde_json::from_slice(&b).unwrap();
+        let own: Vec<&str> = v["projects"].as_array().unwrap().iter().map(|p| p["project"].as_str().unwrap()).collect();
+        assert_eq!(own, ["demo1"]);
+
+        // key-admin 垫片已移除：管理员携带合法签名也落入通用未知端点分支（404 E_NOTFOUND 同体，
+        // 与任意不存在路径不可区分——不再有 key-admin 专属行为）
+        let b4 = br#"{"user":"bob","kid":"deadbeef","admin":true}"#;
+        let (c, b) = call(&s, "POST", "/_api/admin/key-admin", b4,
+            &[("Authorization", authz("root", &admin_key, "POST", "/_api/admin/key-admin", b4).as_str())]).await;
+        assert_eq!(c, 404);
+        let v: Value = serde_json::from_slice(&b).unwrap();
+        assert_eq!(v["error"], "E_NOTFOUND", "垫片路由不复活（一律走 user-admin）");
+        let (c2, b2) = call(&s, "POST", "/_api/admin/no-such-endpoint", b"",
+            &[("Authorization", authz("root", &admin_key, "POST", "/_api/admin/no-such-endpoint", b"").as_str())]).await;
+        assert_eq!((c2, b2.as_slice()), (c, b.as_slice()), "与任意未知端点逐字节一致（零专属信息）");
         let _ = std::fs::remove_dir_all(&s.root);
     }
 

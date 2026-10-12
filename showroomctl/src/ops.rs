@@ -700,11 +700,10 @@ pub fn user_set_admin(root: &Path, user: &str, admin: bool) -> R<()> {
 }
 
 /// user_list 一行：账号（admin 账号级）/ 钥匙（kid+绑定时间=.pub mtime）/ 项目数。
+/// R5 D2：钥匙级 admin 字段已随 web 批次同步移除（admin 恒为账号级，见 UserInfo.admin）。
 #[derive(serde::Serialize)]
 pub struct UserKeyInfo {
     pub kid: String,
-    #[serde(skip_serializing_if = "std::ops::Not::not")]
-    pub admin: bool, // 兼容垫片：账号级值回填；web 批次同步后随字段一并移除
     pub since: u64,
 }
 
@@ -750,11 +749,9 @@ pub fn user_list(root: &Path) -> Vec<UserInfo> {
         .into_iter()
         .map(|user| {
             state::sweep_stale_keys(root, &user); // 管理页每次查看即清扫（过期僵尸/旧机制存量/孤儿标记）
-            let admin = state::user_is_admin(root, &user);
             let keys = state::user_keys_with_kid(root, &user)
                 .into_iter()
                 .map(|(kid, _)| UserKeyInfo {
-                    admin, // 兼容垫片：旧 web 读 keys[].admin 渲染；R4 真相在 users[].admin
                     since: state::file_mtime(&state::tokens_dir(root, &user).join(format!("{kid}.pub"))),
                     kid,
                 })
@@ -1138,7 +1135,7 @@ mod tests {
         assert_eq!(user_key_rm(&root, "Bad", &plain).unwrap_err().code, "E_NAME");
     }
 
-    // user_list 聚合：账号/钥匙（kid+admin+since）/项目数；无钥匙账号也列出；字典序
+    // user_list 聚合：账号（admin 账号级）/钥匙（kid+since）/项目数；无钥匙账号也列出；字典序
     #[test]
     fn user_list_aggregation() {
         let root = troot("list");
