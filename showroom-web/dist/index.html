@@ -20,7 +20,7 @@
   <!-- 主路径：一步登录（OPAQUE → 进入控制台，plan-16 §2.2 报文序列） -->
   <form id="lg-form" class="mt-3">
     <label class="field" for="lg-user"><span>账号（发布者账号）</span>
-      <input type="text" id="lg-user" placeholder="如 alice…" size="14" pattern="[a-z0-9][a-z0-9\-]{0,30}" autocomplete="username" aria-describedby="lg-user-err"></label>
+      <input type="text" id="lg-user" placeholder="如 alice…" size="14" autocomplete="username" aria-describedby="lg-user-err"></label>
     <p class="ferr" id="lg-user-err" aria-live="polite"></p>
     <label class="field mt-2" for="lg-pass"><span>密码（非 docker push 用的镜像库密码）</span>
       <input type="password" id="lg-pass" placeholder="输入账号密码…" size="14" autocomplete="current-password" aria-describedby="lg-pass-err"></label>
@@ -43,7 +43,7 @@
         <span class="user-badge"><span class="mono" id="hd-user"></span><span class="admin-mark hidden" id="hd-admin" title="管理员账号">管</span></span>
       </div>
       <div class="chrome-actions">
-        <button id="btn-settings" title="设置">设置</button>
+        <button id="btn-settings">设置</button>
         <button id="btn-logout">退出登录</button>
       </div>
     </div>
@@ -102,9 +102,9 @@
     <h2>发布</h2>
     <form id="pub-form">
       <div class="grid">
-        <label class="field" for="pub-project"><span>项目<span class="q" title="留空自动生成随机 8 位名；也可手输或从已有项目选择">&#63;</span></span>
+        <label class="field" for="pub-project"><span>项目<span class="q" title="可随意修改，或从已有项目选择；清空后发布将自动生成随机名">&#63;</span></span>
           <span class="row combo">
-            <input type="text" id="pub-project" size="12" pattern="[a-zA-Z0-9][a-zA-Z0-9-]{0,30}" aria-describedby="pub-project-err">
+            <input type="text" id="pub-project" size="12" aria-describedby="pub-project-err">
           </span></label>
       </div>
       <!-- 视觉QA P1-3：镜像源 radio 与其余字段同列栅格（原独立成行脱离列轴，左移 90px） -->
@@ -215,7 +215,7 @@
     <h2>目标项目</h2>
     <div class="grid">
       <label class="field grow" for="db-project"><span>项目</span>
-        <input type="text" id="db-project" required size="12" pattern="[a-zA-Z0-9][a-zA-Z0-9-]{0,30}"></label>
+        <input type="text" id="db-project" required size="12"></label>
     </div>
     <p class="note">只能操作本人名下项目对应的数据库。</p>
 
@@ -543,7 +543,7 @@
         <button type="button" id="ad-na-close">关闭</button>
       </div>
       <label class="field" for="ad-na-user"><span>账号名（<span class="mono">^[a-z0-9][a-z0-9-]{0,30}$</span>）</span>
-        <input type="text" id="ad-na-user" size="14" pattern="[a-z0-9][a-z0-9\-]{0,30}" aria-describedby="ad-na-user-err"></label>
+        <input type="text" id="ad-na-user" size="14" aria-describedby="ad-na-user-err"></label>
       <p class="ferr" id="ad-na-user-err" aria-live="polite"></p>
       <div class="row">
         <span class="fb" id="ad-na-fb" aria-live="polite"></span>
