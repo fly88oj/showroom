@@ -416,7 +416,7 @@
         </span>
         <label class="field" for="pub-tag"><span>镜像标签（必填；选镜像后自动带出）</span>
           <input type="text" id="pub-tag" required size="10" aria-describedby="pub-tag-err"></label>
-        <label class="field" for="pub-mem"><span>内存需求</span>
+        <label class="field" for="pub-mem"><span>内存需求（MiB）</span>
           <input type="text" id="pub-mem" value="256" list="dl-mem" size="6" placeholder="单位 MiB，如 256…"></label>
         <label class="field" for="pub-cport"><span>演示服务端口（容器内）</span>
           <input type="number" id="pub-cport" value="8080" min="1" max="65535" size="5"></label>
@@ -631,7 +631,7 @@
 
     <h2>镜像规范</h2>
     <ul class="note help-list">
-      <li>Demo 服务须监听容器内 <span class="mono">8080</span> 端口（其他端口在发布表单的端口字段如实填写）。</li>
+      <li>演示服务须监听容器内 <span class="mono">8080</span> 端口（其他端口在发布表单的端口字段如实填写）。</li>
       <li>展项经子路径对外发布：访问地址恒为 <span class="mono">/&lt;project&gt;/</span>，读 <span class="mono">SHOWROOM_BASE_PATH</span>（值即该前缀）适配，或页面内一律使用相对 URL。</li>
       <li>建议在 Dockerfile 里配置 <span class="mono">HEALTHCHECK</span>，平台据此判定健康并自愈。</li>
       <li>镜像内配置文件替换推荐 <span class="mono">envsubst &lt; config.tpl &gt; config</span> 模式（占位符由注入的环境变量填充）。</li>
@@ -760,7 +760,7 @@
       </div>
       <div class="tbl-wrap">
         <table id="ad-users-tbl">
-          <thead><tr><th>钥匙 kid</th><th>管理员</th><th>登记时间</th><th>操作</th></tr></thead>
+          <thead><tr><th>钥匙 kid</th><th>管理员</th><th>绑定时间</th><th>操作</th></tr></thead>
           <tbody><tr><td colspan="4" class="note">正在加载…</td></tr></tbody>
         </table>
       </div>
@@ -1894,7 +1894,7 @@ function wireAdminTab() {
   $('hs-rx-run').addEventListener('click', onRedisXRun);
   $('hs-rx-n').addEventListener('input', () => fieldErr('hs-rx-n', ''));
 }
-async function loadAdminUsers() { // 账号与钥匙表（§12.2：账号/钥匙 kid/管理员/登记时间/项目数）
+async function loadAdminUsers() { // 账号与钥匙表（§12.2：账号/钥匙 kid/管理员/绑定时间/项目数；since=服务端 .pub mtime）
   const tb = $('ad-users-tbl').querySelector('tbody');
   tb.innerHTML = '<tr><td colspan="4" class="note">加载中…</td></tr>';
   try {
@@ -1914,7 +1914,7 @@ async function loadAdminUsers() { // 账号与钥匙表（§12.2：账号/钥匙
         </td></tr>` + (keys.map((k) => `<tr>
           <td class="mono wrap">${esc(k.kid)}</td>
           <td>${k.admin ? '<span class="status-ok">管理员</span>' : '<span class="note">普通</span>'}</td>
-          <td class="mono">${esc(k.created || '—')}</td>
+          <td class="mono">${esc(fmtTime(k.since))}</td>
           <td>${k.admin
             ? `<button class="act" data-act="unadmin" data-user="${esc(o.user)}" data-kid="${esc(k.kid)}">取消管理员</button>`
             : `<button class="act" data-act="admin" data-user="${esc(o.user)}" data-kid="${esc(k.kid)}">设为管理员</button>`}

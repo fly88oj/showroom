@@ -319,9 +319,9 @@ const HOST_STATE = { // 方案 §4 契约形状 + 协调者补充的 FRP 键（�
 let hostResp = HOST_STATE; // 可替换（池两态/扩容后收敛）
 const ADM_USERS = { users: [
   { user: 'alice', projects: 2, has_password: true, keys: [
-    { kid: 'kid-a1', admin: true, created: '2026-09-01T10:00:00' },
-    { kid: 'kid-a2', admin: false, created: '2026-09-02T11:00:00' } ] },
-  { user: 'bob', projects: 0, has_password: false, keys: [ { kid: 'kid-b1', admin: false, created: '2026-10-01T09:00:00' } ] },
+    { kid: 'kid-a1', admin: true, since: 1788228000 },
+    { kid: 'kid-a2', admin: false, since: 1788318000 } ] },
+  { user: 'bob', projects: 0, has_password: false, keys: [ { kid: 'kid-b1', admin: false, since: 1790816400 } ] },
 ] };
 const ADM_STATUS = {
   services: { 'showroom-caddy': 'active', 'showroom-registry': 'active', 'showroom-postgres': 'active', 'showroom-redis': 'inactive' },
@@ -1081,7 +1081,7 @@ ok(adminUsersN === 1 && adminStatusN === 1, '进入管理页：users 与 status 
 const otbl = $s('ad-users-tbl:q').innerHTML || '';
 ok(otbl.includes('alice') && otbl.includes('kid-a1') && otbl.includes('kid-b1'), '账号与钥匙表：账号 + 钥匙 kid 渲染');
 ok(otbl.includes('管理员') && otbl.includes('普通'), '管理员标记两态渲染');
-ok(otbl.includes('2026-09-01') && otbl.includes('项目数 2'), '登记时间与项目数展示');
+ok(otbl.includes('2026/09/01') && otbl.includes('项目数 2'), '绑定时间与项目数展示');
 ok(otbl.includes('吊销整个账号') && otbl.includes('删除钥匙') && otbl.includes('设为管理员') && otbl.includes('取消管理员'),
   '行内/顶部管理动作按钮渲染');
 const stHtml = $s('ad-status').innerHTML || '';
