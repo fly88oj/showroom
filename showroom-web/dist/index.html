@@ -729,11 +729,11 @@
         <label class="field" for="hs-p-redisdbs"><span>REDIS_DBS（Redis 逻辑库池上限 · 只读，修改走「扩容」流：需重启实例）</span>
           <input type="number" id="hs-p-redisdbs" readonly class="mono"></label>
         <label class="field" for="hs-p-disk"><span>DISK_RESERVE_GB（磁盘预留）</span>
-          <input type="number" id="hs-p-disk" min="0" step="1" class="mono"></label>
+          <input type="number" id="hs-p-disk" readonly min="0" step="1" class="mono"></label>
         <label class="field" for="hs-p-mem"><span>RESERVE_MEM_MB（内存预留）</span>
-          <input type="number" id="hs-p-mem" min="0" step="1" class="mono"></label>
+          <input type="number" id="hs-p-mem" readonly min="0" step="1" class="mono"></label>
         <label class="field" for="hs-p-factor"><span>UPLOAD_SPACE_FACTOR（上传空间估算膨胀因子）</span>
-          <input type="number" id="hs-p-factor" min="1" step="0.1" class="mono"></label>
+          <input type="number" id="hs-p-factor" readonly min="1" step="0.1" class="mono"></label>
       </div>
 
       <h3>漂移清单与 Redis 池</h3>
@@ -1758,6 +1758,7 @@ async function syncAdmin() {
     isAdmin = !!j.admin;
     clearTimeout(whoamiTimer);
   } catch (e) {
+    return; // P2：whoami 网络失败 ≠ 权限收回，保留 '?' 徽标等待重试
     apiFail('身份查询（whoami）', e);
     const role = $('hd-role'); if (role) role.textContent = '?'; // 徽标回落 ?
     clearTimeout(whoamiTimer);
@@ -2049,6 +2050,7 @@ function renderHostState(j) {
 /** 组装 POST /_api/admin/host 提交体：host_env 全量回传（MIDDLEWARE 由开关合成空格集合，其余键含 FRP 原样透传）+ policy 全量回传（三个可编辑参数覆写；REDIS_DBS 只读不走此处）。 */
 function hostPostBody(confirm) {
   const he = { ...(hostState?.host_env || {}) };
+  delete he.FRP_TOKEN; // P1：GET 回来是打码值 <set>，回传会覆盖真实凭据——剔除不发
   he.MIDDLEWARE = MW_NAMES.filter((n) => $(`hs-mw-${n}`).checked).join(' ');
   // bool 类键：服务端 AdminHostEnvBody 期待字符串（CADDY=yes/no、TUNING=sysctl/none、DEDUP=weekly/none）
   // GET 回来的值可能已是 bool（服务端 to_json 序列化）——统一转回服务端期待的字符串

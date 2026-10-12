@@ -501,6 +501,7 @@ async fn dispatch(
             Collected::Mem(b),
         ) => {
             let req: ProjectReq = jbody(b)?;
+            state::check_name("project", &req.project)?;
             user_check(&s.root, &req.project, &user)?;
             let act: &'static str = match path {
                 "/_api/stop" => "stop",
@@ -1171,7 +1172,7 @@ fn admin_host_post(root: &Path, body: &[u8]) -> R<serde_json::Value> {
         host.frp = middleware::FrpMode::parse(f)?;
     }
     if let Some(t) = &b.frp_token {
-        host.frp_token = t.clone();
+        if t != "<set>" && !t.is_empty() { host.frp_token = t.clone(); } // P1："<set>"=GET 打码值回传，跳过
     }
     if let Some(t) = &b.frp_tunnel {
         host.frp_tunnel = t.clone();
