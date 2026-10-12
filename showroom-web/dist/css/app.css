@@ -214,6 +214,7 @@
   .pub { color: var(--ok); word-break: break-all; font-size: 16px; letter-spacing: .4px; user-select: all; }
   /* 行内反馈（操作后就近显示，错误另走顶部条） */
   .fb { font-size: 12px; color: var(--ok-fg); min-height: 1.2em; margin: var(--sp-1) 0 0; }
+  .fb:empty, .ferr:empty { display: none; } /* R5b：空反馈不占布局——flex-end 栅格下空 .fb 会把所在字段整体抬高（库源模式「镜像」错位根因） */
   .fb.warn { color: var(--warn); }
   .sep { border-top: 1px dashed var(--bd); margin: var(--sp-6) 0 var(--sp-3); } /* C8：数据页区块间 ≥24px（与 .fs 的 28px 上距同层级；标题仍紧贴内容） */
   dl.help dt { color: var(--fg-head); font-weight: 600; margin-top: var(--sp-2); }
