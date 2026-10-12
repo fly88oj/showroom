@@ -65,7 +65,7 @@
       <h2 id="dlg-settings-title">设置</h2>
       <button type="button" id="dlg-settings-close">关闭</button>
     </div>
-    <label class="field" for="set-base"><span>对外访问域名<span class="q" title="项目列表与完成页主链接用它拼接；留空用当前访问地址">?</span></span>
+    <label class="field" for="set-base"><span>对外访问域名<span class="q" title="项目列表与完成页主链接用它拼接；留空用当前访问地址">&#63;</span></span>
       <input type="text" id="set-base" class="mono" placeholder="http://…:…"></label>
     <p class="ferr" id="set-base-err" aria-live="polite"></p>
     <label class="field mt-3" for="hd-pempub"><span>平台公钥 PEM（管理员分发的 <span class="mono">platform_rsa.pub</span>；镜像上传与数据库恢复的加密信封公钥。登录后通常已自动配置，无需粘贴，此处仅兜底）</span>
@@ -102,7 +102,7 @@
     <h2>发布新版本</h2>
     <form id="pub-form">
       <div class="grid">
-        <label class="field" for="pub-project"><span>项目<span class="q" title="留空自动生成随机 8 位名；也可手输或从已有项目选择">?</span></span>
+        <label class="field" for="pub-project"><span>项目<span class="q" title="留空自动生成随机 8 位名；也可手输或从已有项目选择">&#63;</span></span>
           <span class="row combo">
             <input type="text" id="pub-project" list="dl-projects" size="12" pattern="[a-zA-Z0-9][a-zA-Z0-9-]{0,30}" aria-describedby="pub-project-err">
           </span></label>
@@ -116,7 +116,7 @@
           </span>
         </div>
         <span class="field" id="pub-src-file-box">
-          <span>镜像 tar 文件<span class="q" title="不选则直接发布，要求镜像已入镜像库；选择后自动压缩并上传再发布">?</span></span>
+          <span>镜像 tar 文件<span class="q" title="不选则直接发布，要求镜像已入镜像库；选择后自动压缩并上传再发布">&#63;</span></span>
           <span class="row combo">
             <input type="file" id="pub-file" class="file-hidden" aria-describedby="pub-file-err">
             <label for="pub-file" class="file-btn">选择文件</label>
@@ -124,11 +124,11 @@
           </span>
         </span>
         <span class="field hidden" id="pub-src-reg-box">
-          <label class="field" for="dep-image"><span>镜像<span class="q" title="从已上传的镜像中选择：输入前缀过滤，自动加载">?</span></span>
+          <label class="field" for="dep-image"><span>镜像<span class="q" title="从已上传的镜像中选择：输入前缀过滤，自动加载">&#63;</span></span>
             <input type="text" id="dep-image" list="dl-images" size="34" class="mono" placeholder="输入前缀过滤，如 alice/demo:…" aria-describedby="dep-image-err"></label>
           <span class="fb" id="dep-images-fb" aria-live="polite"></span>
         </span>
-        <label class="field" for="pub-tag"><span>镜像标签<span class="q" title="必填；选镜像后自动带出">?</span></span>
+        <label class="field" for="pub-tag"><span>镜像标签<span class="q" title="必填；选镜像后自动带出">&#63;</span></span>
           <input type="text" id="pub-tag" required size="10" aria-describedby="pub-tag-err"></label>
         <label class="field" for="pub-mem"><span>内存需求（MiB）</span>
           <input type="text" id="pub-mem" value="256" list="dl-mem" size="6" placeholder="单位 MiB，如 256…"></label>
@@ -494,13 +494,13 @@
 
         <h3>参数值（policy.env）</h3>
         <div class="grid">
-          <label class="field" for="hs-p-redisdbs"><span>REDIS_DBS<span class="q" title="Redis 逻辑库池上限 · 只读，修改走「扩容」流">?</span></span>
+          <label class="field" for="hs-p-redisdbs"><span>REDIS_DBS<span class="q" title="Redis 逻辑库池上限 · 只读，修改走「扩容」流">&#63;</span></span>
             <input type="number" id="hs-p-redisdbs" readonly class="mono"></label>
-          <label class="field" for="hs-p-disk"><span>DISK_RESERVE_GB<span class="q" title="磁盘预留">?</span></span>
+          <label class="field" for="hs-p-disk"><span>DISK_RESERVE_GB<span class="q" title="磁盘预留">&#63;</span></span>
             <input type="number" id="hs-p-disk" readonly min="0" step="1" class="mono"></label>
           <label class="field" for="hs-p-mem"><span>RESERVE_MEM_MB（内存预留）</span>
             <input type="number" id="hs-p-mem" readonly min="0" step="1" class="mono"></label>
-          <label class="field" for="hs-p-factor"><span>UPLOAD_SPACE_FACTOR<span class="q" title="上传空间估算膨胀因子">?</span></span>
+          <label class="field" for="hs-p-factor"><span>UPLOAD_SPACE_FACTOR<span class="q" title="上传空间估算膨胀因子">&#63;</span></span>
             <input type="number" id="hs-p-factor" readonly min="1" step="0.1" class="mono"></label>
         </div>
 
@@ -555,7 +555,7 @@
       <div class="row">
         <span class="fb" id="ad-na-fb" aria-live="polite"></span>
       </div>
-      <label class="row mt-3" for="ad-na-admin"><input type="checkbox" id="ad-na-admin"><span>同时授予管理员<span class="q" title="可管理账号与平台状态">?</span></span></label>
+      <label class="row mt-3" for="ad-na-admin"><input type="checkbox" id="ad-na-admin"><span>同时授予管理员<span class="q" title="可管理账号与平台状态">&#63;</span></span></label>
       <div class="row">
         <button type="button" id="ad-na-submit">发放</button>
       </div>
