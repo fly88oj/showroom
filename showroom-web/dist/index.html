@@ -235,17 +235,16 @@
 
     <div class="sep"></div>
     <h2>SQL 编辑器</h2>
-    <label class="field" for="db-sql"><span>SQL 语句（多行；服务端直接执行，语句失败即停止）</span>
+    <label class="field" for="db-sql"><span>SQL 语句</span>
       <textarea id="db-sql" class="mono" spellcheck="false" placeholder="SELECT * FROM …"></textarea></label>
     <div class="row"><button id="btn-db-sql">执行 SQL</button></div>
 
     <div class="sep"></div>
     <h2>备份与恢复</h2>
-    <p class="note">备份内容用下载专用密码加密，服务器无法解密。</p>
     <div class="grid">
       <button id="btn-db-dump">备份下载（自动生成下载专用密码）</button>
       <span class="field" id="db-restore-box">
-        <span>恢复用的 .dump 文件（备份下载的产物）</span>
+        <span>恢复文件</span>
         <span class="row combo">
           <input type="file" id="db-restore-file" accept=".dump" class="file-hidden">
           <label for="db-restore-file" class="file-btn">选择文件</label>
@@ -257,7 +256,7 @@
     </div>
     <div class="mt-2">
       <progress id="db-prog" max="1" value="0"></progress>
-      <div id="db-prog-txt" class="note" aria-live="polite">（备份进度：等待发起）</div>
+      <div id="db-prog-txt" class="note" aria-live="polite"></div>
     </div>
     <h3>操作输出</h3>
     <pre class="out mono" id="db-out" aria-live="polite">（尚无输出）</pre>
@@ -282,7 +281,7 @@
         </select>
       </div>
       <div class="field rd-val-pane">
-        <span id="rd-meta" aria-live="polite">（点击左侧键查看类型 / 剩余生存时间 / 值）</span>
+        <span id="rd-meta" aria-live="polite">值</span>
         <pre class="out mono" id="rd-val" aria-live="polite">（未选择键）</pre>
       </div>
     </div>

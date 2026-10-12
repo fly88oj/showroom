@@ -1766,8 +1766,8 @@ ok(!html.includes('镜像分片上传') && html.includes('<h3>断点续传</h3>'
   'R5 C6：镜像库两折叠整删 + h3 更名「断点续传」');
 ok(!html.includes('非本人项目') && !html.includes('not-mine'), 'R5：他人项目分支零残留（/_api/projects 只回本人）');
 ok(!html.includes('高级说明'), 'R5 C5：发布页「高级说明」三条整删');
-ok(!html.includes('机制说明') && html.includes('服务器无法解密') && html.includes('<h2>备份与恢复</h2>') && html.includes('<h3>操作输出</h3>'),
-  'R5 C7：备份机制折叠删（保留一句服务器无法解密）+ 两处标题收敛');
+ok(!html.includes('机制说明') && !html.includes('服务器无法解密') && html.includes('<h2>备份与恢复</h2>') && html.includes('<h3>操作输出</h3>'),
+  'R5 C7+R9：机制折叠与信任声明全删（安全语义按钮括注自足）+ 两处标题收敛');
 ok(!html.includes('会先弹出确认框'), 'R5 C7：SQL 区危险语句预讲删除（运行时 confirm 已表达）');
 ok(!html.includes('仅展示对外可见信息'), 'R5 A4：项目表底部说明段整删');
 ok(html.includes('密码（非 docker push 用的镜像库密码）') && !html.includes('保管于浏览器 localStorage'),
@@ -1796,8 +1796,8 @@ ok(html.includes("if (name === 'proj' || name === 'admin') { evLive.want = true;
 ok(html.includes('自动压缩并上传再发布') && html.includes('自动压缩 → 上传 → 发布')
   && !html.includes('自动压缩并分片上传') && !html.includes('分片上传 → 发布'),
   'F5：发布页「分片」两处清除（文件说明 + 发布说明步骤）');
-ok(html.includes('备份内容用下载专用密码加密') && html.includes('自动生成下载专用密码') && !html.includes('一次性密钥'),
-  'F6：数据页备份「一次性密钥」→「下载专用密码」（两处，词族零残留）');
+ok(html.includes('自动生成下载专用密码') && !html.includes('一次性密钥') && !html.includes('备份内容用'),
+  'F6+R9：按钮括注保留「下载专用密码」；信任声明句整删（词族零残留）');
 ok(!html.includes('主机变更已执行') && !html.includes('逻辑库池已扩容到'),
   'F7：宿主执行/扩容单通道（顶部条播报删除，面板 fb 唯一）');
 ok(html.includes('正在准备下载…') && html.includes('下载中：${offset}') && html.includes('压缩中 ${done} / ${raw} 字节…')
