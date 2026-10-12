@@ -827,7 +827,11 @@ pub fn sweep_stale_keys(root: &Path, user: &str) -> usize {
         );
         if has_pub && has_bound {
             bound_key_alive(root, user, &kid); // 过期即吊销（内部删 .pub + .bound）
-            if !dir.join(format!("{kid}.pub")).exists() { swept += 1; }
+            if !dir.join(format!("{kid}.pub")).exists() {
+                // 吊销后 .admin 不能留成孤儿（bound_key_alive 不删标记）
+                let _ = fs::remove_file(admin_marker_path(root, user, &kid));
+                swept += 1;
+            }
         } else if has_pub {
             // B7 前旧机制永久钥匙：清存量（连同 admin 标记）
             let _ = fs::remove_file(dir.join(format!("{kid}.pub")));
