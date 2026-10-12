@@ -26,7 +26,7 @@ async function onLoginSubmit(ev) {
     $('lg-pass').value = ''; // 用后即清，不留在 DOM
     $('lg-fb').textContent = '';
     enterApp();
-    if (state.boundAdmin) showMsg('管理员账号：本设备已继承管理员权限（顶部「管理」标签可用）。', 'ok');
+    if (state.boundAdmin) showMsg('已进入管理员账号。', 'ok'); // R5 追加裁决：管理 tab 自明，机制词零残留
   } catch (e) {
     $('lg-fb').textContent = '';
     if (e && e.error === 'E_PW_LOCAL') {
