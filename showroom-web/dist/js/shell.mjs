@@ -1,7 +1,7 @@
 // —— shell.mjs：管理壳（buildApp/wireTabs/顶栏与设置弹窗接线/修改密码）+ logout + whoami(syncAdmin) + 30s 自动刷新 ——
 // 会话编排（enterApp/登录窗提交/心跳接线）见 app.mjs；adminBuilt/adTimer 写入经 admin.mjs 访问器。
-import { $, esc, showMsg, fieldErr, clearErrs, busy, copyText, randomProject, fmtToolSize } from './util.mjs';
-import { state, ENV_DESC, platformPem, openSettings } from './state.mjs';
+import { $, esc, showMsg, fieldErr, clearErrs, busy, randomProject, fmtToolSize } from './util.mjs';
+import { state, ENV_DESC, openSettings } from './state.mjs';
 import { api, apiDo, respErr } from './api.mjs';
 import { opaqueStart, opaqueFinish, opaqueEnd, opaqueRegStart, opaqueRegFinish, opaqueRegEnd, postAuthJson } from './auth.mjs';
 import { ensureImages, imagesLoaded, apiFail, refreshSpace } from './img.mjs';
@@ -90,7 +90,7 @@ export function logout() {
   // B2 登出语义：上方已清本机钥匙（localStorage）并远程吊销（key-selfrm）——无密可免，
   // 登录卡只引导密码重登；提示如实说明钥匙已回收
   $('lg-pass').value = '';
-  $('lg-fb').textContent = '已退出登录，本机钥匙已回收。请输入账号密码重新登录。';
+  $('lg-fb').textContent = '已退出登录。请输入账号密码重新登录。';
 }
 
 // —— 修改密码（plan-16 §2.2 收口）：当前密码本地校验（复用 OPAQUE 登录序列 login-begin + 本地
@@ -133,7 +133,7 @@ async function onPwChange() {
     if ($('dlg-pw').open) $('dlg-pw').close();
     showMsg('密码修改成功：请使用新密码重新登录。', 'ok');
     logout(); // 收口：结束当前会话，引导新密码重登（登出即回收本机钥匙，B2 同语义）
-    $('lg-fb').textContent = '密码已修改：请输入新密码重新登录（本机钥匙已随退出回收）。';
+    $('lg-fb').textContent = '密码已修改：请输入新密码重新登录。';
   } catch (e) {
     $('pw-fb').textContent = '';
     if (e && e.error === 'E_PW_CUR') fieldErr('pw-cur', '当前密码不正确（或该账号密码已被重置），请重输');
@@ -149,13 +149,11 @@ export function buildApp() {
   appBuilt = true; // A2：模板克隆完成立即置位——此后任何单点异常都不会触发换号/重进时的重复克隆
 
   $('hd-user').textContent = state.user;
-  $('hd-srv').textContent = location.origin; // C3：顶栏只显示主机地址
   $('hd-pempub').value = localStorage.getItem('sr.pempub') || '';
   $('hd-pempub').addEventListener('input', () => localStorage.setItem('sr.pempub', $('hd-pempub').value));
   // 设置（plan-17 S1）：PEM 收纳 + 对外访问域名 + 改密/忘记设备聚合入口
   $('btn-settings').addEventListener('click', () => openSettings(false));
   $('dlg-settings-close').addEventListener('click', () => $('dlg-settings').close());
-  $('pempub-copy').addEventListener('click', () => copyText(platformPem(), '平台公钥 PEM'));
   $('set-base').addEventListener('input', onSetBaseInput);
   $('btn-go-settings').addEventListener('click', () => openSettings(true));
   $('btn-base-note-settings').addEventListener('click', () => openSettings(false));
@@ -176,7 +174,6 @@ export function buildApp() {
   $('proj-tbl').querySelector('tbody')?.append?.(drawerRow);
   $('drawer-close').addEventListener('click', () => closeDrawer());
   logsLive.want = true; // R4 用户裁决：抽屉展开即恒实时跟随（断线 5 秒自动重连），无开关 UI
-  $('btn-new-pub').addEventListener('click', () => activateTab('pub')); // 唯一常驻 CTA
   // A2：三个 wire* 各自 try/catch——单页绑定异常只降级对应页签（console.warn 记录页签名），不再雪崩全局
   for (const [name, fn] of [['wireTabs', wireTabs], ['wireProjTab', wireProjTab], ['wireDbTab', wireDbTab]]) {
     try { fn(); } catch (e) { console.warn(`[showroom] ${name} 事件绑定失败（对应页签功能可能不可用）`, e); }
@@ -240,16 +237,12 @@ export async function syncAdmin() {
     showMsg('身份查询暂时失败（网络异常或服务不可用），将在约 60 秒后自动重试；当前管理功能保持不变。', 'warn');
     clearTimeout(whoamiTimer);
     whoamiTimer = setTimeout(syncAdmin, 60000); // P2-1 修复：重试定时器必须在 return 之前设置
-    return; // P2：whoami 网络失败 ≠ 权限收回，保留现有状态等待重试
-    apiFail('身份查询（whoami）', e);
-    clearTimeout(whoamiTimer);
-    whoamiTimer = setTimeout(() => { if (state.loggedIn) syncAdmin(); }, 60000); // §3：? 60s 周期重试
+    return; // P2：whoami 网络失败 ≠ 权限收回，保留现有状态等待重试（R5 C10：return 后原有不可达死代码已删）
   }
   state.admin = isAdmin; // §13.1/§13.2：管理员可见全量（镜像清单/Redis 库；身份由顶栏「管」角标表达）
   // 第2轮xiaozhi P3：帮助页 CLI 对照表的 user-add/user-passwd 为管理员命令——按 whoami 结论显隐（非 admin 默认隐藏，防误导）
   for (const el of document.querySelectorAll('#app .admin-only')) el.classList.toggle('hidden', !isAdmin);
   refreshAdminBadge(); // whoami 落定后同步顶栏角标（纯呈现；管理员与否只看「管」角标，无第三徽标——R4 用户裁决去冗余）
-  if (state.projects.length) renderProjects(); // 第1轮UI审查P2：whoami 落定后重判「非本人项目」行操作显隐（列表已加载才重渲，不清加载中占位）
   if (isAdmin && imagesLoaded) ensureImages(true); // whoami 晚于首次清单加载时重取（admin 全量视角）
   if (isAdmin && !adminBuilt) { buildAdminTab(); setAdminBuilt(true); }
   else if (!isAdmin && adminBuilt) { // 权限被收回：拆除管理 DOM 并回到普通标签

@@ -29,17 +29,19 @@ export async function ensureImages(force = false) {
     $('img-sub').textContent = ''; // 成功不写「已加载 N 项」计数（清单即数据；自动刷新兜底，无手动重取入口）
     $('dep-images-fb').textContent = '';
   } catch (e) {
+    // B5：失败态写进数据容器（tbody 占位；同一信息只出现一次）
+    const tb = $('img-list')?.querySelector?.('tbody');
+    if (tb) tb.innerHTML = '<tr><td colspan="2" class="note">加载失败（将自动重试）</td></tr>';
     $('dep-images-fb').textContent = '镜像清单加载失败，可切到镜像库页查看';
-    $('img-sub').textContent = '加载失败（将自动重试）'; // 自动刷新兜底，无手动重试入口
     retryOnce('images', () => ensureImages(true)); // §3：3s 自动重试 1 次
   }
 }
-/** §14.3 镜像清单渲染：部署 ComboBox 同源数据；每行尾「删除」按钮（POST /_api/image-rm，内联 GC 秒级回收）。 */
+/** §14.3 镜像清单渲染：发布 ComboBox 同源数据；每行尾「删除」按钮（POST /_api/image-rm，内联 GC 秒级回收）。 */
 function renderImageList(images) {
   const tb = $('img-list').querySelector('tbody');
   tb.innerHTML = images.length
     ? images.map((s) => `<tr><td class="mono wrap">${esc(s)}</td><td><button class="act danger" data-act="image-rm" data-img="${esc(s)}">删除</button></td></tr>`).join('')
-    : '<tr><td colspan="2" class="note">（暂无镜像；「仅上传」入库后此处可管理）</td></tr>';
+    : '<tr><td colspan="2" class="note">（暂无镜像；到「发布」页上传后此处可管理）</td></tr>';
 }
 
 /** §14.3 删除镜像：confirm 写明镜像名与回滚失效语义 → image-rm → alert 回收量 → 刷新清单+空间条。 */
@@ -196,7 +198,7 @@ export async function uploadRest(uploadId, sid, blob, startSeq, sent0, total, no
   dataInvalidate('space'); refreshSpace(true); // §14.1：import-end 成功后刷新空间条
 }
 
-/** 断点续传核心（手动「恢复上传」与一键发布重试共用，§8.1）：查已收分片 → 重新压缩重建产物
+/** 断点续传核心（手动「恢复上传」与发布重试共用，§8.1）：查已收分片 → 重新压缩重建产物
  *  （压缩确定性 ⇒ 信封逐字节一致）→ 重放已收分片推进加密会话 → 补传剩余 → import-end 收尾。
  *  opts：compNote 压缩进度 / onRec(rec) 已收片数提示 / upNote 上传进度。返回 { pre, zsize }。 */
 export async function resumeUploadCore(id, opts = {}) {

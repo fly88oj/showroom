@@ -12,18 +12,17 @@
 
 <div id="msg" role="alert" aria-live="polite"></div>
 
-<!-- ———— 登录（plan-16 §3：一步「账号+密码」；密钥生成/绑定/签名全程后台无感，用户不见
+<!-- ———— 登录（plan-16 §3：一步「账号+密码」；凭据生成与签名全程后台无感，用户不见
        seed/公钥串；签名自测通过前只渲染本区块，不渲染任何管理 UI） ———— -->
 <section id="login">
   <h1>Showroom 控制台</h1>
-  <p class="note">服务器：<span class="mono" id="lg-srv"></span></p>
 
-  <!-- 主路径：一步登录（OPAQUE → 绑定本机钥匙 → 进入控制台，plan-16 §2.2 报文序列） -->
+  <!-- 主路径：一步登录（OPAQUE → 进入控制台，plan-16 §2.2 报文序列） -->
   <form id="lg-form" class="mt-3">
     <label class="field" for="lg-user"><span>账号（发布者账号）</span>
       <input type="text" id="lg-user" placeholder="如 alice…" size="14" pattern="[a-z0-9][a-z0-9\-]{0,30}" autocomplete="username" aria-describedby="lg-user-err"></label>
     <p class="ferr" id="lg-user-err" aria-live="polite"></p>
-    <label class="field mt-2" for="lg-pass"><span>密码（管理员发放；与 docker push 推送镜像用的镜像库密码是两把不同密码）</span>
+    <label class="field mt-2" for="lg-pass"><span>密码（非 docker push 用的镜像库密码）</span>
       <input type="password" id="lg-pass" placeholder="输入账号密码…" size="14" autocomplete="current-password" aria-describedby="lg-pass-err"></label>
     <p class="ferr" id="lg-pass-err" aria-live="polite"></p>
     <div class="row">
@@ -31,30 +30,27 @@
       <span class="fb" id="lg-fb" aria-live="polite"></span>
     </div>
   </form>
-  <p class="note">新设备 / 换浏览器：直接输入账号密码登录即可自动绑定本设备（无需迁移密钥）；忘记密码请联系管理员重置。
-    本设备登录钥匙由控制台自动生成并保管于浏览器 localStorage（属试验性存储，清除浏览器数据后重新密码登录即可），全程无需人工干预。</p>
+  <p class="note">忘记密码请联系管理员重置。</p>
   </section>
 
 <!-- ———— 管理壳（模板：惰性，登录成功后才克隆进文档流；SPEC §3「登录成功前不加载管理资源」） ———— -->
 <template id="app-tpl">
-  <!-- 三层层级·第一层：顶栏（sticky）——品牌 + 账号徽标（管理员角标）+ 服务器地址 | 平台公钥/修改密码/退出 -->
+  <!-- 三层层级·第一层：顶栏（sticky）——品牌 + 账号徽标（管理员角标）| 平台公钥/修改密码/退出 -->
   <header class="topbar">
     <div class="chrome">
       <div class="brand">
         <h1>Showroom 控制台</h1>
         <span class="user-badge"><span class="mono" id="hd-user"></span><span class="admin-mark hidden" id="hd-admin" title="管理员账号">管</span></span>
-        <span class="srv">服务器 <span class="mono" id="hd-srv"></span></span>
       </div>
       <div class="chrome-actions">
-        <button id="btn-new-pub" title="发布新展项（跳转发布页）">+ 发布</button>
-        <button id="btn-settings" title="对外访问域名 / 平台公钥 PEM / 修改密码">设置</button>
+        <button id="btn-settings" title="设置">设置</button>
         <button id="btn-logout">退出登录</button>
       </div>
     </div>
   </header>
   <!-- 三层层级·第二层：标签栏（sticky，顶栏正下方）；当前标签实底高亮 -->
   <nav id="tabs" role="tablist" aria-label="控制台功能分区">
-    <button data-tab="proj" class="on" role="tab" id="tabbtn-proj" aria-selected="true" aria-controls="tab-proj">我的展项</button>
+    <button data-tab="proj" class="on" role="tab" id="tabbtn-proj" aria-selected="true" aria-controls="tab-proj">我的项目</button>
     <button data-tab="pub" role="tab" id="tabbtn-pub" aria-selected="false" aria-controls="tab-pub">发布</button>
     <button data-tab="img" role="tab" id="tabbtn-img" aria-selected="false" aria-controls="tab-img">镜像库</button>
     <button data-tab="db" role="tab" id="tabbtn-db" aria-selected="false" aria-controls="tab-db">数据</button>
@@ -69,24 +65,21 @@
       <h2 id="dlg-settings-title">设置</h2>
       <button type="button" id="dlg-settings-close">关闭</button>
     </div>
-    <label class="field" for="set-base"><span>对外访问域名（展项列表与完成页主链接用它拼接，如 <span class="mono">http://106.55.224.229:10100</span>；留空用当前访问地址）</span>
+    <label class="field" for="set-base"><span>对外访问域名（项目列表与完成页主链接用它拼接；留空用当前访问地址）</span>
       <input type="text" id="set-base" class="mono" placeholder="http://…:…"></label>
     <p class="ferr" id="set-base-err" aria-live="polite"></p>
-    <label class="field mt-3" for="hd-pempub"><span>平台公钥 PEM（管理员分发的 <span class="mono">platform_rsa.pub</span>；镜像上传与数据库恢复的加密信封公钥。whoami 已自动带回时无需粘贴，此处仅兜底）</span>
+    <label class="field mt-3" for="hd-pempub"><span>平台公钥 PEM（管理员分发的 <span class="mono">platform_rsa.pub</span>；镜像上传与数据库恢复的加密信封公钥。登录后通常已自动配置，无需粘贴，此处仅兜底）</span>
       <textarea id="hd-pempub" class="mono" rows="9" placeholder="-----BEGIN PUBLIC KEY-----&#10;…&#10;-----END PUBLIC KEY-----…"></textarea>
     </label>
-    <div class="row">
-      <button type="button" id="pempub-copy">复制 PEM</button>
-    </div>
     <div class="sep"></div>
     <div class="row">
-      <button type="button" id="btn-pwchange" title="当前密码校验后替换为新密码（OPAQUE，密码不明文上线）">修改密码…</button>
+      <button type="button" id="btn-pwchange" title="当前密码校验后替换为新密码（密码不明文上线）">修改密码…</button>
     </div>
   </dialog>
 
-  <!-- ———— 标签页 1：展项管理 ———— -->
+  <!-- ———— 标签页 1：项目管理 ———— -->
   <section id="tab-proj" role="tabpanel" aria-labelledby="tabbtn-proj">
-    <h2>展项列表</h2>
+    <h2>项目列表</h2>
     <div class="warnbar hidden" id="proj-base-note">正在用内网地址展示 URL：可在<button type="button" id="btn-base-note-settings" class="act">设置</button>中配置「对外访问域名」（公网域名）。</div>
     <div class="row">
       <span class="sub" id="proj-fb"></span>
@@ -95,13 +88,12 @@
       <div class="tbl-xwrap"><!-- B3：窄视口横向滚动容器 -->
       <table id="proj-tbl">
         <thead><tr>
-          <th>名称</th><th>状态</th><th>对外 URL</th><th>标签</th><th class="num">更新</th><th>操作</th><th>详情</th>
+          <th>名称</th><th>状态</th><th>对外 URL</th><th>标签</th><th class="num">更新</th><th>操作</th><th>日志</th>
         </tr></thead>
         <tbody><tr><td colspan="7" class="note">正在加载…</td></tr></tbody>
       </table>
       </div>
     </div>
-    <p class="note">仅展示对外可见信息；主机端口等内部细节不在此显示。删除会一并移除容器/路由/数据库与凭据。</p>
   </section>
 
   <!-- ———— 标签页 2：发布（plan-17 §5：全站唯一参数输入处） ———— -->
@@ -140,12 +132,12 @@
           <input type="text" id="pub-tag" required size="10" aria-describedby="pub-tag-err"></label>
         <label class="field" for="pub-mem"><span>内存需求（MiB）</span>
           <input type="text" id="pub-mem" value="256" list="dl-mem" size="6" placeholder="单位 MiB，如 256…"></label>
-        <label class="field" for="pub-cport"><span>展项端口（容器内）</span>
+        <label class="field" for="pub-cport"><span>项目端口（容器内）</span>
           <input type="number" id="pub-cport" value="8080" min="1" max="65535" size="5"></label>
         <!-- 视觉QA P2-3：「发布」「仅上传」同一行排列（row 包组，不再随栅格换行分离） -->
         <span class="row" id="pub-actions">
           <button type="submit" id="pub-submit">发布</button>
-          <button type="button" id="btn-upload-only" title="同一 tar：只压缩上传入库，不发布；稍后到本页选「镜像库」源发布">仅上传</button>
+          <button type="button" id="btn-upload-only">仅上传</button>
         </span>
       </div>
       <!-- 第1轮UI审查P1：空间条在发布页可见（镜像 tar 上传发生在本页；与镜像库页 #space-note 同数据同刷新） -->
@@ -156,9 +148,9 @@
       <p class="ferr" id="pub-file-err" aria-live="polite"></p>
       <p class="ferr" id="dep-image-err" aria-live="polite"></p>
     </form>
-    <!-- plan-17 验收 6：未配置 PEM 时选 tar 发布 → 内联引导「去设置」（whoami 自动带回后永不出现） -->
-    <p class="warnbar hidden" id="pub-pem-hint">尚未配置平台公钥 PEM（镜像上传的加密信封公钥）：<button type="button" id="btn-go-settings" class="act">去设置</button>（whoami 自动带回后无需手工粘贴）</p>
-    <!-- §12.1 一键发布状态条：①压缩 → ②上传 → ③发布 → ④完成（大字 URL + 复制）；任一步失败标红可重试；
+    <!-- plan-17 验收 6：未配置 PEM 时选 tar 发布 → 内联引导「去设置」（登录后通常已自动配置，永不出现） -->
+    <p class="warnbar hidden" id="pub-pem-hint">尚未配置平台公钥 PEM（镜像上传的加密信封公钥）：<button type="button" id="btn-go-settings" class="act">去设置</button>（登录后通常已自动配置）</p>
+    <!-- §12.1 发布状态条：①压缩 → ②上传 → ③发布 → ④完成（大字 URL + 复制）；任一步失败标红可重试；
          「仅上传」走①②并在成功时把③④标记为跳过（镜像已入库，可稍后从下方发布入口选择） -->
     <div id="dp-bar" class="hidden mt-3">
       <div class="row">
@@ -179,7 +171,7 @@
         </div>
       </div>
     </div>
-    <!-- 视觉QA P1-6：页尾 9-10 行长段拆为 3 步列表；技术细节收进折叠（页面密度 3/10 → 可读） -->
+    <!-- 视觉QA P1-6：页尾 9-10 行长段拆为 3 步列表；技术细节各有归宿或运行时提示（R5：说明折叠整删） -->
     <div class="fs">
       <h3>发布说明</h3>
       <ol class="note help-list">
@@ -187,14 +179,6 @@
         <li>选「镜像库」→ 直接发布已入库镜像（①②两段自动跳过）。</li>
         <li>任一步失败状态条标红，可点「重试」；「仅上传」只把镜像送入镜像库（不发布），适合先备好镜像、稍后发布。</li>
       </ol>
-      <details class="expert-fold">
-        <summary>高级说明</summary>
-        <ul class="note help-list">
-          <li>命名规则：<span class="mono">^[a-zA-Z0-9][a-zA-Z0-9-]{0,30}$</span>（随机名 8 位字母数字，降低被字典遍历发现的门槛；项目留空即自动生成并回填），保留名 <span class="mono">v2 _api _bootstrap _console</span>；项目归属首个创建者。</li>
-          <li>命中已有项目时自动沿用上次发布参数（内存取服务端当前配置；标签/端口取本机记忆），可修改。</li>
-          <li>未选择文件时「发布」直接发布（要求镜像已入镜像库）；镜像 tar 上传前自动经 <span class="mono">zstd-19</span> 压缩再加密（已是 <span class="mono">.tar.zst</span> 则原样上传）。</li>
-        </ul>
-      </details>
     </div>
 
     <datalist id="dl-projects"></datalist>
@@ -204,11 +188,6 @@
   <!-- ———— 标签页 3：镜像库（plan-17 §1：镜像清单/删除/断点续传收纳） ———— -->
   <section id="tab-img" class="hidden" role="tabpanel" aria-labelledby="tabbtn-img">
     <h2>镜像库 <span class="sub" id="img-sub"></span></h2>
-    <!-- C7：长说明段折叠（details/summary，与发布页「高级说明」同款） -->
-    <details class="fold">
-      <summary>镜像库说明（可见范围 · 删除语义）</summary>
-      <p class="note">镜像清单从已上传入库的镜像加载（发布页选「镜像库」源时下拉同此数据，自动加载）；默认仅列出您名下的镜像，管理员可见全部账号的镜像。每行可删除不再使用的旧镜像：删除即触发回收（秒级释放磁盘），正在运行的展项不受影响，但其回滚/重建将失效。</p>
-    </details>
     <!-- §14.3 镜像清单：与发布表单「镜像库」下拉同源 /_api/images 数据；每行「删除」走 POST /_api/image-rm（内联 GC，秒级回收磁盘） -->
     <div class="tbl-wrap tbl-low mt-3"><!-- 视觉QA P1-7：介绍段→表头 3px → 12px -->
       <table id="img-list">
@@ -219,7 +198,7 @@
     <datalist id="dl-images"></datalist>
 
     <div class="fs">
-      <h3>镜像分片上传</h3>
+      <h3>断点续传</h3>
       <div class="row">
         <button id="btn-resume">恢复上传</button>
         <label class="field" for="up-id"><span>续传编号（中断的上传凭此恢复）</span>
@@ -232,12 +211,8 @@
       </div>
       <div class="mt-3">
         <progress id="up-prog" max="1" value="0"></progress>
-        <div id="up-status" class="note" aria-live="polite">尚未开始上传：到「发布」页选「本地 tar 文件」点「发布」或「仅上传」即可开始；中断的上传可凭上方续传编号在此恢复。</div>
+        <div id="up-status" class="note" aria-live="polite">尚未开始上传：到「发布」页选「本地 tar 文件」点「发布」或「仅上传」即可开始。</div>
       </div>
-      <details class="fold">
-        <summary>上传机制说明（压缩 · 分片 · 断点续传）</summary>
-        <p class="note" id="up-help">上传前先在本地压缩（zstd-19，已是压缩格式则跳过），再按 8MB 分片逐片加密上传——压缩后上传更省流量；每片失败自动重试 3 次；中断后凭续传编号 + 本地会话记录续传（需重新选择同一文件，恢复时会先重新压缩以重建产物）；发布/仅上传失败后的「重试」也走同一续传通道。陈旧会话由服务端清理。</p>
-      </details>
     </div>
   </section>
 
@@ -248,7 +223,7 @@
       <label class="field grow" for="db-project"><span>项目</span>
         <input type="text" id="db-project" list="dl-projects" required size="12" pattern="[a-zA-Z0-9][a-zA-Z0-9-]{0,30}"></label>
     </div>
-    <p class="note">只能操作本人名下项目对应的数据库；全部操作受安全校验并留存操作记录。</p>
+    <p class="note">只能操作本人名下项目对应的数据库。</p>
 
     <div class="sep"></div>
     <h2>表清单与预览</h2>
@@ -270,10 +245,10 @@
     <label class="field" for="db-sql"><span>SQL 语句（多行；服务端直接执行，语句失败即停止）</span>
       <textarea id="db-sql" class="mono" spellcheck="false" placeholder="SELECT * FROM …"></textarea></label>
     <div class="row"><button id="btn-db-sql">执行 SQL</button></div>
-    <p class="note">含 <span class="mono">DROP / TRUNCATE / DELETE</span> 的语句会先弹出确认框，确认后才会执行。</p>
 
     <div class="sep"></div>
-    <h2>备份与恢复（端到端加密信封 · 三段式分片下载）</h2>
+    <h2>备份与恢复</h2>
+    <p class="note">备份内容使用一次性密钥端到端加密，服务器无法解密。</p>
     <div class="grid">
       <button id="btn-db-dump">备份下载（自动生成一次性密钥）</button>
       <span class="field" id="db-restore-box">
@@ -291,22 +266,13 @@
       <progress id="db-prog" max="1" value="0"></progress>
       <div id="db-prog-txt" class="note" aria-live="polite">（备份进度：等待发起）</div>
     </div>
-    <details class="fold"><!-- C7：4 行技术说明折叠 -->
-      <summary>备份 / 恢复 / 重置机制说明（端到端加密）</summary>
-      <p class="note">
-        备份：浏览器生成一次性 RSA-3072 密钥对，仅公钥上行；服务端后台导出（zstd-19 压缩的 -Fc）加密信封后按 4MB 分片下发，
-        控制台边下载边流式解密（内存占用恒定），服务器无法解密内容。
-        恢复：文件在本地压缩后上传（已是 zstd 的备份产物原样），用平台公钥加密，服务端按魔数自适应解密解压执行恢复——需要上方「平台公钥 PEM」已配置。
-        重置：清空并重建数据库（凭据不变，数据不可恢复）。
-      </p>
-    </details>
-    <h3>操作输出（原文）</h3>
+    <h3>操作输出</h3>
     <pre class="out mono" id="db-out" aria-live="polite">（尚无输出）</pre>
     <p class="fb" id="db-fb" aria-live="polite"></p>
 
     <div class="sep"></div>
     <!-- §13.2/13.3（plan-17 S2 自状态页迁入）：DB 下拉来自 /_api/redis-dbs（服务端按用户过滤；admin 全量） -->
-    <h2>Redis 浏览（仅显示您名下项目的库）</h2>
+    <h2>Redis 浏览</h2>
     <div class="row">
       <label class="field" for="rd-db"><span>逻辑库（DB）</span><select id="rd-db"></select></label>
       <label class="field" for="rd-q"><span>键前缀过滤（回车查询）</span>
@@ -327,19 +293,15 @@
         <pre class="out mono" id="rd-val" aria-live="polite">（未选择键）</pre>
       </div>
     </div>
-    <p class="note">每项目一个逻辑库，编号由平台分配；管理员可见全部逻辑库。仅排障用途：这是界面级/协作级隔离（防误看防误操作）——容器内应用持有原始连接仍可 SELECT 任意库，非安全边界；键列表单次最多 200 条（可能截断），值超过 4KB 会被服务端截断。</p>
+    <p class="note">每项目一个逻辑库，编号由平台分配；管理员可见全部逻辑库。键列表单次最多 200 条（可能截断），值超过 4KB 会被服务端截断。</p>
   </section>
 
   <!-- ———— 标签页 4：帮助 ———— -->
   <section id="tab-help" class="hidden" role="tabpanel" aria-labelledby="tabbtn-help">
     <h2>登录与账号</h2>
     <ul class="note help-list">
-      <li>控制台用「账号 + 密码」登录：密码只在登录时使用一次，登录后本设备自动保管专用钥匙，此后全部操作自动签名，无需再输密码。</li>
-      <li>新设备 / 换浏览器：直接输入账号密码登录即可，平台自动为本设备绑定新钥匙（旧设备钥匙按平台策略自动回收，回收后该设备重新密码登录）。</li>
-      <li>忘记密码：请联系管理员重置（控制台无法自助找回；重置不影响各设备已绑定的钥匙，管理员在「管理」页点「补发密码」即生成新的登录初始密码）。</li>
-      <li>修改密码：登录后在「设置 → 修改密码」自助更换——需先输入当前密码校验，新密码经 OPAQUE 盲化上线、全程不明文；改完请用新密码重新登录（本机钥匙不受影响）。</li>
-      <li>登录密码与镜像库密码是两把独立发放的密码：前者登录控制台 / CLI，后者在 docker push 推送镜像时使用。</li>
-      <li>本设备钥匙由浏览器自动生成并保存在 localStorage（属试验性存储）：清除浏览器数据即失效，届时重新密码登录即可。</li>
+      <li>账号与登录密码由管理员发放。</li>
+      <li>忘记密码请联系管理员重置（控制台无法自助找回）。</li>
     </ul>
 
     <h2>CLI 使用</h2>
@@ -350,8 +312,8 @@
 
     <h2>镜像规范</h2>
     <ul class="note help-list">
-      <li>展项须监听容器内 <span class="mono">8080</span> 端口（其他端口在发布表单的端口字段如实填写）。</li>
-      <li>展项经子路径对外发布：访问地址恒为 <span class="mono">/&lt;project&gt;/</span>，读 <span class="mono">SHOWROOM_BASE_PATH</span>（值即该前缀）适配，或页面内一律使用相对 URL。</li>
+      <li>项目须监听容器内 <span class="mono">8080</span> 端口（其他端口在发布表单的端口字段如实填写）。</li>
+      <li>项目经子路径对外发布：访问地址恒为 <span class="mono">/&lt;project&gt;/</span>，读 <span class="mono">SHOWROOM_BASE_PATH</span>（值即该前缀）适配，或页面内一律使用相对 URL。</li>
       <li>建议在 Dockerfile 里配置 <span class="mono">HEALTHCHECK</span>，平台据此判定健康并自愈。</li>
       <li>镜像内配置文件替换推荐 <span class="mono">envsubst &lt; config.tpl &gt; config</span> 模式（占位符由注入的环境变量填充）。</li>
     </ul>
@@ -361,7 +323,7 @@
       <thead><tr><th>键</th><th>用途</th></tr></thead>
       <tbody></tbody>
     </table></div>
-    <p class="note">当前值可随时在展项列表「环境变量」里查看（<span class="mono">showroom env</span> 同）。</p>
+    <p class="note">当前值可随时在项目列表「环境变量」里查看（<span class="mono">showroom env</span> 同）。</p>
 
     <h2>工具下载</h2>
     <div class="tbl-wrap"><table id="tool-tbl">
@@ -387,7 +349,7 @@
         </tr>
       </tbody>
     </table></div>
-    <p class="note">下载走与控制台其余操作相同的签名鉴权通道；文件大小在首次下载后显示。CLI 首次配置见上「CLI 使用」一节。</p>
+    <p class="note">文件大小在首次下载后显示。CLI 首次配置见上「CLI 使用」一节。</p>
 
     <h2>CLI 命令对照</h2>
     <div class="tbl-wrap"><table>
@@ -399,7 +361,7 @@
         <tr><td>生成/重置本机签名密钥（调试用）</td><td class="mono">showroom keygen</td></tr>
         <tr class="admin-only hidden"><td>发放新账号（初始密码 / 管理员）</td><td class="mono">showroomctl user-add &lt;账号&gt; --gen-password [--admin]</td></tr>
         <tr class="admin-only hidden"><td>补发 / 重置密码（管理员）</td><td class="mono">showroomctl user-passwd &lt;账号&gt; --gen-password</td></tr>
-        <tr><td>展项列表</td><td class="mono">showroom ps</td></tr>
+        <tr><td>项目列表</td><td class="mono">showroom ps</td></tr>
         <tr><td>发布（单表单：本地 tar / 镜像库）/ 仅上传</td><td class="mono">showroom deploy / push / publish</td></tr>
         <tr><td>启动 / 停止 / 回滚 / 删除</td><td class="mono">showroom start / stop / rollback / rm</td></tr>
         <tr><td>日志 / 环境变量</td><td class="mono">showroom logs / showroom env</td></tr>
@@ -412,13 +374,13 @@
     <div class="tbl-wrap"><table>
       <thead><tr><th>错误码</th><th>含义与处理</th></tr></thead>
       <tbody>
-        <tr><td class="mono">E_AUTH</td><td class="wrap">登录凭据校验未通过（常见于钥匙过期/被回收、更换设备，或操作了非本人项目）。重新用账号密码登录即可自动修复（CLI 同：showroom login 重登）；仍失败可用 <span class="mono">showroom doctor</span> 排查时钟偏差。</td></tr>
+        <tr><td class="mono">E_AUTH</td><td class="wrap">登录凭据校验未通过（常见于本设备登录状态过期或被收回、更换设备）。重新用账号密码登录即可自动修复（CLI 同：showroom login 重登）；仍失败可用 <span class="mono">showroom doctor</span> 排查时钟偏差。</td></tr>
         <tr><td class="mono">E_NAME</td><td class="wrap">命名不符合规则 <span class="mono">^[a-zA-Z0-9][a-zA-Z0-9-]{0,30}$</span> 或使用了保留名（v2/_api/_bootstrap/_console）。</td></tr>
         <tr><td class="mono">E_QUOTA</td><td class="wrap">超出限额：内存配额 / 导入体积 / 磁盘空间（扣除预留）不足；请调低内存配置、精简镜像，磁盘不足时可在「镜像库」删除旧镜像后重试。</td></tr>
-        <tr><td class="mono">E_NOTFOUND</td><td class="wrap">展项或上传/下载会话不存在。</td></tr>
+        <tr><td class="mono">E_NOTFOUND</td><td class="wrap">项目或上传/下载会话不存在。</td></tr>
         <tr><td class="mono">E_STATE</td><td class="wrap">当前状态不允许该操作（如危险 SQL 未确认、容器状态冲突）。</td></tr>
         <tr><td class="mono">E_NET</td><td class="wrap">网络或服务不可用，稍后重试。</td></tr>
-        <tr><td class="mono">502</td><td class="wrap">展项服务异常（容器未就绪或已崩溃），请联系管理员。</td></tr>
+        <tr><td class="mono">502</td><td class="wrap">项目服务异常（容器未就绪或已崩溃），请联系管理员。</td></tr>
       </tbody>
     </table></div>
   </section>
@@ -455,7 +417,7 @@
       <button type="button" id="pw-submit">确认修改</button>
       <span class="fb" id="pw-fb" aria-live="polite"></span>
     </div>
-    <p class="note">修改成功后请使用新密码重新登录（本机钥匙随退出一并回收）。新旧密码均只在本机参与 OPAQUE 盲化，全程不明文上线。</p>
+    <p class="note">修改成功后请使用新密码重新登录。新旧密码均只在本机参与盲化，全程不明文上线。</p>
   </dialog>
 </template>
 
@@ -463,91 +425,120 @@
 <template id="admin-tpl">
   <div id="admin-root">
     <section id="tab-admin" class="hidden" role="tabpanel" aria-labelledby="tabbtn-admin">
-      <h2>实时事件（平台容器启停 · 管理员工具）</h2>
-      <div class="row">
-        <span class="note">连接状态：<span class="mono" id="ev-state" aria-live="polite">未连接</span></span>
-        <span class="note">仅显示 <span class="mono">sr-</span> 开头的展项容器（时间 / 动作 / 容器名，最近 20 条）；事件同时驱动展项列表自动刷新。</span>
-      </div>
-      <pre class="out mono" id="st-events" aria-live="polite">（暂无事件）</pre>
+      <!-- R5 E1：管理页二级导航（复用主 tab 栏样式，尺寸小一档）；五面板互斥，默认「账号」 -->
+      <nav id="admin-subnav" role="tablist" aria-label="管理功能分区">
+        <button data-adp="users" class="on" role="tab" id="adpbtn-users" aria-selected="true" aria-controls="adp-users">账号</button>
+        <button data-adp="projects" role="tab" id="adpbtn-projects" aria-selected="false" aria-controls="adp-projects">全部项目</button>
+        <button data-adp="status" role="tab" id="adpbtn-status" aria-selected="false" aria-controls="adp-status">平台状态</button>
+        <button data-adp="host" role="tab" id="adpbtn-host" aria-selected="false" aria-controls="adp-host">宿主配置</button>
+        <button data-adp="events" role="tab" id="adpbtn-events" aria-selected="false" aria-controls="adp-events">实时事件</button>
+      </nav>
 
-      <div class="sep"></div>
-      <h2>账号与钥匙</h2>
-      <div class="row">
-        <!-- 自动刷新（管理员数据源 30s 定时与事件驱动，无需手动刷新 -->
-        <button id="ad-user-add">发放新账号</button>
-        <span class="fb" id="ad-fb" aria-live="polite"></span>
-      </div>
-      <div class="tbl-wrap">
-        <table id="ad-users-tbl">
-          <thead><tr><th>钥匙 kid</th><th>管理员</th><th>绑定时间</th><th>操作</th></tr></thead>
-          <tbody><tr><td colspan="4" class="note">正在加载…</td></tr></tbody>
-        </table>
-      </div>
-      <p class="note">管理员是账号属性：该账号登录后绑定的钥匙自动继承管理权限，吊销整个账号即全部失效（一并删除其名下全部钥匙与镜像库访问凭据）；对单把钥匙可用「取消管理员」临时收权。「未设密码」仅见于历史遗留账号（原预登记公钥机制，现已停用）：点「补发密码」生成新的登录初始密码（仅显示一次，原密码即刻失效）；补发/改密均不动已绑定的钥匙。</p>
-
-      <div class="sep"></div>
-      <h2>平台状态</h2>
-      <!-- R4 用户裁决：30 秒自动刷新恒开，无开关 UI（加载失败走顶部条） -->
-      <div id="ad-status" class="note" aria-live="polite">（正在加载…）</div>
-
-      <div class="sep"></div>
-      <!-- §15 主机编排：期望状态展示（host.env/policy/漂移/Redis 池）+ 两段式变更 + 扩容流入口 -->
-      <h2>主机编排（期望状态 · 两段式变更）</h2>
-      <div class="row">
-        <span class="fb" id="hs-fb" aria-live="polite"></span>
-      </div>
-
-      <h3>中间件集合（host.env MIDDLEWARE）</h3>
-      <div class="row">
-        <label class="row" for="hs-mw-postgres"><input type="checkbox" id="hs-mw-postgres"><span>postgres</span></label>
-        <label class="row" for="hs-mw-redis"><input type="checkbox" id="hs-mw-redis"><span>redis</span></label>
-        <label class="row" for="hs-mw-registry"><input type="checkbox" id="hs-mw-registry"><span>registry</span></label>
-      </div>
-      <p class="note">取消勾选即「禁用该中间件」：查看变更会列出受影响项目（有项目在用时红色警示 + 二次确认）；禁用后对应环境变量组（如 REDIS_*）不再注入新发布。重新勾选即启用。</p>
-
-      <h3>主机开关与 FRP（host.env 其余键 · 通用键值展示）</h3>
-      <div class="tbl-wrap tbl-low"><table id="hs-kv-tbl">
-        <thead><tr><th>键</th><th>当前值</th></tr></thead>
-        <tbody><tr><td colspan="2" class="note">（正在加载…）</td></tr></tbody>
-      </table></div>
-
-      <h3>参数值（policy.env）</h3>
-      <div class="grid">
-        <label class="field" for="hs-p-redisdbs"><span>REDIS_DBS（Redis 逻辑库池上限 · 只读，修改走「扩容」流：需重启实例）</span>
-          <input type="number" id="hs-p-redisdbs" readonly class="mono"></label>
-        <label class="field" for="hs-p-disk"><span>DISK_RESERVE_GB（磁盘预留）</span>
-          <input type="number" id="hs-p-disk" readonly min="0" step="1" class="mono"></label>
-        <label class="field" for="hs-p-mem"><span>RESERVE_MEM_MB（内存预留）</span>
-          <input type="number" id="hs-p-mem" readonly min="0" step="1" class="mono"></label>
-        <label class="field" for="hs-p-factor"><span>UPLOAD_SPACE_FACTOR（上传空间估算膨胀因子）</span>
-          <input type="number" id="hs-p-factor" readonly min="1" step="0.1" class="mono"></label>
-      </div>
-
-      <h3>漂移清单与 Redis 池</h3>
-      <div id="hs-drift" aria-live="polite"><p class="note m-0">（正在加载…）</p></div>
-      <div id="hs-pool" class="mt-3" aria-live="polite">
-        <div id="hs-pool-warn" class="warnbar hidden">
-          <span id="hs-pool-warn-txt"></span>
-          <button type="button" id="hs-pool-expand">扩容</button>
+      <!-- —— 面板：账号（账号与钥匙 / 发卡 / 补发） —— -->
+      <div id="adp-users" role="tabpanel" aria-labelledby="adpbtn-users">
+        <h2>账号与钥匙</h2>
+        <div class="row">
+          <!-- 自动刷新（管理员数据源 30s 定时与事件驱动，无需手动刷新 -->
+          <button id="ad-user-add">发放新账号</button>
+          <span class="fb" id="ad-fb" aria-live="polite"></span>
         </div>
-        <p class="note hidden m-0" id="hs-pool-ok"></p>
+        <div class="tbl-wrap">
+          <table id="ad-users-tbl">
+            <thead><tr><th>钥匙 kid</th><th>绑定时间</th><th>操作</th></tr></thead>
+            <tbody><tr><td colspan="3" class="note">正在加载…</td></tr></tbody>
+          </table>
+        </div>
+        <p class="note">管理员是账号属性：该账号任意钥匙登录即具管理权限。</p>
       </div>
 
-      <div class="sep"></div>
-      <h3>两段式变更（修改 → 查看变更 → 确认执行）</h3>
-      <div class="row">
-        <button id="hs-apply">查看变更</button>
-        <button id="hs-confirm" class="danger hidden">确认执行</button>
+      <!-- —— 面板：全部项目（跨用户；GET /_api/admin/projects 全量 + owner） —— -->
+      <div id="adp-projects" class="hidden" role="tabpanel" aria-labelledby="adpbtn-projects">
+        <h2>全部项目</h2>
+        <p class="note">全部账号的项目（管理员）。</p>
+        <div class="tbl-wrap tbl-page">
+          <table id="ad-projects-tbl">
+            <thead><tr><th>项目</th><th>所属账号</th><th>状态</th><th class="num">更新</th><th>操作</th></tr></thead>
+            <tbody><tr><td colspan="5" class="note">正在加载…</td></tr></tbody>
+          </table>
+        </div>
+        <p class="fb" id="ad-proj-fb" aria-live="polite"></p>
       </div>
-      <div id="hs-review" class="hidden mt-2">
-        <div id="hs-review-sum" class="note" aria-live="polite"></div>
-        <div class="tbl-wrap tbl-mid"><table id="hs-actions-tbl">
-          <thead><tr><th>动作</th><th>目标</th><th>说明</th></tr></thead>
-          <tbody><tr><td colspan="3" class="note">（空）</td></tr></tbody>
+
+      <!-- —— 面板：平台状态 —— -->
+      <div id="adp-status" class="hidden" role="tabpanel" aria-labelledby="adpbtn-status">
+        <h2>平台状态</h2>
+        <!-- R4 用户裁决：30 秒自动刷新恒开，无开关 UI（加载失败走顶部条） -->
+        <div id="ad-status" class="note" aria-live="polite">（正在加载…）</div>
+      </div>
+
+      <!-- —— 面板：宿主配置（期望状态 + 中间件 + policy + 漂移/池 + 两段式） —— -->
+      <div id="adp-host" class="hidden" role="tabpanel" aria-labelledby="adpbtn-host">
+        <h2>主机编排（期望状态 · 两段式变更）</h2>
+        <div class="row">
+          <span class="fb" id="hs-fb" aria-live="polite"></span>
+        </div>
+
+        <h3>中间件集合（host.env MIDDLEWARE）</h3>
+        <div class="row">
+          <label class="row" for="hs-mw-postgres"><input type="checkbox" id="hs-mw-postgres"><span>postgres</span></label>
+          <label class="row" for="hs-mw-redis"><input type="checkbox" id="hs-mw-redis"><span>redis</span></label>
+          <label class="row" for="hs-mw-registry"><input type="checkbox" id="hs-mw-registry"><span>registry</span></label>
+        </div>
+        <p class="note">取消勾选即禁用，重新勾选即启用。</p>
+
+        <h3>主机开关与 FRP（host.env 其余键 · 通用键值展示）</h3>
+        <div class="tbl-wrap tbl-low"><table id="hs-kv-tbl">
+          <thead><tr><th>键</th><th>当前值</th></tr></thead>
+          <tbody><tr><td colspan="2" class="note">（正在加载…）</td></tr></tbody>
         </table></div>
-        <div id="hs-impact"></div>
+
+        <h3>参数值（policy.env）</h3>
+        <div class="grid">
+          <label class="field" for="hs-p-redisdbs"><span>REDIS_DBS（Redis 逻辑库池上限 · 只读，修改走「扩容」流）</span>
+            <input type="number" id="hs-p-redisdbs" readonly class="mono"></label>
+          <label class="field" for="hs-p-disk"><span>DISK_RESERVE_GB（磁盘预留）</span>
+            <input type="number" id="hs-p-disk" readonly min="0" step="1" class="mono"></label>
+          <label class="field" for="hs-p-mem"><span>RESERVE_MEM_MB（内存预留）</span>
+            <input type="number" id="hs-p-mem" readonly min="0" step="1" class="mono"></label>
+          <label class="field" for="hs-p-factor"><span>UPLOAD_SPACE_FACTOR（上传空间估算膨胀因子）</span>
+            <input type="number" id="hs-p-factor" readonly min="1" step="0.1" class="mono"></label>
+        </div>
+
+        <h3>漂移清单与 Redis 池</h3>
+        <div id="hs-drift" aria-live="polite"><p class="note m-0">（正在加载…）</p></div>
+        <div id="hs-pool" class="mt-3" aria-live="polite">
+          <div id="hs-pool-warn" class="warnbar hidden">
+            <span id="hs-pool-warn-txt"></span>
+            <button type="button" id="hs-pool-expand">扩容</button>
+          </div>
+          <p class="note hidden m-0" id="hs-pool-ok"></p>
+        </div>
+
+        <h3 class="mt-3">变更流程（修改 → 查看变更 → 确认执行）</h3>
+        <div class="row">
+          <button id="hs-apply">查看变更</button>
+          <button id="hs-confirm" class="danger hidden">确认执行</button>
+        </div>
+        <div id="hs-review" class="hidden mt-2">
+          <div id="hs-review-sum" class="note" aria-live="polite"></div>
+          <div class="tbl-wrap tbl-mid"><table id="hs-actions-tbl">
+            <thead><tr><th>动作</th><th>目标</th><th>说明</th></tr></thead>
+            <tbody><tr><td colspan="3" class="note">（空）</td></tr></tbody>
+          </table></div>
+          <div id="hs-impact"></div>
+        </div>
+        <div id="hs-report" class="hidden mt-2" aria-live="polite"></div>
       </div>
-      <div id="hs-report" class="hidden mt-2" aria-live="polite"></div>
+
+      <!-- —— 面板：实时事件 —— -->
+      <div id="adp-events" class="hidden" role="tabpanel" aria-labelledby="adpbtn-events">
+        <h2>实时事件</h2>
+        <div class="row">
+          <span class="note">连接状态：<span class="mono" id="ev-state" aria-live="polite">未连接</span></span>
+          <span class="note">最近 20 条。</span>
+        </div>
+        <pre class="out mono" id="st-events" aria-live="polite">（暂无事件）</pre>
+      </div>
     </section>
 
     <!-- 发放新账号（plan-16 §1.4/§1.5 + B7 统一账号密码认证）：主路径=账号 + 自动生成的登录
@@ -580,7 +571,7 @@
           <code id="ad-na-pw" class="pub mono"></code>
           <button type="button" id="ad-na-copy">复制密码</button>
         </div>
-        <p class="note mt-1">发布者用「账号 + 登录密码」经 <span class="mono">showroom login</span> 或控制台登录即可（密钥自动生成绑定），无需分发任何密钥材料。</p>
+        <p class="note mt-1">发布者用「账号 + 登录密码」经 <span class="mono">showroom login</span> 或控制台登录即可，无需分发任何额外材料。</p>
       </div>
     </dialog>
 

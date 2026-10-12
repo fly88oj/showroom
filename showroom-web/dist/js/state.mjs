@@ -15,7 +15,7 @@ export const RESERVED = new Set(['v2', '_api', '_bootstrap', '_console']);
 export const ENV_DESC = {
   DB_HOST: 'PostgreSQL 数据库主机名（平台内置）',
   DB_PORT: 'PostgreSQL 端口',
-  DB_NAME: '本展项数据库名',
+  DB_NAME: '本项目数据库名',
   DB_USER: '数据库用户名',
   DB_PASSWORD: '数据库密码（发布时随机生成）',
   DATABASE_URL: '完整 PostgreSQL 连接串',
@@ -23,7 +23,7 @@ export const ENV_DESC = {
   REDIS_PORT: 'Redis 端口',
   REDIS_DB: '分配的 Redis 逻辑库编号（每项目一库，池上限见平台 policy）',
   REDIS_URL: '完整 Redis 连接串',
-  SHOWROOM_PROJECT: '展项名',
+  SHOWROOM_PROJECT: '项目名',
   SHOWROOM_BASE_PATH: '对外子路径前缀（恒为 /<项目名>/；镜像内应据此适配或使用相对 URL）',
 };
 

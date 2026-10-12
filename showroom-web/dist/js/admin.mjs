@@ -1,12 +1,13 @@
-// —— admin.mjs：管理页（账号与钥匙/发卡补发/平台状态）+ §15 主机编排（期望状态/两段式/Redis 扩容）——
+// —— admin.mjs：管理页五面板（账号/全部项目/平台状态/宿主配置/实时事件）+ 发卡补发 + §15 主机编排 ——
 // adminBuilt/adTimer 为本模块私有可变旗标：shell（登出收尾/权限收回）经下方访问器读写。
-import { $, esc, fmtTime, fmtGB, statusCn, showMsg, fieldErr, clearErrs, busy, copyText, randomPassword } from './util.mjs';
+import { $, esc, fmtTime, fmtGB, statusCn, statusCls, showMsg, fieldErr, clearErrs, busy, copyText, randomPassword } from './util.mjs';
 import { NAME_RE } from './state.mjs';
 import { api } from './api.mjs';
 import { apiFail } from './img.mjs';
 // ================ §12.2 管理员标签（whoami admin=true 才渲染；否则 DOM 不存在） ================
 export let adminBuilt = false, adTimer = null;
 let naGenPw = ''; // 发卡对话框已生成未发放的登录初始密码（发放成功即清空，防旧密码误发二次）
+let adminPanel = 'users'; // E1：当前管理子面板（账号|全部项目|平台状态|宿主配置|实时事件）
 
 // 拆分适配（跨模块可变旗标访问器；行为不变）：
 export const setAdminBuilt = (v) => { adminBuilt = v; };
@@ -23,16 +24,44 @@ export function buildAdminTab() {
   $('tabs').append(btn);                                    // 第五标签
   $('app').append($('admin-tpl').content.cloneNode(true));   // 管理区 DOM 仅此刻进入文档流
   wireAdminTab();
+  activateAdminPanel('users'); // E1：默认「账号」面板
 }
 export function teardownAdmin() {
   clearInterval(adTimer); adTimer = null;
+  adminPanel = 'users'; // 权限收回：下次重建回落默认面板
   for (const b of $('tabs').querySelectorAll('button[data-tab="admin"]')) b.remove();
   $('admin-root')?.remove?.();
 }
+
+// —— E1：管理页二级导航——五面板互斥显示；E4：独立进入时按需刷新（沿用现有拉取函数） ——
+export function activateAdminPanel(name) {
+  if (name) adminPanel = name;
+  const panels = ['users', 'projects', 'status', 'host', 'events'];
+  for (const p of panels) {
+    const el = $(`adp-${p}`);
+    if (el) el.classList.toggle('hidden', p !== adminPanel);
+    const b = $(`adpbtn-${p}`);
+    if (b) {
+      b.classList.toggle('on', p === adminPanel);
+      b.setAttribute?.('aria-selected', p === adminPanel ? 'true' : 'false');
+    }
+  }
+  // 面板可见即取数（30s 定时与写操作失效另行兜底）
+  if (adminPanel === 'users') loadAdminUsers();
+  else if (adminPanel === 'projects') loadAdminProjects();
+  else if (adminPanel === 'status') refreshAdminStatus();
+  else if (adminPanel === 'host') refreshHost();
+  // events：事件流订阅由项目页可见性/进页逻辑驱动（st-events 仅作展示），无需拉取
+}
+
 function wireAdminTab() {
   // 根因清理：#ad-refresh/#ad-st-refresh/#hs-refresh 手动刷新按钮已随自动刷新删除（30s 定时取代）；
   // R4 用户裁决：自动刷新恒开无开关，进管理页即启动状态面板定时器（平台状态 + 主机期望状态）
   if (!adTimer) adTimer = setInterval(() => { refreshAdminStatus(); refreshHost(); }, 30000);
+  $('admin-subnav').addEventListener('click', (ev) => {
+    const btn = ev.target.closest?.('button[data-adp]');
+    if (btn) activateAdminPanel(btn.dataset.adp);
+  });
   $('ad-user-add').addEventListener('click', () => { // 发卡对话框（打开即聚焦首字段；Esc/关闭焦点自动归还）
     $('ad-na-user').value = '';
     $('ad-na-admin').checked = false;
@@ -52,6 +81,7 @@ function wireAdminTab() {
   $('ad-ps-close').addEventListener('click', () => $('dlg-passwd-set').close());
   $('ad-ps-copy').addEventListener('click', () => copyText($('ad-ps-pw').textContent, '登录初始密码'));
   $('ad-users-tbl').addEventListener('click', onAdminKeyAction);
+  $('ad-projects-tbl').addEventListener('click', onAdminProjectAction); // E3：跨用户项目行操作
   // §15 主机编排：期望状态随 30s 定时与进页自动刷新（手动刷新按钮已删）/ 两段式（预演→确认）/ Redis 扩容对话框
   $('hs-apply').addEventListener('click', onHostApply);
   $('hs-confirm').addEventListener('click', onHostConfirmRun);
@@ -60,11 +90,24 @@ function wireAdminTab() {
   $('hs-rx-preview').addEventListener('click', onRedisXPreview);
   $('hs-rx-run').addEventListener('click', onRedisXRun);
   $('hs-rx-n').addEventListener('input', () => fieldErr('hs-rx-n', ''));
+  // B4：预演后任一编辑控件 change → 预演清单即失效（收起 + 提示重新预演）
+  for (const id of ['hs-mw-postgres', 'hs-mw-redis', 'hs-mw-registry', 'hs-p-disk', 'hs-p-mem', 'hs-p-factor']) {
+    $(id).addEventListener('change', onHostEditedAfterPreview);
+  }
 }
 
-export async function loadAdminUsers() { // 账号与钥匙表（§12.2：账号/钥匙 kid/管理员/绑定时间/项目数；since=服务端 .pub mtime）
+/** B4：预演清单失效——编辑控件变更后收起 hs-review/确认钮并提示重新预演（未预演过则静默）。 */
+function onHostEditedAfterPreview() {
+  if ($('hs-review')?.classList?.contains('hidden') && $('hs-confirm')?.classList?.contains('hidden')) return;
+  $('hs-review').classList.add('hidden');
+  $('hs-confirm').classList.add('hidden');
+  hostImpact = null; // 受影响项目缓存随预演一并失效
+  $('hs-fb').textContent = '配置已修改，请重新预演。';
+}
+
+export async function loadAdminUsers() { // 账号与钥匙表（D1：管理员为账号级——账号行徽标+设/免按钮；钥匙行无级）
   const tb = $('ad-users-tbl').querySelector('tbody');
-  tb.innerHTML = '<tr><td colspan="4" class="note">加载中…</td></tr>';
+  tb.innerHTML = '<tr><td colspan="3" class="note">加载中…</td></tr>';
   try {
     const j = await api('GET', '/_api/admin/users');
     const users = j.users || [];
@@ -74,31 +117,82 @@ export async function loadAdminUsers() { // 账号与钥匙表（§12.2：账号
       const pwCell = o.has_password
         ? '<span class="badge">已设密码</span>'
         : `<span class="badge">未设密码</span> <button class="act" data-act="pwset" data-user="${esc(o.user)}">补发密码</button>`;
-      return `<tr class="ad-user-row"><td colspan="4">
+      // D1：管理员徽标 + 设/免按钮上收到账号行（POST /_api/admin/user-admin；钥匙行无级）
+      const adminCell = o.admin
+        ? `<span class="status-ok">管理员</span> <button class="act" data-act="userunadmin" data-user="${esc(o.user)}">取消管理员</button>`
+        : `<button class="act" data-act="useradmin" data-user="${esc(o.user)}">设为管理员</button>`;
+      return `<tr class="ad-user-row"><td colspan="3">
           <span class="mono">${esc(o.user)}</span>
           <span class="note">· 项目数 ${esc(String(o.projects ?? '—'))} · 钥匙 ${keys.length} 把</span>
           ${pwCell}
+          ${adminCell}
           <button class="act danger" data-act="revoke" data-user="${esc(o.user)}" style="margin-left:.4rem">吊销整个账号</button>
         </td></tr>` + (keys.map((k) => `<tr>
           <td class="mono wrap">${esc(k.kid)}</td>
-          <td>${k.admin ? '<span class="status-ok">管理员</span>' : '<span class="note">普通</span>'}</td>
           <td class="mono">${esc(fmtTime(k.since))}</td>
-          <td>${k.admin
-            ? `<button class="act" data-act="unadmin" data-user="${esc(o.user)}" data-kid="${esc(k.kid)}">取消管理员</button>`
-            : `<button class="act" data-act="admin" data-user="${esc(o.user)}" data-kid="${esc(k.kid)}">设为管理员</button>`}
-            <button class="act danger" data-act="keyrm" data-user="${esc(o.user)}" data-kid="${esc(k.kid)}">删除钥匙</button></td>
-        </tr>`).join('') || '<tr><td colspan="4" class="note">（该账号没有钥匙）</td></tr>');
-    }).join('') : '<tr><td colspan="4" class="note">暂无账号</td></tr>';
+          <td><button class="act danger" data-act="keyrm" data-user="${esc(o.user)}" data-kid="${esc(k.kid)}">删除钥匙</button></td>
+        </tr>`).join('') || '<tr><td colspan="3" class="note">（该账号没有钥匙）</td></tr>');
+    }).join('') : '<tr><td colspan="3" class="note">暂无账号</td></tr>';
     $('ad-fb').textContent = ''; // 成功不写计数回执（表格即数据）；本区保留操作反馈用途
-  } catch (e) { tb.innerHTML = '<tr><td colspan="4" class="note">加载失败 · <button type="button" class="act" data-act="retry-users">重试</button></td></tr>'; apiFail('账号与钥匙加载', e); } // D2：失败行内「重试」可点（非管理员 404 E_AUTH 也走顶部条）
+  } catch (e) { tb.innerHTML = '<tr><td colspan="3" class="note">加载失败 · <button type="button" class="act" data-act="retry-users">重试</button></td></tr>'; apiFail('账号与钥匙加载', e); } // D2：失败行内「重试」可点（非管理员 404 E_AUTH 也走顶部条）
+}
+
+// —— E3：全部项目面板（跨用户项目表；GET /_api/admin/projects 每行附 owner）——
+export async function loadAdminProjects() {
+  const tb = $('ad-projects-tbl').querySelector('tbody');
+  tb.innerHTML = '<tr><td colspan="5" class="note">加载中…</td></tr>';
+  try {
+    const j = await api('GET', '/_api/admin/projects');
+    const rows = j.projects || [];
+    tb.innerHTML = rows.length ? rows.map((p) => {
+      const q = esc(p.project), u = esc(p.user || '—');
+      const st = String(p.status || '');
+      // 行操作按状态复用项目页语义（服务端 user_check：管理员可操作任意账号的项目）
+      const op = st === 'running'
+        ? `<button class="act danger" data-act="adstop" data-p="${q}" data-owner="${u}">停止</button>`
+        : st === 'missing' ? '' : `<button class="act" data-act="adstart" data-p="${q}" data-owner="${u}">启动</button>`;
+      return `<tr>
+        <td class="mono">${q}</td>
+        <td class="mono">${u}</td>
+        <td class="${statusCls(st)}"><span>●</span> ${esc(statusCn(st))}</td>
+        <td class="mono num">${esc(fmtTime(p.updated))}</td>
+        <td>${op}<button class="act danger" data-act="adrm" data-p="${q}" data-owner="${u}">删除</button></td>
+      </tr>`;
+    }).join('') : '<tr><td colspan="5" class="note">（暂无项目）</td></tr>';
+    $('ad-proj-fb').textContent = '';
+  } catch (e) {
+    tb.innerHTML = '<tr><td colspan="5" class="note">加载失败 · <button type="button" class="act" data-act="retry-adprojects">重试</button></td></tr>';
+    apiFail('全部项目加载', e);
+  }
+}
+
+const AD_PROJ_ACT = { adstart: 'start', adstop: 'stop', adrm: 'rm' };
+const AD_PROJ_CN = { adstart: '启动', adstop: '停止', adrm: '删除' };
+/** E3：跨用户项目行操作——与项目页同一端点（/_api/{start,stop,rm}，服务端按 owner 校验管理员放行）。 */
+async function onAdminProjectAction(ev) {
+  const btn = ev.target.closest('button[data-act]');
+  if (!btn || btn.disabled) return;
+  const { act, p: project, owner } = btn.dataset;
+  if (act === 'retry-adprojects') { btn.disabled = true; return loadAdminProjects(); }
+  const ep = AD_PROJ_ACT[act];
+  if (!ep) return;
+  if (act === 'adstop' && !confirm(`确认停止账号 ${owner} 的项目 ${project}？容器即刻停止、对外不可访问（数据与凭据保留，可随时重新「启动」）。`)) return;
+  if (act === 'adrm' && !confirm(`确认删除账号 ${owner} 的项目 ${project}？容器与路由即刻下线，数据库将一并删除；删除后凭据一并清除，不可恢复。`)) return;
+  busy(btn, true, `${AD_PROJ_CN[act]}中…`);
+  try {
+    await api('POST', `/_api/${ep}`, { project });
+    $('ad-proj-fb').textContent = `已${AD_PROJ_CN[act]} ${project}（${owner}）`;
+    loadAdminProjects(); // 写操作后重取
+  } catch (e) { apiFail(`${AD_PROJ_CN[act]} ${project}`, e); }
+  finally { busy(btn, false); }
 }
 
 // 管理动作：全部中文 confirm 写明影响（§12.2）
 const ADMIN_ACT = {
-  admin: { ep: 'key-admin', cn: '设为管理员', body: (o, k) => ({ user: o, kid: k, admin: true }),
-    ask: (o, k) => `确认将账号 ${o} 的钥匙 ${k} 设为管理员钥匙？持该钥匙者即可管理全部账号、钥匙与平台状态。` },
-  unadmin: { ep: 'key-admin', cn: '取消管理员', body: (o, k) => ({ user: o, kid: k, admin: false }),
-    ask: (o, k) => `确认取消账号 ${o} 钥匙 ${k} 的管理员权限？此后该钥匙无法再访问管理功能。` },
+  useradmin: { ep: 'user-admin', cn: '设为管理员', body: (o) => ({ user: o, admin: true }),
+    ask: (o) => `确认将账号 ${o} 设为管理员？该账号任意钥匙登录即具管理权限（可管理全部账号、项目与平台状态）。` },
+  userunadmin: { ep: 'user-admin', cn: '取消管理员', body: (o) => ({ user: o, admin: false }),
+    ask: (o) => `确认取消账号 ${o} 的管理员权限？该账号全部钥匙同时失去管理权限。` },
   keyrm: { ep: 'key-rm', cn: '删除钥匙', body: (o, k) => ({ user: o, kid: k }),
     ask: (o, k) => `确认删除账号 ${o} 的钥匙 ${k}？该钥匙即刻失效（持有它的设备立即无法登录），不可恢复。` },
   revoke: { ep: 'user-revoke', cn: '吊销整个账号', body: (o) => ({ user: o }),
@@ -109,7 +203,7 @@ async function onAdminKeyAction(ev) {
   const btn = ev.target.closest('button[data-act]');
   if (!btn || btn.disabled) return;
   const { act, user, kid } = btn.dataset;
-  if (act === 'pwset') return onAdminPasswdSet(user); // plan-16 §1.5 补发：单独流（confirm + 一次性密码展示）
+  if (act === 'pwset') return onAdminPasswdSet(user, btn); // plan-16 §1.5 补发：单独流（confirm + 一次性密码展示）
   if (act === 'retry-users') { btn.disabled = true; return loadAdminUsers(); } // D2：加载失败行内重试
   const def = ADMIN_ACT[act];
   if (!def) return;
@@ -125,9 +219,10 @@ async function onAdminKeyAction(ev) {
 
 /** 补发/重置登录密码（plan-16 §1.5）：confirm → passwd-set {user,password}（客户端 crypto 生成）→
  *  新密码一次性展示（对话框）；旧密码即刻失效，不动既有钥匙 → 表刷新（徽标翻转）。 */
-async function onAdminPasswdSet(user) {
+async function onAdminPasswdSet(user, btn) {
   if (!confirm(`确认为账号 ${user} 补发密码？将生成新的登录初始密码，原密码即刻失效；各设备已绑定的钥匙不受影响。`)) return;
   const pw = randomPassword();
+  busy(btn, true, '补发中…'); // B3：请求期间按钮就地「补发中…」并禁用
   try {
     const j = await api('POST', '/_api/admin/passwd-set', { user, password: pw });
     $('ad-ps-user').textContent = user;
@@ -136,6 +231,7 @@ async function onAdminPasswdSet(user) {
     $('ad-fb').textContent = `已补发密码（${user}）`;
     loadAdminUsers();
   } catch (e) { apiFail(`补发密码（${user}）`, e); }
+  finally { busy(btn, false); }
 }
 
 /** 发卡提交（B7 统一账号密码认证）：user-add {user,password[,admin]} → 两行一次性密码结果（登录初始 / registry）+ 表刷新。 */
@@ -220,7 +316,14 @@ export async function refreshHost() {
     hostImpact = null;
     renderHostState(j);
     $('hs-fb').textContent = `已刷新（${new Date().toLocaleTimeString([], { hour12: false })}）`;
-  } catch (e) { $('hs-fb').textContent = ''; apiFail('主机期望状态加载', e); }
+  } catch (e) {
+    // B5：失败态写进数据容器（键值表/漂移清单占位；30s 定时自动重试）
+    const kvTb = $('hs-kv-tbl')?.querySelector?.('tbody');
+    if (kvTb) kvTb.innerHTML = '<tr><td colspan="2" class="note">（加载失败，将自动重试）</td></tr>';
+    $('hs-drift').innerHTML = '<p class="note m-0">（加载失败，将自动重试）</p>';
+    $('hs-fb').textContent = '';
+    apiFail('主机期望状态加载', e);
+  }
 }
 /** 期望状态渲染：中间件开关勾选态、host.env 其余键通用键值（含 FRP，不特判）、参数当前值、漂移黄条、池两态。 */
 function renderHostState(j) {

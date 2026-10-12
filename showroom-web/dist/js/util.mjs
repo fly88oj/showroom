@@ -5,10 +5,10 @@ export const enc = new TextEncoder(), dec = new TextDecoder();
 
 // —— 消息条（错误统一顶部：「错误码：中文解释（含下一步动作）」）与行内反馈 ——
 const ERR_CN = {
-  E_AUTH: '登录凭据校验未通过（常见于钥匙过期/被回收、更换设备，或操作了非本人项目）：重新用账号密码登录即可自动修复（CLI 同：showroom login 重登）',
+  E_AUTH: '登录凭据校验未通过（常见于本设备登录状态过期或被收回、更换设备）：重新用账号密码登录即可自动修复（CLI 同：showroom login 重登）',
   E_NAME: '命名不符合规则或使用了保留名；请按提示修正名称后重试',
   E_QUOTA: '超出平台限额（内存配额/导入体积/磁盘空间不足）；请调低内存配置、精简镜像，磁盘不足时可先删除旧镜像',
-  E_NOTFOUND: '对象不存在（展项/会话）；请确认名称或重新发起',
+  E_NOTFOUND: '对象不存在（项目/会话）；请确认名称或重新发起',
   E_STATE: '当前状态不允许该操作；请检查前置条件（如确认标记、容器状态）后重试',
   E_NET: '网络或服务不可用；请稍后重试，或用 showroom doctor 排查',
 };
@@ -43,7 +43,7 @@ export function busy(btn, on, txt = '处理中…') {
 export const fmtTime = (unixSec) => {
   if (!unixSec) return '\u2014';
   try {
-    // D1：展项表「更新」列带年份（YYYY/MM/DD HH:MM），跨年项目不再歧义
+    // D1：项目表「更新」列带年份（YYYY/MM/DD HH:MM），跨年项目不再歧义
     return new Intl.DateTimeFormat('zh-CN', { year: 'numeric', month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit' }).format(new Date(unixSec * 1000));
   } catch { return '\u2014'; } // 非法输入（服务端形状为 unix 秒）防御：不因单行时间戳中断整表渲染
 };

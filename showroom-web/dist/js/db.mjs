@@ -1,6 +1,6 @@
 // —— db.mjs：数据页四件套（表清单/预览/SQL/备份恢复重置）+ Redis 浏览（库号/键列表/值查看）——
 import { $, enc, esc, showMsg, busy, sleep, derToPem } from './util.mjs';
-import { state, checkProj, SEG, DUMP_CHUNK, platformPem, pemReady, openSettings } from './state.mjs';
+import { state, checkProj, SEG, DUMP_CHUNK, platformPem, pemReady, openSettings, retryOnce } from './state.mjs';
 import { ex, mem, alloc, put, unput, shimCStr, api, apiDo, respErr } from './api.mjs';
 import { apiFail, uploadPayload, ZSTD_LEVEL, sealBegin, pushSlice, pushFlush } from './img.mjs';
 // ================ 标签页 2：数据库（SPEC §9） ================
@@ -51,6 +51,7 @@ async function onDbPreview() {
   if (!table) return showMsg('请先填写或选择表名');
   const limit = Math.min(parseInt($('db-limit').value, 10) || 100, 200);
   $('db-tbl-fb').textContent = '正在预览…';
+  busy($('btn-db-preview'), true, '预览中…'); // B3：请求期间按钮就地「预览中…」并禁用
   try {
     const j = await api('POST', '/_api/db-preview', { project: t.project, table, limit });
     const cols = j.columns || [], rows = j.rows || [];
@@ -60,7 +61,12 @@ async function onDbPreview() {
       (rows.length ? rows.map((r) => `<tr>${r.map((v) => `<td class="wrap mono">${esc(v ?? 'NULL')}</td>`).join('')}</tr>`).join('')
         : `<tr><td colspan="${cols.length || 1}" class="note">（无数据）</td></tr>`) + '</tbody>';
     $('db-tbl-fb').textContent = `表 ${table}：${rows.length} 行（上限 ${limit}）`;
-  } catch (e) { $('db-tbl-fb').textContent = ''; apiFail('表预览', e); }
+  } catch (e) {
+    $('db-tbl-fb').textContent = '';
+    $('db-preview-wrap').classList.add('hidden'); // B5：预览失败清旧表（不残留上一次的数据误导）
+    $('db-preview-tbl').innerHTML = '';
+    apiFail('表预览', e);
+  } finally { busy($('btn-db-preview'), false); }
 }
 
 const DANGEROUS_SQL = /\b(drop|truncate|delete)\b/i;
@@ -80,7 +86,7 @@ async function onDbSql() {
     const j = await api('POST', '/_api/db-sql', { project: t.project, sql, confirm: confirmFlag });
     dbOut(j.out ?? '（无输出）');
     $('db-fb').textContent = '执行完成';
-  } catch (e) { $('db-fb').textContent = ''; apiFail('执行 SQL', e); }
+  } catch (e) { $('db-fb').textContent = ''; dbOut('执行失败（原文见顶部提示）'); apiFail('执行 SQL', e); } // B5：失败态写进数据容器
   busy($('btn-db-sql'), false);
 }
 
@@ -187,8 +193,8 @@ async function onDbDump() {
     a.download = `${t.project}.dump`;
     a.click();
     setTimeout(() => URL.revokeObjectURL(a.href), 60000);
-    $('db-fb').textContent = `备份已下载：${t.project}.dump（解密后 ${plain} 字节）`;
-    dbDumpProgress(total, total, `完成：信封 ${total} 字节（${Math.max(1, Math.ceil(total / DUMP_CHUNK))} 片）→ 解密 ${plain} 字节。`);
+    // C10：完成播报收敛两通道——进度条文案 + db-out（db-fb 行删除，同一信息只出现一次）
+    dbDumpProgress(total, total, `完成：已下载 ${t.project}.dump——信封 ${total} 字节（${Math.max(1, Math.ceil(total / DUMP_CHUNK))} 片）→ 解密 ${plain} 字节。`);
     dbOut(`pg_dump -Fc 三段式下载完成：信封 ${total} 字节（${Math.max(1, Math.ceil(total / DUMP_CHUNK))} 片 × ≤4MB）→ 本地解密 ${plain} 字节。`);
   } catch (e) {
     $('db-fb').textContent = '';
@@ -245,7 +251,7 @@ async function onDbReset() {
     const j = await api('POST', '/_api/db-reset', { project: t.project, confirm: true });
     $('db-fb').textContent = '重置完成';
     dbOut(j.out || '数据库已删除并重建，凭据保持不变。');
-  } catch (e) { $('db-fb').textContent = ''; apiFail('重置数据库', e); }
+  } catch (e) { $('db-fb').textContent = ''; dbOut('执行失败（原文见顶部提示）'); apiFail('重置数据库', e); } // B5：失败态写进数据容器
   busy($('btn-db-reset'), false);
 }
 
@@ -265,7 +271,7 @@ export async function ensureRedisDbs() {
       return;
     }
     $('rd-db').innerHTML = dbs.map((n) => `<option value="${n}">${n}</option>`).join('');
-    rdDbsLoaded = true; // 管理员视图标注已随 R4 裁决移除（顶栏「管」角标唯一）
+    rdDbsLoaded = true; // 管理员全量标注已随 R4 裁决移除（顶栏「管」角标唯一）
   } catch (e) { apiFail('Redis 库编号获取', e); }
 }
 
@@ -275,6 +281,9 @@ async function refreshRedisKeys() {
   const db = $('rd-db').value;
   const q = $('rd-q').value.trim();
   $('rd-keys').innerHTML = '<option value="">加载中…</option>';
+  // B5：换库/重查即清旧值（值面板不残留上一轮选中键的内容）
+  $('rd-meta').textContent = '（点击左侧键查看类型 / 剩余生存时间 / 值）';
+  $('rd-val').textContent = '（未选择键）';
   try {
     const j = await api('GET', `/_api/redis-keys?db=${encodeURIComponent(db)}&q=${encodeURIComponent(q)}&limit=200`);
     const keys = j.keys || [];
@@ -282,11 +291,12 @@ async function refreshRedisKeys() {
       ? keys.map((k) => `<option value="${esc(k)}">${esc(k)}</option>`).join('')
       : '<option value="">（无匹配键）</option>';
     $('rd-count').textContent = `共 ${keys.length} 个键`; // 「可能截断」只在上方静态说明保留一次
-    $('rd-meta').textContent = '（点击左侧键查看类型 / 剩余生存时间 / 值）';
-    $('rd-val').textContent = '（未选择键）';
   } catch (e) {
-    $('rd-keys').innerHTML = ''; $('rd-count').textContent = '';
+    // B5：失败态写进数据容器（键列表占位；顶部条保留原文）
+    $('rd-keys').innerHTML = '<option value="">（加载失败，将自动重试）</option>';
+    $('rd-count').textContent = '';
     apiFail('Redis 键列表获取', e);
+    retryOnce('redis-keys', () => refreshRedisKeys());
   }
 }
 

@@ -31,7 +31,7 @@
      首个 h2 是面板第一个子元素，28px 会顶出面板顶部死空白（R4 用户复核），first-child 归零 */
   #tab-help h2 { margin-top: 28px; }
   #tab-help h2:first-child { margin-top: 0; }
-  /* 视觉QA P1-1：分组/区块题（镜像分片上传、操作输出等）与卡片题（h2）同色 --fg-head，消除 rogue 色 */
+  /* 视觉QA P1-1：分组/区块题（断点续传、操作输出等）与卡片题（h2）同色 --fg-head，消除 rogue 色 */
   .fs > h3, #tab-db > h3, #tab-admin h3 { color: var(--fg-head); }
   .mono { font-family: ui-monospace, "SF Mono", Consolas, monospace; font-size: 12px; font-variant-numeric: tabular-nums; }
   .note { color: var(--fg-dim); font-size: 12px; margin: var(--sp-1) 0 0; }
@@ -49,7 +49,6 @@
   }
   .admin-mark { color: var(--warn); border: 1px solid var(--warn); border-radius: 999px; font-size: 10px; line-height: 1.4; padding: 0 var(--sp-1); }
   .chrome-actions { display: flex; gap: var(--sp-2); flex-wrap: wrap; }
-  .srv { color: var(--fg-dim); font-size: 12px; }
   /* 标签页导航（role=tablist/tab/tabpanel + aria-selected 同步）：当前标签实底高亮 */
   #tabs {
     position: sticky; top: 52px; z-index: 29; background: var(--bg-page); border-bottom: 1px solid var(--bd);
@@ -127,7 +126,6 @@
   .combo { flex-wrap: nowrap; }
   .note-warn { color: var(--warn); }
   .help-list { margin: var(--sp-1) 0 0; padding-left: 1.2rem; }
-  .expert-fold { margin-top: var(--sp-4); border-top: 1px dashed var(--bd); padding-top: var(--sp-2); }
   .hidden { display: none; }
   /* —— 表格与滚动容器 —— */
   table { border-collapse: collapse; width: 100%; font-size: 14px; }
@@ -159,14 +157,13 @@
   #tool-tbl th:nth-child(2), #tool-tbl td:nth-child(2) { width: 52%; }
   #tool-tbl th:nth-child(3), #tool-tbl td:nth-child(3) { width: 12%; }
   #tool-tbl th:nth-child(4), #tool-tbl td:nth-child(4) { width: 16%; }
-  /* 第1轮UI审查P2：非本人项目操作区——灰色文字标签（替代对他人项目必然 E_AUTH 失败的无效按钮） */
-  .not-mine { color: var(--fg-dim); font-size: 12px; }
+  /* 他人项目标签已随项目列表只回本人（32c3484）整链路移除 */
   .tbl-wrap { overflow: auto; max-height: 60vh; border: 1px solid var(--bd); border-radius: var(--r); }
   .tbl-low { max-height: 22vh; } .tbl-mid { max-height: 26vh; }
-  /* 展项表页面级滚动：取消容器裁剪——行内「更多 ▾」菜单（absolute）不再被 overflow 截断 */
+  /* 项目表页面级滚动：取消容器裁剪——行内「更多 ▾」菜单（absolute）不再被 overflow 截断 */
   .tbl-page { overflow: visible; max-height: none; }
   .tbl-page th { position: static; }
-  /* B3：移动端展项表溢出——窄视口表格内横向滚动（外层页面不出横滚条）；≥900px 表格自然放得下，保持 visible 不裁剪「更多 ▾」菜单 */
+  /* B3：移动端项目表溢出——窄视口表格内横向滚动（外层页面不出横滚条）；≥900px 表格自然放得下，保持 visible 不裁剪「更多 ▾」菜单 */
   .tbl-xwrap { min-width: 0; }
   @media (max-width: 900px) { .tbl-xwrap { overflow-x: auto; } }
   #proj-tbl td.wrap { overflow-wrap: anywhere; } /* B3：URL 列长串可断行 */
@@ -202,7 +199,7 @@
   .st-wait { color: var(--fg-dim); }
   .st-breath { animation: st-pulse 1.6s ease-in-out infinite; }
   @keyframes st-pulse { 50% { opacity: .4; } }
-  /* §12.1 一键发布状态条：四段步骤 / 失败标红 / 完成大字 URL；§12.2 管理标签 */
+  /* §12.1 发布状态条：四段步骤 / 失败标红 / 完成大字 URL；§12.2 管理标签 */
   .wz-step.done { background: var(--ok-bg); border-color: var(--ok-bd); color: var(--ok-fg); }
   .wz-step.err { background: var(--bad-bg); border-color: var(--bad-bd); color: var(--bad-fg); }
   .wz-step.skip { opacity: .45; }
@@ -232,12 +229,11 @@
     border: 1px solid var(--bd); border-radius: 999px; background: var(--bg-card);
   }
   .wz-step.on { background: var(--accent); border-color: var(--accent-bd); color: var(--fg-bright); }
-  /* B6：原登录向导 .wz-pane/#wz-key-choices/#lg-expert 样式随专家路径折叠一并移除 */
-  details > summary { cursor: pointer; color: var(--fg-head); }
+  /* R5：details/summary 折叠样式随最后一处说明折叠（镜像库/数据页/发布页）删除而移除 */
   /* 状态监控 */
   #st-events { min-height: 3em; max-height: 9em; }
   #st-logs { min-height: 10em; }
-  /* plan-17 S2：行抽屉（日志跟随）——插在展项行后，data-drawer 标注所属项目 */
+  /* plan-17 S2：行抽屉（日志跟随）——插在项目行后，data-drawer 标注所属项目 */
   .drawer-row > td { background: var(--bg-input); }
   /* 卡片副题 .sub：纯状态文本（成功时不写计数——表格即数据；失败时显示「加载失败（将自动重试）」） */
   .sub { background: none; border: none; color: var(--fg-dim); font-size: 12px; font-weight: 400; padding: 2px 0; height: auto; line-height: inherit; }
@@ -258,19 +254,20 @@
   .rd-keys-pane { flex: 0 0 300px; }
   .rd-val-pane { flex: 1; min-width: 0; }
   #rd-keys, #rd-val { height: min(24rem, 48vh); }
-  /* 视觉QA P1-7：镜像页「等待上传」→ 帮助文字间距（原 2px 过紧） */
-  #up-help { margin-top: 10px; }
-  /* C5：展项表行 hover 背景微变（抽屉行除外） */
+  /* C5：项目表行 hover 背景微变（抽屉行除外） */
   #proj-tbl tbody tr:not(.drawer-row):hover > td { background: rgba(231, 237, 245, .045); }
-  /* C7：长说明段折叠（与发布页「高级说明」同款 details/summary；summary 弱化为辅助色） */
-  details.fold { margin-top: var(--sp-2); }
-  details.fold > summary { font-size: 12px; color: var(--fg-dim); }
-  details.fold[open] > summary { margin-bottom: var(--sp-2); }
   /* D4：发布页 radio 组行与同行输入框同高（label 基线对齐） */
   .radio-row { min-height: var(--control-h); align-items: center; }
   /* D3：项目名输入与其余输入框同字号 14px */
   #pub-project { font-size: 14px; }
-  @media (max-width: 900px) { .srv { display: none; } }
+  /* B6：hover 补齐——正文链接下划线 + 变亮；下拉边框微变 */
+  a:hover:not(.act) { color: var(--fg-bright); text-decoration: underline; }
+  select:not(:disabled):hover { border-color: var(--accent-bd); }
+  /* R5 E1：管理页二级导航（复用主 tab 栏配色，尺寸小一档） */
+  #admin-subnav { display: flex; gap: var(--sp-2); flex-wrap: wrap; align-items: center; margin: 0 0 var(--sp-3); }
+  #admin-subnav button { height: 26px; padding: 0 10px; font-size: 12px; background: var(--bg-input); border-color: var(--bd); color: var(--fg-dim); }
+  #admin-subnav button.on, #admin-subnav button[aria-selected="true"] { background: var(--accent); border-color: var(--accent-bd); color: var(--fg-bright); }
+  #admin-subnav button:not(.on):hover { background: var(--bg-page); border-color: var(--accent-bd); color: var(--fg); }
   @media (prefers-reduced-motion: reduce) {
     *, *::before, *::after { transition: none !important; animation: none !important; scroll-behavior: auto !important; }
   }

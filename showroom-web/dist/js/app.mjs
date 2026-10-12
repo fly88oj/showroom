@@ -48,7 +48,7 @@ async function bootSelfTest() {
     enterApp();
   } catch (e) {
     if (e.error === 'E_AUTH') {
-      $('lg-fb').textContent = '本设备登录凭据已失效（钥匙可能已被删除或回收）：请输入账号密码重新登录，将自动绑定新钥匙。';
+      $('lg-fb').textContent = '本设备登录状态已失效：请输入账号密码重新登录即可。';
       $('lg-pass').focus?.();
     } else {
       apiFail('登录（连接探测）', e);
@@ -62,7 +62,6 @@ async function bootSelfTest() {
 
 
 // —— 登录区事件 ——
-$('lg-srv').textContent = location.origin; // C3：只显示主机地址（/_api 为内部路径细节）
 $('lg-form').addEventListener('submit', onLoginSubmit);
 $('lg-user').addEventListener('input', () => fieldErr('lg-user', ''));
 $('lg-pass').addEventListener('input', () => fieldErr('lg-pass', ''));
@@ -91,23 +90,23 @@ function enterApp() {
   // plan-17 §3：登录即 4 路并发（projects/images/space/whoami），任一路失败不阻断其余（allSettled）
   let focusGuided = false;
   Promise.allSettled([refreshProjects(true), ensureImages(), refreshSpace(true), syncAdmin()]).then(() => {
-    // 验收 16：登录焦点引导——已有展项→首行「打开」；空账号→「+ 发布」CTA（一次性）
+    // 验收 16：登录焦点引导——已有项目→URL 列首链接；空账号→「发布」标签按钮（一次性；R5：顶栏 CTA 已删）
     if (!state.loggedIn || focusGuided) return;
     focusGuided = true;
-    const firstOpen = $('proj-tbl')?.querySelector?.('tbody a.act');
+    const firstOpen = $('proj-tbl')?.querySelector?.('tbody a');
     if (state.projects.length && firstOpen?.focus) firstOpen.focus();
-    else $('btn-new-pub')?.focus?.();
+    else $('tabbtn-pub')?.focus?.();
   });
-  evLive.want = true; startEventsStream(); // 进页即订阅事件流（展项页为默认落地页；验收 11 ≤5s 行状态收敛）
+  evLive.want = true; startEventsStream(); // 进页即订阅事件流（项目页为默认落地页；验收 11 ≤5s 行状态收敛）
 }
 
-// 断网恢复钩子（§3/验收 8）：连网恢复即重订阅事件流 + 强制重取展项列表（免刷新自动补齐）
+// 断网恢复钩子（§3/验收 8）：连网恢复即重订阅事件流 + 强制重取项目列表（免刷新自动补齐）
 if (typeof window !== 'undefined') window.addEventListener('online', () => {
   if (!state.loggedIn) return;
   evLive.want = true; startEventsStream();
   refreshProjects(true); refreshSpace(true);
 });
-// 事件流可见性钩子（§3）：页签隐藏退订（服务端收尸子进程）、回开展项页自动重订
+// 事件流可见性钩子（§3）：页签隐藏退订（服务端收尸子进程）、回开项目页自动重订
 document.addEventListener?.('visibilitychange', () => {
   if (!state.loggedIn) return;
   if (document.hidden) { evLive.want = false; if (evLive.ac) { evLive.ac.abort(); evLive.ac = null; } const st = $('ev-state'); if (st) st.textContent = '页面隐藏，暂停订阅'; }
