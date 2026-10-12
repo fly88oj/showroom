@@ -312,7 +312,7 @@
       <h2 id="dlg-settings-title">设置</h2>
       <button type="button" id="dlg-settings-close">关闭</button>
     </div>
-    <label class="field" for="set-base"><span>对外访问域名（展项列表与完成页主链接用它拼接，如 <span class="mono">http://47.107.155.180:10100</span>；留空用当前访问地址）</span>
+    <label class="field" for="set-base"><span>对外访问域名（展项列表与完成页主链接用它拼接，如 <span class="mono">http://106.55.224.229:10100</span>；留空用当前访问地址）</span>
       <input type="text" id="set-base" class="mono" placeholder="http://…:…"></label>
     <p class="ferr" id="set-base-err" aria-live="polite"></p>
     <label class="field mt-3" for="hd-pempub"><span>平台公钥 PEM（管理员分发的 <span class="mono">platform_rsa.pub</span>；镜像上传与数据库恢复的加密信封公钥。whoami 已自动带回时无需粘贴，此处仅兜底）</span>
@@ -1694,7 +1694,7 @@ function onSetBaseInput() {
     localStorage.setItem('sr.publicBase', v);
     renderProjects();
   } catch {
-    fieldErr('set-base', '对外访问域名须为 http(s):// 开头的完整地址（如 http://47.107.155.180:10100），请修正后重试');
+    fieldErr('set-base', '对外访问域名须为 http(s):// 开头的完整地址（如 http://106.55.224.229:10100），请修正后重试');
   }
 }
 /** 顶栏账号徽标的管理员角标（纯呈现）：boundAdmin=密码登录继承；admin=whoami 结论。 */
