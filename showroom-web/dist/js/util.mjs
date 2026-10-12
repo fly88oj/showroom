@@ -16,7 +16,7 @@ export function showMsg(text, kind = 'err') {
   const el = $('msg');
   el.textContent = text;
   el.className = kind;
-  if (kind === 'ok') setTimeout(() => { if (el.textContent === text) el.className = ''; }, 8000);
+  setTimeout(() => { if (el.textContent === text) el.className = ''; }, 8000); // 成功/错误均 8s 自动消隐（R5b：错误横幅常驻=状态说谎）
 }
 export const errText = (e) => {
   if (e && e.error) {

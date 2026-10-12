@@ -84,9 +84,14 @@ export function upProgress(sent, total) {
   const pct = total ? ((sent / total) * 100).toFixed(1) : 0;
   $('up-status').textContent = `已上传 ${sent} / ${total} 字节（${pct}%）`;
 }
-export function refreshUpIds() {
-  $('up-ids').innerHTML = Object.keys(localStorage)
-    .filter((k) => k.startsWith('sr.up.')).map((k) => `<option value="${esc(k.slice(6))}">`).join('');
+export function latestUpId() {
+  const ids = Object.keys(localStorage).filter((k) => k.startsWith('sr.up.')).map((k) => k.slice(6));
+  return ids.length ? ids[ids.length - 1] : null; // localStorage 键序=记录序，最后即最近一次中断
+}
+export function refreshResumeUi() {
+  // R5b：无中断会话→整个续传区不显示（按钮不可点=错误不存在）；有→仅按钮，编号自动取最近
+  const fs = document.getElementById('fs-resume');
+  if (fs) fs.classList.toggle('hidden', !latestUpId());
 }
 
 export function sealBegin(pem, seedBytes) {
@@ -194,7 +199,7 @@ export async function uploadRest(uploadId, sid, blob, startSeq, sent0, total, no
   ex.sr_seal_end(sid);
   await api('POST', `/_api/import-end?upload=${encodeURIComponent(uploadId)}`, null);
   localStorage.removeItem('sr.up.' + uploadId);
-  refreshUpIds();
+  refreshResumeUi();
   dataInvalidate('space'); refreshSpace(true); // §14.1：import-end 成功后刷新空间条
 }
 
@@ -241,7 +246,7 @@ export async function resumeUploadCore(id, opts = {}) {
   ex.sr_seal_end(sid);
   await api('POST', `/_api/import-end?upload=${encodeURIComponent(id)}`, null);
   localStorage.removeItem('sr.up.' + id);
-  refreshUpIds();
+  refreshResumeUi();
   dataInvalidate('space'); refreshSpace(true); // §14.1：import-end 成功后刷新空间条
   return { pre, zsize: zb.size };
 }

@@ -3,7 +3,7 @@
 import { $, esc, fmtTime, showMsg, errText, fieldErr, clearErrs, busy, copyText, randomProject, toHex } from './util.mjs';
 import { state, ENV_DESC, checkProj, platformPem, pemReady, dataFresh, dataMark, retryOnce } from './state.mjs';
 import { api, consumeNdjson } from './api.mjs';
-import { ensureImages, refreshSpace, onImageRm, apiFail, uploadPayload, resumeUploadCore, sealedTotal, sealBegin, uploadRest, refreshUpIds, upProgress } from './img.mjs';
+import { ensureImages, refreshSpace, onImageRm, apiFail, uploadPayload, resumeUploadCore, sealedTotal, sealBegin, uploadRest, refreshResumeUi, latestUpId, upProgress } from './img.mjs';
 import { fillDbTargets, ensureRedisDbs } from './db.mjs';
 import { adminBuilt, activateAdminPanel } from './admin.mjs';
 // —— plan-17 §4：项目 7 态显示机（服务器真值 5 + 本地在途 2；显示层只出 7 词；C4：已知态不再带英文 tooltip，未知原词回落保留） ——
@@ -138,7 +138,7 @@ export function wireProjTab() {
   $('dp-copy').addEventListener('click', () => copyText($('dp-url').textContent, '访问地址'));
   $('btn-resume').addEventListener('click', onResumeUpload);
   $('pub-project').addEventListener('input', updatePubUrl);
-  refreshUpIds();
+  refreshResumeUi();
 }
 
 // —— 镜像库源：选中镜像 → 自动带出项目与标签到发布表单（形如 user/project:tag；可手改） ——
@@ -505,8 +505,8 @@ async function deployUpload(project, tag) {
   }
   deploy.uploadId = uploadId; // 失败重试凭此断点续传
   localStorage.setItem('sr.up.' + uploadId, JSON.stringify({ seed: toHex(sessSeed), project, tag, size: file.size, zsize: zb.size, name: file.name }));
-  refreshUpIds();
-  $('up-id').value = uploadId;
+  refreshResumeUi();
+  // 上传开始即自动记录（localStorage sr.up.<id>），恢复时自动取最近会话——用户无需知道编号
   const sid = sealBegin(pem, sessSeed);
   await uploadRest(uploadId, sid, zb, 0, 0, total, dpUploadNote);
 }
@@ -532,9 +532,8 @@ let upBusy = false;
 
 async function onResumeUpload() {
   if (upBusy || deploy.busy) return showMsg('已有上传或发布进行中');
-  const id = $('up-id').value.trim();
-  if (!id) return showMsg('请填入要恢复的续传编号（开始上传后自动记录）');
-  if (!localStorage.getItem('sr.up.' + id)) return showMsg('本地无该会话记录（浏览器数据被清则无法续传，请重新上传）');
+  const id = latestUpId();
+  if (!id) return; // 按钮仅在存在中断会话时可见（R5b），此处为防御
   if (!pemReady()) return; // 续传重建信封同样需要 PEM
   upBusy = true;
   busy($('btn-resume'), true, '恢复中…'); // B3：请求期间按钮就地「恢复中…」并禁用

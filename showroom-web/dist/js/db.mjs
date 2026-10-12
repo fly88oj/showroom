@@ -39,7 +39,7 @@ async function onDbTables() {
     const j = await api('GET', `/_api/db-tables?project=${encodeURIComponent(t.project)}`);
     const tables = j.tables || [];
     $('dl-tables').innerHTML = tables.map((n) => `<option value="${esc(n)}">`).join('');
-    $('db-tbl-fb').textContent = ''; // 成功不写「共 N 张表」计数（db-out 保留原文输出）
+    $('db-table').placeholder = tables.length ? '选择或输入表名…' : '该项目暂无表'; // 加载结果如实反映（原静态「选定项目后自动载入」在 0 表时说谎） // 成功不写「共 N 张表」计数（db-out 保留原文输出）
     dbOut(j.out || `\\dt：共 ${tables.length} 张表`);
   } catch (e) { $('db-tbl-fb').textContent = ''; apiFail('表清单获取', e); }
 }
