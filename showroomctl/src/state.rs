@@ -761,6 +761,37 @@ pub fn plan_bound_gc(keys: &[(String, u64)], keep: usize) -> Vec<String> {
 /// 密码绑定钥匙 GC（plan-16 §2.2 key-bind 步骤）：全部 .bound 钥匙（含刚绑的新钥匙）
 /// 按 .pub mtime 保留最近 keep 把，超出的旧钥匙整组清除（.pub/.bound/.admin）。
 /// 幂等；无 .bound 标记的公钥不受影响；exclude（当前刚绑的 kid）从删除名单摘除。
+
+/// 心跳续期：whoami 等显式心跳调用时 touch .bound 文件（mtime=now）。
+/// 30 分钟无心跳 → auth 时检测到过期 → 吊销（删 .pub + .bound）→ E_AUTH。
+pub const BOUND_KEY_TTL_SECS: u64 = 1800;
+
+pub fn touch_bound_key(root: &Path, user: &str, kid: &str) {
+    let p = bound_marker_path(root, user, kid);
+    if p.exists() {
+        let _ = std::fs::write(&p, b""); // touch：更新 mtime
+    }
+}
+
+/// 检查绑定钥匙是否过期（.bound mtime > TTL）；过期则吊销（删 .pub + .bound）。
+/// 返回 true=钥匙有效（或非绑定钥匙不受 TTL 约束）。
+pub fn bound_key_alive(root: &Path, user: &str, kid: &str) -> bool {
+    let bound = bound_marker_path(root, user, kid);
+    if !bound.exists() { return true; } // 非密码绑定钥匙（CI）不受 TTL 约束
+    let Ok(meta) = std::fs::metadata(&bound) else { return true; };
+    let Ok(mtime) = meta.modified() else { return true; };
+    let age = std::time::SystemTime::now().duration_since(mtime)
+        .unwrap_or_default().as_secs();
+    if age > BOUND_KEY_TTL_SECS {
+        // 吊销：删除 .pub + .bound（钥匙从此无法验签）
+        let _ = std::fs::remove_file(&bound);
+        let _ = std::fs::remove_file(tokens_dir(root, user).join(format!("{kid}.pub")));
+        eprintln!("showroomctl: bound key {user}/{kid} expired (no heartbeat for {age}s), revoked");
+        return false;
+    }
+    true
+}
+
 pub fn bound_keys_gc(root: &Path, user: &str, keep: usize, exclude: Option<&str>) -> Vec<String> {
     let keys = bound_keys(root, user);
     let dir = tokens_dir(root, user);

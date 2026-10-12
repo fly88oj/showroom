@@ -388,3 +388,8 @@ mod tests {
         );
     }
 }
+
+/// E_AUTH 检测：密钥过期/吊销时返回特殊错误码供 main.rs 触发 reauth
+pub fn is_key_expired(err: &str) -> bool {
+    err.contains("E_AUTH") && (err.contains("expired") || err.contains("revoked") || err.contains("吊销"))
+}

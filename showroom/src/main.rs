@@ -184,8 +184,22 @@ enum Cmd {
 
 fn main() {
     let cli = Cli::parse();
+    // 密钥过期自动重登（§密钥生命周期）：E_AUTH + expired/revoked → 密码重登 → 重试一次
+    let mut retried_reauth = false;
     if let Err(e) = run(&cli) {
         eprintln!("错误: {e}");
+        if !retried_reauth {
+            let err_str = format!("{e}");
+            if crate::api::is_key_expired(&err_str) {
+                retried_reauth = true;
+                drop(e);
+                eprintln!("\n--- 密钥过期，尝试重新登录 ---\n");
+                match crate::auth::reauth_on_expired(&crate::config::Config::load().unwrap_or_default(), None) {
+                    Ok(_) => { eprintln!("重新登录成功，请重试刚才的命令。"); }
+                    Err(re_err) => { eprintln!("重新登录失败：{re_err}"); }
+                }
+            }
+        }
         std::process::exit(1);
     }
 }

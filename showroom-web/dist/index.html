@@ -1523,7 +1523,9 @@ let appBuilt = false, stTimer = null;
 function enterApp() {
   state.loggedIn = true;
   $('login').classList.add('hidden');
-  if (!appBuilt) { buildApp(); appBuilt = true; }
+  if (!appBuilt) { buildApp();
+  // 密钥生命周期：60s 心跳 → whoami touch 续期；E_AUTH=钥匙过期/吊销 → 自动跳回登录
+  startHeartbeat(); appBuilt = true; }
   $('app').classList.remove('hidden');
   // plan-17 §3：登录即 4 路并发（projects/images/space/whoami），任一路失败不阻断其余（allSettled）
   let focusGuided = false;
@@ -1549,7 +1551,34 @@ document.addEventListener?.('visibilitychange', () => {
   if (document.hidden) { evLive.want = false; if (evLive.ac) { evLive.ac.abort(); evLive.ac = null; } const st = $('ev-state'); if (st) st.textContent = '页面隐藏，暂停订阅'; }
   else if (!$('tab-proj')?.classList?.contains('hidden')) { evLive.want = true; startEventsStream(); }
 });
+
+let heartbeatTimer = null;
+function startHeartbeat() {
+  clearInterval(heartbeatTimer);
+  heartbeatTimer = setInterval(async () => {
+    try {
+      await api('GET', '/_api/whoami', null);
+      // 心跳成功=钥匙有效，静默（不更新 UI）
+    } catch (e) {
+      // E_AUTH=钥匙过期/吊销 → 停心跳+清本地+跳登录
+      clearInterval(heartbeatTimer);
+      localStorage.removeItem('sr.seed');
+      localStorage.removeItem('sr.user');
+      location.reload(); // 最简跳回登录（刷新后无 seed 走密码表单）
+    }
+  }, 60000); // 60s
+}
+
 function logout() {
+  state.admin = false; state.boundAdmin = false; // P3：登出复位 admin 状态，防换账号短暂继承
+  // 密钥生命周期：登出=清本机密钥+远程吊销（不留僵尸钥匙）
+  // key-selfrm fire-and-forget：不阻塞 UI，失败靠 TTL 自然过期兜底
+  if (state.seed && state.user) {
+    api('POST', '/_api/auth/key-selfrm', {}).catch(() => {});
+  }
+  localStorage.removeItem('sr.seed');
+  localStorage.removeItem('sr.user');
+  localStorage.removeItem('sr.pempub');
   state.loggedIn = false;
   clearTimeout(whoamiTimer);
   if (adminBuilt) { // 管理页定时器与发卡/补发/扩容对话框随登录态收尾
@@ -1782,6 +1811,8 @@ async function syncAdmin() {
     clearTimeout(whoamiTimer);
   } catch (e) {
     showMsg('身份查询暂时失败（网络异常或服务不可用），将在约 60 秒后自动重试；当前管理功能保持不变。', 'warn');
+    clearTimeout(whoamiTimer);
+    whoamiTimer = setTimeout(syncAdmin, 60000); // P2-1 修复：重试定时器必须在 return 之前设置
     return; // P2：whoami 网络失败 ≠ 权限收回，保留现有状态等待重试
     apiFail('身份查询（whoami）', e);
     const role = $('hd-role'); if (role) role.textContent = '?'; // 徽标回落 ?

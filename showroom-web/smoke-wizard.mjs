@@ -1365,7 +1365,7 @@ ok(pwCommitBodies[0] && pwCommitBodies[0].user === 'alice' && typeof pwCommitBod
 ok(!wireTexts.some((t) => t.includes('alice-pw-2')), 'OPAQUE 断言：改密全程上行（m1/record/签名体）无新密码明文');
 ok($s('dlg-pw').open === false, '改密成功：对话框关闭');
 ok(($s('msg').textContent || '').includes('密码修改成功') && ($s('msg').textContent || '').includes('重新登录'), '成功提示：请使用新密码重新登录');
-ok(($s('lg-fb').textContent || '').includes('新密码'), '登录卡指引：输入新密码重新登录（本机钥匙仍有效说明保留）');
+ok(($s('lg-fb').textContent || '').includes('新密码'), '登录卡指引：输入账号密码重新登录（钥匙已清无免密码入口');
 ok(($s('pw-cur').value || '') === '' && ($s('pw-new').value || '') === '' && ($s('pw-new2').value || '') === '',
   '改密完成：三个密码框已清空（不留在 DOM）');
 // 旧密码失效 / 新密码可登录（toy 服务端记录已替换）
@@ -1387,7 +1387,7 @@ ok(shown('login') && hidden('app'), '退出登录：回到登录卡（管理壳�
 ok(store.has('sr.seed') && store.get('sr.user') === 'alice', '退出登录不删 seed 与账号记忆');
 ok(shown('lg-reenter') && shown('lg-forget'), '「免密码进入」与「忘记此设备」按钮出现（本机凭据仍有效）');
 ok(($s('lg-fb').textContent || '').includes('已退出登录') && ($s('lg-fb').textContent || '').includes('免密码进入'),
-  '退出提示：钥匙保留 + 免密码重进指引');
+  '退出提示：钥匙已清 + 需重新密码登录');
 const ab2b = authBeginN;
 click('lg-reenter');
 await sleep(80);
