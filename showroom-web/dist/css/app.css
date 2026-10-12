@@ -75,7 +75,7 @@
   .rd-panes:has(> .field) { align-items: stretch; } /* Redis 双栏等高优先于底对齐 */
   .field .row, .grid .row { margin-top: 0; }
   .field { display: flex; flex-direction: column; gap: var(--sp-1); min-width: 0; }
-  .field > span { color: var(--fg-dim); font-size: 13px; margin-bottom: var(--sp-1); } /* §7：label/辅助 13 */
+  .field > span:not(.row):not(.q) { color: var(--fg-dim); font-size: 13px; margin-bottom: var(--sp-1); } /* §7：label/辅助 13；R5b：.row 控件行与 .q 图标不吃 label 下距（曾致发布页控件行悬空 4px） */
   /* 视觉QA P1-4：单行控件统一 --control-h（32px）——输入/下拉与按钮同高同基线；textarea 与多行 listbox 不受限 */
   input[type=text], input[type=password], input[type=number], select {
     width: 100%; background: var(--bg-input); color: var(--fg); border: 1px solid var(--bd-input);
