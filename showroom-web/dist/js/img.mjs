@@ -21,7 +21,7 @@ export async function ensureImages(force = false) {
   try {
     const j = await api('GET', '/_api/images');
     const images = (j.images || []).map(String);
-    $('dl-images').innerHTML = images.map((s) => `<option value="${esc(s)}">`).join('');
+    setComboOptions($('dep-image'), images);
     renderImageList(images); // §14.3：清单容器（删除按钮挂此）与 ComboBox 同源同刷
     imagesLoaded = true;
     dataMark('images');
