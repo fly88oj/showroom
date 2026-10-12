@@ -167,6 +167,12 @@
   .tbl-xwrap { min-width: 0; }
   @media (max-width: 900px) { .tbl-xwrap { overflow-x: auto; } }
   #proj-tbl td.wrap { overflow-wrap: anywhere; } /* B3：URL 列长串可断行 */
+  /* R5b：自绘 Combobox 下拉——同宽、token 配色、替代原生 datalist 弹层 */
+  .combo-pop { position: fixed; z-index: 60; max-height: 240px; overflow-y: auto;
+    background: var(--bg-input); border: 1px solid var(--bd-input); border-radius: 4px;
+    box-shadow: 0 6px 18px rgba(0,0,0,.45); }
+  .combo-item { padding: 6px 10px; font-size: 13px; color: var(--fg); cursor: pointer; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .combo-item:hover, .combo-item.on { background: rgb(43,61,85); }
   /* R5b：字段说明藏 ❓ 图标（hover 出全文）——长括注 label 撑乱栅格基线，禁入布局 */
   .q { display: inline-flex; align-items: center; justify-content: center; width: 15px; height: 15px; margin-left: 4px;
        border: 1px solid var(--bd-input); border-radius: 50%; color: var(--fg-dim); font-size: 11px; cursor: help; user-select: none; }

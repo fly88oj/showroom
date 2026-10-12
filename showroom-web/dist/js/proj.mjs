@@ -1,6 +1,6 @@
 // —— proj.mjs：项目列表/行操作/更多菜单/行抽屉/日志流/事件流 + 发布表单与发布 dp-*（deploy 流）——
 // activateTab/wireTabs 的页签切换与各页签数据源同层（switchTab 别名保留）。
-import { $, esc, fmtTime, showMsg, errText, fieldErr, clearErrs, busy, copyText, randomProject, toHex } from './util.mjs';
+import { $, esc, fmtTime, showMsg, errText, fieldErr, clearErrs, busy, copyText, randomProject, toHex, setComboOptions } from './util.mjs';
 import { state, ENV_DESC, checkProj, platformPem, pemReady, dataFresh, dataMark, retryOnce } from './state.mjs';
 import { api, consumeNdjson } from './api.mjs';
 import { ensureImages, refreshSpace, onImageRm, apiFail, uploadPayload, resumeUploadCore, sealedTotal, sealBegin, uploadRest, refreshResumeUi, latestUpId, upProgress } from './img.mjs';
@@ -107,6 +107,7 @@ const switchTab = activateTab;
 
 // ================ 标签页 1：项目管理（§13.1 三入口并存） ================
 export function wireProjTab() {
+  setComboOptions($('pub-mem'), ['128', '256', '512', '1024', '2048']); // R5b 自绘 Combo
   // R4 用户裁决：副题=纯状态文本，自动刷新兜底，无手动重取入口
   $('proj-tbl').addEventListener('click', onProjAction);
   // B2：「更多 ▾」菜单收起语义补全——document 外点收起 + Esc 收起（点菜单所在 .more-wrap 内不收）
@@ -238,9 +239,8 @@ export function renderProjects() {
   }
   syncLogsDrawerBtn(); // B1：重渲后恢复该行 ▴/aria-expanded（抽屉展开态不因重渲丢失）
   if (moreOpen && moreOpen.isConnected === false) moreOpen = null; // B2：重渲后旧「更多」按钮已脱离文档——指向即清
-  // 项目下拉候选 = 已有项目
-  $('dl-projects').innerHTML = [...new Set(state.projects.map((p) => p.project))]
-    .map((p) => `<option value="${esc(p)}">`).join('');
+  // 项目下拉候选 = 已有项目（R5b 自绘 Combo）
+  setComboOptions($('pub-project'), [...new Set(state.projects.map((p) => p.project))]);
 }
 
 const ACT_CN = { start: '启动', stop: '停止', rollback: '回滚', rm: '删除' };

@@ -129,3 +129,62 @@ export function derToPem(der, label) {
   const b64 = bytesToB64(der).replace(/(.{64})/g, '$1\n').trim();
   return `-----BEGIN ${label}-----\n${b64}\n-----END ${label}-----\n`;
 }
+
+// —— R5b：自绘 Combobox 下拉（原生 datalist 弹层不受控、宽度随浏览器）——
+// setComboOptions(input, options)：options=字符串数组；focus/input 过滤，↑↓ 选择，Enter 确认，
+// 点击选中并派发 change（保持 db-project 选项目自动载表等联动），Esc/失焦/滚动关闭。
+const comboOpts = new WeakMap();
+function comboClose(input) {
+  const pop = input._comboPop;
+  if (pop) { pop.remove(); input._comboPop = null; }
+}
+function comboOpen(input) {
+  if (!document.body) return; // 测试 mock 无 body：弹层路径整体跳过
+  comboClose(input);
+  const opts = comboOpts.get(input) || [];
+  const q = input.value.trim().toLowerCase();
+  const list = q ? opts.filter((o) => o.toLowerCase().includes(q)) : opts;
+  if (!list.length) return;
+  const r = input.getBoundingClientRect();
+  const pop = document.createElement('div');
+  pop.className = 'combo-pop';
+  pop.style.left = r.left + 'px';
+  pop.style.top = (r.bottom + 2) + 'px';
+  pop.style.width = r.width + 'px';
+  let active = -1;
+  const render = () => {
+    pop.innerHTML = list.map((o, i) =>
+      `<div class="combo-item${i === active ? ' on' : ''}" data-v="${esc(o)}">${esc(o)}</div>`).join('');
+  };
+  render();
+  pop.addEventListener('mousedown', (ev) => { // mousedown 抢在 blur 前
+    const it = ev.target.closest('.combo-item');
+    if (!it) return;
+    ev.preventDefault();
+    input.value = it.dataset.v;
+    comboClose(input);
+    input.dispatchEvent(new Event('change', { bubbles: true }));
+  });
+  input._comboKeys = (ev) => {
+    if (!input._comboPop) return;
+    if (ev.key === 'ArrowDown') { ev.preventDefault(); active = Math.min(active + 1, list.length - 1); render(); }
+    else if (ev.key === 'ArrowUp') { ev.preventDefault(); active = Math.max(active - 1, 0); render(); }
+    else if (ev.key === 'Enter' && active >= 0) { ev.preventDefault(); input.value = list[active]; comboClose(input); input.dispatchEvent(new Event('change', { bubbles: true })); }
+    else if (ev.key === 'Escape') comboClose(input);
+  };
+  input.addEventListener('keydown', input._comboKeys);
+  document.body.appendChild(pop);
+  input._comboPop = pop;
+}
+export function setComboOptions(input, options) {
+  if (!input) return;
+  comboOpts.set(input, options.map(String));
+  if (input._comboWired || typeof window === 'undefined') return; // 测试 mock 无 window：仅存选项，不接弹层
+  input._comboWired = true;
+  input.addEventListener('focus', () => comboOpen(input));
+  input.addEventListener('input', () => comboOpen(input));
+  input.addEventListener('blur', () => setTimeout(() => comboClose(input), 120));
+  input.addEventListener('keydown', (ev) => { if (ev.key === 'Escape') comboClose(input); });
+  window.addEventListener('scroll', () => comboClose(input), true);
+  window.addEventListener('resize', () => comboClose(input));
+}

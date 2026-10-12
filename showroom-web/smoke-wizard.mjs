@@ -709,8 +709,8 @@ ok(($s('img-sub').textContent || '') === '', 'S6：镜像库副题成功时保�
 
 // —— §14.1/§14.3 空间条（上传区常显）+ 镜像清单删除（镜像库页）——
 ok(spaceN >= 1, '进入发布区：/_api/space 已拉取（空间条常显）');
-ok(($s('space-note').textContent || '') === '可用空间（已扣预留）：20.0 GB',
-  '空间条：显示 available−reserve（40960−20480 MB → 20.0 GB，一位小数）');
+ok(($s('space-note').textContent || '') === '可用空间：20.0 GB',
+  '空间条：显示 available−reserve 数值（40960−20480 MB → 20.0 GB；R5b 文案无机制自证）');
 // S6：手动「刷新空间」按钮归零——镜像库页进入即强制校准（§14.1 进入本区自动刷新）
 let spBase = spaceN;
 spaceFail = true;
@@ -1715,7 +1715,7 @@ ok(html.includes('id="pub-submit"') && html.includes('id="btn-upload-only"'),
   'plan-17 §5：发布主按钮 pub-submit + 次要按钮「仅上传」（三入口收敛为单表单）');
 for (const s of ['仅上传', '镜像已入库', '镜像库（已入库镜像）']) ok(html.includes(s), `§13.1/§5：入口与镜像源文案「${s}」`);
 ok(html.includes('/_api/images'), '§13.1：/_api/images 已接线（镜像 ComboBox 数据源）');
-ok(html.includes('list="dl-images"') && html.includes('id="dl-images"'), '§13.1：镜像 ComboBox（datalist 前缀过滤）');
+ok(html.includes('setComboOptions') && !html.includes('<datalist'), '§13.1：镜像 ComboBox（R5b 自绘下拉：同宽/token 样式/输入过滤）；原生 datalist 全站归零');
 ok(html.includes('onImagePick'), '§5：镜像库源选中即带出项目/标签（onImagePick 保留）');
 ok(html.includes('<h2>Redis 浏览</h2>') && !html.includes('仅显示您名下项目的库') && !html.includes('管理员视图'),
   'R5 C7：Redis 浏览标题括号删除（隔离语义由空态表达；「管理员视图」标注随 R4 已删）');
@@ -1723,7 +1723,7 @@ ok(!html.includes('非安全边界') && !html.includes('界面级'), 'R5 C7：�
 // —— §14 磁盘空间显示 + 镜像删除 ——
 ok(html.includes('/_api/space') && html.includes('id="space-note"'),
   '§14.1：/_api/space 接线 + 空间条容器（手动刷新按钮按 plan-17 §0-5 归零）');
-ok(html.includes('可用空间（已扣预留）') && html.includes('空间信息不可用'), '§14.1：空间条文案（常显口径 + 失败静默降级）');
+ok(html.includes('可用空间：') && !html.includes('已扣预留') && html.includes('空间信息不可用'), '§14.1：空间条文案（R5b：无机制自证 + 失败静默降级）');
 ok(html.includes('id="img-list"') && html.includes('/_api/image-rm'), '§14.3：镜像清单渲染容器 img-list + image-rm 接线');
 ok(html.includes('回滚/重建将失效') && html.includes('已回收约'), '§14.3：删除 confirm 影响文案 + 顶部条回收量文案');
 ok(html.includes('可到镜像库删除旧镜像后重试'), '§14.2：磁盘 E_QUOTA 顶部条删除引导文案（部署区→镜像库更名）');

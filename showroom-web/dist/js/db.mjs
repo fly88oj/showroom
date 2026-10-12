@@ -1,5 +1,5 @@
 // —— db.mjs：数据页四件套（表清单/预览/SQL/备份恢复重置）+ Redis 浏览（库号/键列表/值查看）——
-import { $, enc, esc, showMsg, busy, sleep, derToPem } from './util.mjs';
+import { $, enc, esc, showMsg, busy, sleep, derToPem, setComboOptions } from './util.mjs';
 import { state, checkProj, SEG, DUMP_CHUNK, platformPem, pemReady, openSettings, retryOnce } from './state.mjs';
 import { ex, mem, alloc, put, unput, shimCStr, api, apiDo, respErr } from './api.mjs';
 import { apiFail, uploadPayload, sealBegin, pushSlice, pushFlush } from './img.mjs';
@@ -25,8 +25,7 @@ function dbTarget() {
   return { project };
 }
 export function fillDbTargets() {
-  $('dl-projects').innerHTML = [...new Set(state.projects.map((p) => p.project))]
-    .map((p) => `<option value="${esc(p)}">`).join('');
+  setComboOptions($('db-project'), [...new Set(state.projects.map((p) => p.project))]);
 }
 
 const dbOut = (text) => { $('db-out').textContent = text; };
@@ -38,7 +37,7 @@ async function onDbTables() {
   try {
     const j = await api('GET', `/_api/db-tables?project=${encodeURIComponent(t.project)}`);
     const tables = j.tables || [];
-    $('dl-tables').innerHTML = tables.map((n) => `<option value="${esc(n)}">`).join('');
+    setComboOptions($('db-table'), tables);
     $('db-table').placeholder = tables.length ? '选择或输入表名…' : '该项目暂无表'; // 加载结果如实反映（原静态「选定项目后自动载入」在 0 表时说谎） // 成功不写「共 N 张表」计数（db-out 保留原文输出）
     dbOut(j.out || `\\dt：共 ${tables.length} 张表`);
   } catch (e) { $('db-tbl-fb').textContent = ''; apiFail('表清单获取', e); }

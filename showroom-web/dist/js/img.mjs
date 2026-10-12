@@ -1,7 +1,7 @@
 // —— img.mjs：镜像库清单/删除 + 空间条 + 加密信封分片上传（seal/zstd 压缩/断点续传）——
 // apiFail 随其磁盘 E_QUOTA 分支的依赖 refreshSpace 就近放置（全部模块均可 import 本层）。
 // upBusy 归 proj.mjs（deploy 流私有旗标）；onResumeUpload 入口亦在 proj.mjs。
-import { $, enc, esc, showMsg, errText, Buffer_fromHex } from './util.mjs';
+import { $, enc, esc, showMsg, errText, Buffer_fromHex, setComboOptions } from './util.mjs';
 import { SEG, WRAP, NONCE, TAG, CHUNK, dataFresh, dataMark, dataInvalidate, retryOnce, platformPem } from './state.mjs';
 import { ex, mem, alloc, put, unput, api, signHeaderPtr, checkResp } from './api.mjs';
 export const apiFail = (what, e) => {
@@ -61,7 +61,7 @@ export async function onImageRm(ev) {
   btn.disabled = false;
 }
 
-// —— §14.1 空间条：GET /_api/space → 「可用空间（已扣预留）：X GB」（GB 一位小数）；失败静默降级 ——
+// —— §14.1 空间条：GET /_api/space → 「可用空间：X GB」（GB 一位小数）；失败静默降级 ——
 // 第1轮UI审查P1：空间条双落点——镜像库页 #space-note 与发布页 #pub-space-note（tar 上传发生在发布页，须就地可见）
 export async function refreshSpace(force = false) {
   if (!force && dataFresh('space')) return; // plan-17 §3：TTL 60s
@@ -70,7 +70,7 @@ export async function refreshSpace(force = false) {
     const j = await api('GET', '/_api/space');
     const freeMb = Number(j.available_mb) - Number(j.reserve_mb); // 显示口径＝可用−预留（SPEC §14.1）
     if (!Number.isFinite(freeMb)) throw new Error('bad space payload');
-    txt = `可用空间（已扣预留）：${(freeMb / 1024).toFixed(1)} GB`;
+    txt = `可用空间：${(freeMb / 1024).toFixed(1)} GB`;
     dataMark('space');
   } catch { txt = '空间信息不可用'; } // 静默降级：不上顶部条、不阻断上传表单
   for (const id of ['space-note', 'pub-space-note']) { const el = $(id); if (el) el.textContent = txt; }
