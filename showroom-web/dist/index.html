@@ -36,8 +36,10 @@
   h1 { font-size: 18px; font-weight: 700; margin: 0; color: var(--fg); }
   h2 { font-size: 14px; font-weight: 600; margin: 0 0 var(--sp-3); color: var(--fg-head); } /* plan-17 §7 卡片题；第1轮UI审查P3：15px→14px 与正文/控件同级（原 h2 { font-size: 15px; font-weight: 600; }） */
   h3 { font-size: 14px; font-weight: 600; margin: 28px 0 10px; color: var(--fg); }
-  /* 视觉QA P0-1：帮助页区块标题（h2）与其他页 H3 区块同为 28px 上距——全局 h2 margin-top:0 在此页造成间距倒挂 */
+  /* 视觉QA P0-1：帮助页区块标题（h2）与其他页 H3 区块同为 28px 上距——全局 h2 margin-top:0 在此页造成间距倒挂；
+     首个 h2 是面板第一个子元素，28px 会顶出面板顶部死空白（R4 用户复核），first-child 归零 */
   #tab-help h2 { margin-top: 28px; }
+  #tab-help h2:first-child { margin-top: 0; }
   /* 视觉QA P1-1：分组/区块题（镜像分片上传、操作输出等）与卡片题（h2）同色 --fg-head，消除 rogue 色 */
   .fs > h3, #tab-db > h3 { color: var(--fg-head); }
   .mono { font-family: ui-monospace, "SF Mono", Consolas, monospace; font-size: 12px; font-variant-numeric: tabular-nums; }
@@ -139,7 +141,7 @@
   /* —— 表格与滚动容器 —— */
   table { border-collapse: collapse; width: 100%; font-size: 14px; }
   /* 视觉QA P1-2：th/td 统一 0 8px 内距与左对齐（列头/数据同轴，消除 20px 偏移）；数值/时间列 .num 右对齐 */
-  th, td { text-align: left; padding: 0 8px; border-bottom: 1px solid var(--bd); white-space: nowrap; }
+  th, td { text-align: left; padding: 7px 8px; border-bottom: 1px solid var(--bd); white-space: nowrap; }
   .num, th.num, td.num { text-align: right; font-variant-numeric: tabular-nums; } /* §7：时间/数字右对齐等宽 */
   th { color: var(--fg-dim); font-size: 12px; font-weight: 600; position: sticky; top: 0; background: var(--bg-card); }
   /* 视觉QA P2-1：行内按钮/链接统一 variant——描边次要样式（表格动作、菜单项、警示条内「设置」与「打开」链接同款） */
