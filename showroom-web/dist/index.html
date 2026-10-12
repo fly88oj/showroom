@@ -590,7 +590,7 @@
 
     <h2>工具下载</h2>
     <div class="tbl-wrap"><table id="tool-tbl">
-      <thead><tr><th>文件</th><th>说明</th><th>大小</th><th></th></tr></thead>
+      <thead><tr><th>文件</th><th>说明</th><th>大小</th><th>操作</th></tr></thead>
       <tbody>
         <tr>
           <td class="mono">showroom</td>
@@ -622,9 +622,9 @@
         <tr><td>退出登录 / 忘记此设备</td><td class="mono">showroom logout [--purge]</td></tr>
         <tr><td>修改密码（登录态自助）</td><td class="wrap">控制台顶部「修改密码」入口（CLI 暂无；管理员可代为重置，见下）</td></tr>
         <tr><td>生成密钥（专家：CI / 机器用户）</td><td class="mono">showroom keygen</td></tr>
-        <tr><td>发放新账号（初始密码 / 管理员）</td><td class="mono">showroomctl user-add &lt;账号&gt; --gen-password [--admin]</td></tr>
-        <tr><td>补发 / 重置密码（管理员）</td><td class="mono">showroomctl user-passwd &lt;账号&gt; --gen-password</td></tr>
-        <tr><td>登记公钥（管理员 · 专家路径）</td><td class="mono">showroomctl user-add &lt;账号&gt; --pubkey &lt;公钥串&gt;</td></tr>
+        <tr class="admin-only hidden"><td>发放新账号（初始密码 / 管理员）</td><td class="mono">showroomctl user-add &lt;账号&gt; --gen-password [--admin]</td></tr>
+        <tr class="admin-only hidden"><td>补发 / 重置密码（管理员）</td><td class="mono">showroomctl user-passwd &lt;账号&gt; --gen-password</td></tr>
+        <tr class="admin-only hidden"><td>登记公钥（管理员 · 专家路径）</td><td class="mono">showroomctl user-add &lt;账号&gt; --pubkey &lt;公钥串&gt;</td></tr>
         <tr><td>展项列表</td><td class="mono">showroom ps</td></tr>
         <tr><td>发布（单表单：本地 tar / 镜像库）/ 仅上传</td><td class="mono">showroom deploy / push / publish</td></tr>
         <tr><td>启动 / 停止 / 回滚 / 删除</td><td class="mono">showroom start / stop / rollback / rm</td></tr>
@@ -959,9 +959,9 @@ const apiFail = (what, e) => {
   // §14.2/§14.3：磁盘空间不足的 E_QUOTA（msg 含「磁盘空间不足」）→ 顶部条追加删除引导并刷新空间条（内存类 E_QUOTA 不追加）
   if (e && e.error === 'E_QUOTA' && (e.msg || '').includes('磁盘空间不足')) {
     if ($('space-note')) refreshSpace(true);
-    return showMsg(`${what}失败 — ${errText(e)}；可到部署区删除旧镜像后重试`);
+    return showMsg(`${what} 失败 — ${errText(e)}；可到部署区删除旧镜像后重试`); // 第2轮xiaozhi P3：what 与「失败」间补空格（CJK/西文混排间距）
   }
-  showMsg(`${what}失败 — ${errText(e)}`);
+  showMsg(`${what} 失败 — ${errText(e)}`);
 };
 // —— 界面规范助手：字段级内联错误（显示于字段旁并聚焦首错）与按钮「处理中…」 ——
 function fieldErr(id, msg) {
@@ -1522,10 +1522,18 @@ async function consumeNdjson(url, onLine, signal) {
 let appBuilt = false, stTimer = null;
 function enterApp() {
   state.loggedIn = true;
+  // 视觉QA P0-2：进入管理壳即清空顶部条（登录失败等残留错误不驻留五页顶部）
+  $('msg').textContent = '';
+  $('msg').className = '';
   $('login').classList.add('hidden');
   if (!appBuilt) { buildApp();
   // 密钥生命周期：60s 心跳 → whoami touch 续期；E_AUTH=钥匙过期/吊销 → 自动跳回登录
   startHeartbeat(); startAutoRefresh(); appBuilt = true; }
+  // 第2轮xiaozhi P2：换号刷新——#hd-user 仅在 buildApp（首次进入）设置，logout 后密码登录新账号会残留旧账号名；
+  // 每次进入都按 state.user 重写；数据页 Redis 作用域同步复位（rdDbsLoaded 置否 → ensureRedisDbs 按新账号重取）
+  $('hd-user').textContent = state.user;
+  rdDbsLoaded = false;
+  $('rd-scope').textContent = '';
   $('app').classList.remove('hidden');
   // plan-17 §3：登录即 4 路并发（projects/images/space/whoami），任一路失败不阻断其余（allSettled）
   let focusGuided = false;
@@ -1590,6 +1598,9 @@ function startHeartbeat() {
 
 function logout() {
   state.admin = false; state.boundAdmin = false; // P3：登出复位 admin 状态，防换账号短暂继承
+  // 第2轮xiaozhi P3：顶部条消息随会话收尾清空（错误提示不跨会话驻留到下一次登录）
+  $('msg').textContent = '';
+  $('msg').className = '';
   // 密钥生命周期：登出=清本机密钥+远程吊销（不留僵尸钥匙）
   // key-selfrm fire-and-forget：不阻塞 UI，失败靠 TTL 自然过期兜底
   if (state.seed && state.user) {
@@ -1839,6 +1850,8 @@ async function syncAdmin() {
     whoamiTimer = setTimeout(() => { if (state.loggedIn) syncAdmin(); }, 60000); // §3：? 60s 周期重试
   }
   state.admin = isAdmin; // §13.1/§13.2：镜像清单与 Redis 浏览据此标注「管理员视图」
+  // 第2轮xiaozhi P3：帮助页 CLI 对照表的 user-add/user-passwd 为管理员命令——按 whoami 结论显隐（非 admin 默认隐藏，防误导）
+  for (const el of document.querySelectorAll('#app .admin-only')) el.classList.toggle('hidden', !isAdmin);
   const role = $('hd-role'); if (role) role.textContent = isAdmin ? '管理员' : '发布者'; // plan-17 §1 角色徽标（whoami 未回=?）
   refreshAdminBadge(); // whoami 落定后同步顶栏角标（纯呈现）
   if (state.projects.length) renderProjects(); // 第1轮UI审查P2：whoami 落定后重判「非本人项目」行操作显隐（列表已加载才重渲，不清加载中占位）

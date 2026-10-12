@@ -221,7 +221,7 @@ async fn dispatch(
     if method == "GET" && path == "/_api/logs-stream" {
         let project = qget(&q, "project")?;
         state::check_name("project", &project)?;
-        user_check(&s.root, &project, &user)?;
+        user_check(&s.root, &project, &user, &kid)?;
         let tail: u32 = q.get("tail").and_then(|t| t.parse().ok()).unwrap_or(100).min(10000);
         let root = s.root.clone();
         return blk(move || streams::logs_stream(&root, &project, tail)).await;
@@ -505,7 +505,7 @@ async fn dispatch(
         ) => {
             let req: ProjectReq = jbody(b)?;
             state::check_name("project", &req.project)?;
-            user_check(&s.root, &req.project, &user)?;
+            user_check(&s.root, &req.project, &user, &kid)?;
             let act: &'static str = match path {
                 "/_api/stop" => "stop",
                 "/_api/start" => "start",
@@ -592,7 +592,7 @@ async fn dispatch(
         ("POST", "/_api/db-sql", Collected::Mem(b)) => {
             let req: DbSqlReq = jbody(b)?;
             state::check_name("project", &req.project)?;
-            user_check(&s.root, &req.project, &user)?;
+            user_check(&s.root, &req.project, &user, &kid)?;
             let (p, sql, confirm) = (req.project, req.sql, req.confirm.unwrap_or(false));
             let root = s.root.clone();
             let out = blk(move || dbmaint::sql(&root, &p, &sql, confirm)).await?;
@@ -602,7 +602,7 @@ async fn dispatch(
         ("GET", "/_api/db-tables", _) => {
             let project = qget(&q, "project")?;
             state::check_name("project", &project)?;
-            user_check(&s.root, &project, &user)?;
+            user_check(&s.root, &project, &user, &kid)?;
             let root = s.root.clone();
             let tables = blk(move || dbmaint::tables(&root, &project)).await?;
             Ok(Json(json!({"tables": tables})))
@@ -611,7 +611,7 @@ async fn dispatch(
         ("POST", "/_api/db-preview", Collected::Mem(b)) => {
             let req: DbPreviewReq = jbody(b)?;
             state::check_name("project", &req.project)?;
-            user_check(&s.root, &req.project, &user)?;
+            user_check(&s.root, &req.project, &user, &kid)?;
             let (p, table, limit) = (req.project, req.table, req.limit.unwrap_or(50));
             let root = s.root.clone();
             let (columns, rows) = blk(move || dbmaint::preview(&root, &p, &table, limit)).await?;
@@ -622,7 +622,7 @@ async fn dispatch(
         ("POST", "/_api/db-dump-begin", Collected::Mem(b)) => {
             let req: DbDumpBeginReq = jbody(b)?;
             state::check_name("project", &req.project)?;
-            user_check(&s.root, &req.project, &user)?;
+            user_check(&s.root, &req.project, &user, &kid)?;
             let root = s.root.clone();
             let o = user.clone();
             let (p, pem) = (req.project, req.client_pub_pem);
@@ -642,7 +642,7 @@ async fn dispatch(
             let project = qget(&q, "project")?;
             let confirm = q.get("confirm").map(|v| v == "true").unwrap_or(false);
             state::check_name("project", &project)?;
-            user_check(&s.root, &project, &user)?;
+            user_check(&s.root, &project, &user, &kid)?;
             let root = s.root.clone();
             let p = project;
             let tmp = tmp.clone();
@@ -653,7 +653,7 @@ async fn dispatch(
         ("POST", "/_api/db-reset", Collected::Mem(b)) => {
             let req: DbResetReq = jbody(b)?;
             state::check_name("project", &req.project)?;
-            user_check(&s.root, &req.project, &user)?;
+            user_check(&s.root, &req.project, &user, &kid)?;
             let root = s.root.clone();
             let (p, confirm) = (req.project, req.confirm.unwrap_or(false));
             blk(move || dbmaint::reset(&root, &p, confirm)).await?;
@@ -695,7 +695,7 @@ async fn dispatch(
 
         ("GET", "/_api/logs", _) => {
             let project = qget(&q, "project")?;
-            user_check(&s.root, &project, &user)?;
+            user_check(&s.root, &project, &user, &kid)?;
             let tail: u32 = q.get("tail").and_then(|t| t.parse().ok()).unwrap_or(100).min(10000);
             let root = s.root.clone();
             let logs = blk(move || ops::logs(&root, &project, tail)).await?;
@@ -704,7 +704,7 @@ async fn dispatch(
 
         ("GET", "/_api/env", _) => {
             let project = qget(&q, "project")?;
-            user_check(&s.root, &project, &user)?;
+            user_check(&s.root, &project, &user, &kid)?;
             let root = s.root.clone();
             let (env, disabled) = blk(move || {
                 Ok((ops::env_of(&root, &project)?, middleware::disabled_middleware(&root)))
@@ -1125,10 +1125,13 @@ fn jbody<T: serde::de::DeserializeOwned>(b: &[u8]) -> R<T> {
     serde_json::from_slice(b).map_err(|e| ApiError::new("E_NAME", format!("bad json body: {e}")))
 }
 
-fn user_check(root: &Path, project: &str, user: &str) -> R<()> {
+/// 项目归属校验：conf.user 属主比对；admin 钥匙旁路（第2轮xiaozhi P2：管理员有跨项目管理
+/// 需求，服务端应允许而非拒绝——与 redis_db_guard / image_guard 的 admin 放行语义一致）。
+/// 非属主且非 admin → E_AUTH（404 同体，与未登记钥匙不可区分）。
+fn user_check(root: &Path, project: &str, user: &str, kid: &str) -> R<()> {
     let conf = state::Conf::load(root, project)
         .map_err(|_| ApiError::new("E_NOTFOUND", format!("no project '{project}'")))?;
-    if conf.user != user {
+    if conf.user != user && !ops::key_is_admin(root, user, kid) {
         return Err(ApiError::new("E_AUTH", format!("project '{project}' belongs to {}", conf.user)));
     }
     Ok(())

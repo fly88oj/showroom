@@ -122,6 +122,7 @@ globalThis.document = {
   createElement: (tag) => makeEl(`dyn-${tag}-${els.size}`),
   body: { appendChild() {} },
   querySelector: () => null,
+  querySelectorAll: () => [], // 真实 DOM API 补齐（syncAdmin 的 #app .admin-only 显隐走此处；桩无树可查=空集）
   addEventListener() {},
   execCommand: () => true, // copyText 降级路径（node 无剪贴板）
 };
@@ -1364,7 +1365,8 @@ ok(pwCommitBodies[0] && pwCommitBodies[0].user === 'alice' && typeof pwCommitBod
   'pw-commit 提交体 {user, record}（报文序列③：原子替换记录）');
 ok(!wireTexts.some((t) => t.includes('alice-pw-2')), 'OPAQUE 断言：改密全程上行（m1/record/签名体）无新密码明文');
 ok($s('dlg-pw').open === false, '改密成功：对话框关闭');
-ok(($s('msg').textContent || '').includes('密码修改成功') && ($s('msg').textContent || '').includes('重新登录'), '成功提示：请使用新密码重新登录');
+ok(($s('msg').textContent || '') === '' && ($s('lg-fb').textContent || '').includes('新密码'),
+  '改密成功提示驻登录卡；顶部条随 logout 清空（第2轮xiaozhi P3：消息不跨会话驻留）');
 ok(($s('lg-fb').textContent || '').includes('新密码'), '登录卡指引：输入账号密码重新登录（钥匙已清无免密码入口');
 ok(($s('pw-cur').value || '') === '' && ($s('pw-new').value || '') === '' && ($s('pw-new2').value || '') === '',
   '改密完成：三个密码框已清空（不留在 DOM）');
@@ -1381,11 +1383,12 @@ ok(await waitFor(() => keyBindBodies.length === kbP + 1 && hidden('login'), 5000
 pwChangeNew = null;
 PWDB.alice.pass = 'alice-pw'; // 还原 toy 口令本（后续场景 3 仍按旧口令编排）
 
-// —— 退出登录（plan-16 §3：不删 seed）→「免密码进入」重进 ——
+// —— 退出登录（8bf79ed 密钥生命周期：登出=清本机密钥+远程吊销；会话内存钥匙仍可免密码重进） ——
 click('btn-logout');
 ok(shown('login') && hidden('app'), '退出登录：回到登录卡（管理壳隐藏）');
-ok(store.has('sr.seed') && store.get('sr.user') === 'alice', '退出登录不删 seed 与账号记忆');
-ok(shown('lg-reenter') && shown('lg-forget'), '「免密码进入」与「忘记此设备」按钮出现（本机凭据仍有效）');
+ok(!store.has('sr.seed') && !store.has('sr.user') && !store.has('sr.pempub'),
+  '密钥生命周期（8bf79ed）：登出清本机 seed/账号记忆/PEM（不留僵尸钥匙）');
+ok(shown('lg-reenter') && hidden('lg-forget'), '「免密码进入」出现（会话内存钥匙）；记忆已清 →「忘记此设备」收起');
 ok(($s('lg-fb').textContent || '').includes('已退出登录') && ($s('lg-fb').textContent || '').includes('免密码进入'),
   '退出提示：钥匙已清 + 需重新密码登录');
 const ab2b = authBeginN;
@@ -1395,6 +1398,8 @@ ok(hidden('login') && shown('app') && authBeginN === ab2b, '免密码进入：�
 
 // ═══ 场景 3：E_AUTH 回落（钥匙被删/GC）→ 密码表单 → 同钥匙重绑（找回/换设备路径） ═══
 mode = 'unregistered'; // 模拟服务端已删除/GC 本机钥匙
+// 8bf79ed 后登出即清记忆（无「记忆账号」可续用）——手工铺垫场景 1 的原钥匙+账号，复现「设备有记忆但钥匙被删」
+store.set('sr.seed', seed1); store.set('sr.user', 'alice');
 els.clear();
 await load(3);
 armBtnText();
@@ -1450,6 +1455,24 @@ ok(keyBindBodies.at(-1).user === 'bob' && keyBindBodies.at(-1).pubkey === pubOf(
 ok(store.get('sr.seed') === seed4 && store.get('sr.user') === 'bob', '沿用同一 seed，记忆新账号');
 ok(hidden('login') && shown('app') && $s('hd-user').textContent === 'bob', '进入管理壳（回显新账号）');
 ok(($s('msg').textContent || '').includes('继承管理员'), 'admin 账号密码登录：显式提示新钥匙继承管理员权限');
+// —— 4c-2. 换号顶栏刷新 + 退出清顶部条（第2轮xiaozhi P2/P3）：logout → 密码登录另一账号 → #hd-user/rd-scope 即时复位 ——
+whoamiAdmin = true;
+clickTab('db'); // bob 视角先点亮数据页「管理员视图」标注（换号前作旧值残留的对照）
+await sleep(80);
+ok($s('rd-scope').textContent === '管理员视图', '换号前置：bob 数据页标注管理员视图');
+clickTab('proj');
+whoamiAdmin = false;
+click('btn-logout');
+ok(($s('msg').textContent || '') === '' && ($s('msg').className || '') === '',
+  '退出登录：顶部条消息清空（错误提示不跨会话驻留）');
+$s('lg-user').value = 'alice';
+$s('lg-pass').value = 'alice-pw';
+fire($s('lg-form'), 'submit', { preventDefault() {} });
+await sleep(200);
+ok(hidden('login') && shown('app') && $s('hd-user').textContent === 'alice',
+  '换号重登：顶栏 #hd-user 即时显示新账号（不残留旧账号名 bob）');
+ok(($s('rd-scope').textContent || '') === '',
+  '换号重登：数据页 Redis 作用域复位（不残留旧账号的管理员视图标注，DB 列表按新账号重取）');
 // —— 4d. whoami 失败（404 E_AUTH）：顶部条报错、管理标签不渲染 ——
 whoamiFail = true; // §12.2：whoami 404 E_AUTH → 顶部条报错、管理标签不渲染
 click('btn-logout');
@@ -1462,7 +1485,13 @@ ok(!els.has('tab-admin') && !els.has('ad-users-tbl'), 'whoami 失败：管理标
 whoamiFail = false;
 
 // ═══ 场景 5：「忘记此设备」（key-selfrm 联动 + 本地清除 + 取消路径 + 无感重生成） ═══
-click('btn-logout'); // 回登录卡（sr.user 仍在 → lg-forget 可见）
+// 8bf79ed 后登出即清记忆（不存在「sr.user 仍在的登录卡」）——改为铺垫记忆后重载模块直测：
+// init 的 refreshLoginChrome 点亮 lg-forget；seed4 已在场景 4 绑定（mode=ok）→ bootSelfTest 直达
+store.set('sr.seed', seed4); store.set('sr.user', 'alice');
+els.clear();
+await load(5);
+armBtnText();
+await sleep(80);
 ok(shown('lg-forget'), '有记忆账号：「忘记此设备」按钮出现');
 const selfrm0 = selfrmN, seed5a = store.get('sr.seed');
 confirmRet = false;
@@ -1544,6 +1573,11 @@ ok(html.includes('专家路径：公钥与机器用户（CLI / CI）') && html.i
 // —— 工具下载（GET /_api/tool/*）：帮助页三行下载卡片 + 签名下载接线 ——
 ok(html.includes('工具下载') && html.includes('id="tool-tbl"') && (html.match(/data-tool-dl=/g) || []).length === 3,
   '工具下载：帮助页三行下载卡片（CLI 二进制 / Agent Skill / 平台公钥）齐备');
+ok(html.includes('<th>文件</th><th>说明</th><th>大小</th><th>操作</th>'),
+  '工具下载：四列表头齐备（第 4 列「操作」不为空，第2轮xiaozhi P3）');
+ok((html.match(/class="admin-only hidden"/g) || []).length === 3
+  && html.includes("document.querySelectorAll('#app .admin-only')"),
+  'CLI 对照表：user-add/user-passwd 三行 admin-only 默认隐藏 + syncAdmin 按 whoami 显隐（第2轮xiaozhi P3）');
 for (const t of ['showroom', 'showroom-publisher.md', 'platform_rsa.pub']) {
   ok(html.includes(`data-tool-dl="${t}"`) && html.includes(`id="tool-size-${t}"`), `工具下载：${t} 行（按钮 + 大小列）存在`);
 }
