@@ -259,8 +259,7 @@ async fn dispatch(
         // plan-17 S1：随身份附带平台公钥 PEM（读 state/platform_rsa.pub；RSA 公钥本就公开，
         // 经签名端点下发零信息暴露；控制台自动缓存 sr.pempub 免手工粘贴，缺文件=空串）
         ("GET", "/_api/whoami", _) => {
-            // 心跳：whoami = 控制台 60s 定时调用 → touch .bound 续期（§密钥生命周期）
-            state::touch_bound_key(&s.root, &user, &kid);
+            // 心跳续期已统一在 auth() 中处理（每次认证 touch）
             Ok(Json(json!({
             "user": user, "kid": kid,
             "admin": ops::key_is_admin(&s.root, &user, &kid),
@@ -991,15 +990,18 @@ async fn auth(s: &S, method: &str, uri: &str, body_sha: &str, headers: &HeaderMa
         eprintln!("showroomctl: auth fail: {e:?} {method} {uri}");
         ApiError::new("E_AUTH", e.to_string())
     })?;
-    // 绑定钥匙 TTL：30 分钟无心跳（whoami touch）→ 过期吊销 → E_AUTH
+    // 绑定钥匙 TTL：每次成功认证 = 活跃信号 → touch .bound 续期；
+    // 30 分钟无任何认证 → 过期吊销 → E_AUTH（CLI push 的每个 chunk、控制台每次请求都自动续期）
     {
         let kid_for_ttl = keys.iter().find(|(_, vk)| {
             common::verify_with_hash(authv, std::slice::from_ref(vk), method, uri, body_sha, now).is_ok()
         }).map(|(k, _)| k.clone());
         if let Some(kid) = kid_for_ttl {
             if !state::bound_key_alive(&s.root, &v.user, &kid) {
-                return Err(ApiError::new("E_AUTH", "bound key expired (no heartbeat >30min)"));
+                return Err(ApiError::new("E_AUTH", "bound key expired (no activity >30min)"));
             }
+            // 每次认证 touch（CLI 每个 API 调用自动续期，长操作 push 的 chunk 天然保活）
+            state::touch_bound_key(&s.root, &v.user, &kid);
         }
     }
     // 定位命中钥匙：单把复验（user 钥匙数 handful、ed25519 验签微秒级，开销可忽略）

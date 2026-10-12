@@ -184,24 +184,40 @@ enum Cmd {
 
 fn main() {
     let cli = Cli::parse();
-    // 密钥过期自动重登（§密钥生命周期）：E_AUTH + expired/revoked → 密码重登 → 重试一次
+    // 密钥过期自动重登+原命令重试（§密钥生命周期）：E_AUTH+expired → 密码重登 → 自动重执行原命令
     let mut retried_reauth = false;
-    if let Err(e) = run(&cli) {
-        eprintln!("错误: {e}");
-        if !retried_reauth {
-            let err_str = format!("{e}");
-            if crate::api::is_key_expired(&err_str) {
-                retried_reauth = true;
-                drop(e);
-                eprintln!("\n--- 密钥过期，尝试重新登录 ---\n");
-                match crate::auth::reauth_on_expired(&crate::config::Config::load().unwrap_or_default(), None) {
-                    Ok(_) => { eprintln!("重新登录成功，请重试刚才的命令。"); }
-                    Err(re_err) => { eprintln!("重新登录失败：{re_err}"); }
+    loop {
+        match execute(&cli) {
+            Ok(()) => break,
+            Err(e) => {
+                let err_str = format!("{e}");
+                if !retried_reauth && crate::api::is_key_expired(&err_str) {
+                    retried_reauth = true;
+                    eprintln!("\n━━━ 本机密钥已过期（30 分钟无活动自动过期）━━━");
+                    eprintln!("请输入密码获取新密钥，原命令将自动继续执行。\n");
+                    match crate::auth::reauth_on_expired(
+                        &crate::config::Config::load().unwrap_or_default(), None
+                    ) {
+                        Ok(_) => {
+                            eprintln!("━━━ 重新登录成功，继续执行 ━━━\n");
+                            continue; // 重试原命令
+                        }
+                        Err(re_err) => {
+                            eprintln!("重新登录失败：{re_err}");
+                            std::process::exit(1);
+                        }
+                    }
                 }
+                eprintln!("错误: {e}");
+                std::process::exit(1);
             }
         }
-        std::process::exit(1);
     }
+}
+
+fn execute(cli: &Cli) -> Result<(), String> {
+    // 密钥生命周期：main 的 retry loop 在 E_AUTH+expired 时自动重登后重新调用此函数
+    run(cli)
 }
 
 // ———— publish/deploy 共用的 positional 解析 ————
