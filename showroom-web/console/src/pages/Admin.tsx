@@ -106,7 +106,7 @@ function UsersPanel() {
     const defs = {
       useradmin: { ep: "user-admin", cn: "设为管理员", body: { user: u.user, admin: true }, ask: `确认将账号 ${u.user} 设为管理员？该账号登录即具管理权限（可管理全部账号、项目与平台状态）。` },
       userunadmin: { ep: "user-admin", cn: "取消管理员", body: { user: u.user, admin: false }, ask: `确认取消账号 ${u.user} 的管理员权限？该账号所有设备同时失去管理权限。` },
-      revoke: { ep: "user-revoke", cn: "吊销整个账号", body: { user: u.user }, ask: `确认吊销整个账号 ${u.user}？其名下全部设备与镜像库访问凭据将一并删除，该账号即刻无法登录。` },
+      revoke: { ep: "user-revoke", cn: "删除账号", body: { user: u.user }, ask: `确认删除账号 ${u.user}？其名下全部设备与镜像库访问凭据将一并删除，该账号即刻无法登录。` },
       keyrm: { ep: "key-rm", cn: "移除此设备", body: { user: u.user, kid }, ask: `确认移除账号 ${u.user} 的此设备（${kid}）？该设备立即无法使用，重新登录即可重新登记。` },
     } as const;
     const d = defs[act];
@@ -161,17 +161,13 @@ function UsersPanel() {
                       {u.admin && <Badge variant="success">管理员</Badge>}
                       <span className="text-xs text-muted-foreground">· 项目数 {u.projects ?? "—"} · 设备 {u.keys?.length ?? 0} 台</span>
                       <span className="flex-1" />
-                      {u.has_password
-                        ? <Badge variant="secondary">已设密码</Badge>
-                        : (
-                          <Button size="sm" variant="outline" onClick={() => passwdSet(u.user)}>
-                            补发密码
-                          </Button>
-                        )}
+                      <Button size="sm" variant="outline" onClick={() => passwdSet(u.user)}>
+                        补发密码
+                      </Button>
                       {u.admin
                         ? <Button size="sm" variant="outline" onClick={() => adminAction(u, "userunadmin")}>取消管理员</Button>
                         : <Button size="sm" variant="outline" onClick={() => adminAction(u, "useradmin")}>设为管理员</Button>}
-                      <Button size="sm" variant="destructive" onClick={() => adminAction(u, "revoke")}>吊销整个账号</Button>
+                      <Button size="sm" variant="destructive" onClick={() => adminAction(u, "revoke")}>删除</Button>
                     </div>
                   </TableCell>
                 </TableRow>
@@ -218,7 +214,13 @@ function UserAddDialog({ open, onOpenChange, onDone }: { open: boolean; onOpenCh
   const [err, setErr] = useState("");
   const [admin, setAdmin] = useState(false);
   const [busy, setBusy] = useState(false);
-  const [result, setResult] = useState<{ login: string; registry: string } | null>(null);
+  const [result, setResult] = useState<{ registry: string } | null>(null);
+  const [pw, setPw] = useState("");
+
+  // 打开即生成随机高强度密码（可改）；连续发放每轮换新值
+  useEffect(() => {
+    if (open) setPw(randAlnum(16));
+  }, [open]);
 
   async function submit() {
     setErr("");
@@ -226,11 +228,11 @@ function UserAddDialog({ open, onOpenChange, onDone }: { open: boolean; onOpenCh
       setErr(name === "" ? "请输入账号名" : "账号名仅限小写字母、数字与连字符，请修改后重试");
       return;
     }
+    if (pw.trim().length < 8) { setErr("密码至少 8 位"); return; }
     setBusy(true);
     try {
-      const j = (await api("POST", "/_api/admin/user-add", { user: name.trim(), password: randAlnum(16), ...(admin ? { admin: true } : {}) })) as { login_password?: string; registry_password?: string; password?: string };
+      const j = (await api("POST", "/_api/admin/user-add", { user: name.trim(), password: pw.trim(), ...(admin ? { admin: true } : {}) })) as { registry_password?: string; password?: string };
       setResult({
-        login: j.login_password || "",
         registry: j.registry_password || j.password || "（响应未携带密码，请联系主机管理员）",
       });
       await onDone();
@@ -251,7 +253,7 @@ function UserAddDialog({ open, onOpenChange, onDone }: { open: boolean; onOpenCh
       <DialogContent className="sm:max-w-md">
         <DialogHeader>
           <DialogTitle>发放新账号</DialogTitle>
-          <DialogDescription>初始密码自动生成，登录后可自行修改。</DialogDescription>
+          <DialogDescription>登录初始密码在表单中设定（默认随机高强度）；登录后可自行修改。</DialogDescription>
         </DialogHeader>
         <FieldGroup>
           <Field data-invalid={!!err}>
@@ -261,6 +263,22 @@ function UserAddDialog({ open, onOpenChange, onDone }: { open: boolean; onOpenCh
               value={name} onChange={(e) => setName(e.target.value)} aria-invalid={!!err}
             />
             {err ? <FieldError>{err}</FieldError> : null}
+          </Field>
+          <Field>
+            <FieldLabel htmlFor="ad-na-pw">登录初始密码</FieldLabel>
+            <div className="flex items-center gap-2">
+              <Input
+                id="ad-na-pw" className="w-52 font-mono" autoComplete="off"
+                value={pw} onChange={(e) => setPw(e.target.value)}
+              />
+              <Button
+                size="sm" variant="outline" type="button"
+                onClick={() => setPw(randAlnum(16))}
+              >
+                换一个
+              </Button>
+            </div>
+            <FieldDescription>默认随机生成高强度密码，可直接修改；请交予发布者妥善保存。</FieldDescription>
           </Field>
           <Field>
             <label className="flex items-center gap-2 text-sm">
@@ -274,18 +292,9 @@ function UserAddDialog({ open, onOpenChange, onDone }: { open: boolean; onOpenCh
           <div className="flex flex-col gap-2 rounded-md border p-3">
             <Alert variant="destructive">
               <ShieldAlertIcon />
-              <AlertTitle>发放成功：以下密码均仅显示一次</AlertTitle>
-              <AlertDescription>请立即交予发布者妥善保存，关闭后无法再查。</AlertDescription>
+              <AlertTitle>发放成功：镜像库密码仅显示一次</AlertTitle>
+              <AlertDescription>登录初始密码即表单所设；镜像库密码请立即交予发布者妥善保存，关闭后无法再查。</AlertDescription>
             </Alert>
-            {result.login && (
-              <div className="flex flex-wrap items-center gap-2">
-                <span className="w-56 shrink-0 text-xs text-muted-foreground">登录初始密码（登录控制台 / CLI）</span>
-                <code className="rounded bg-muted px-2 py-0.5 font-mono text-sm">{result.login}</code>
-                <Button size="sm" variant="outline" onClick={() => copy(result.login, "登录密码")}>
-                  <CopyIcon data-icon="inline-start" />复制密码
-                </Button>
-              </div>
-            )}
             <div className="flex flex-wrap items-center gap-2">
               <span className="w-56 shrink-0 text-xs text-muted-foreground">镜像库密码（docker push 推送用）</span>
               <code className="rounded bg-muted px-2 py-0.5 font-mono text-sm">{result.registry}</code>

@@ -1,11 +1,10 @@
 import { useEffect, useState } from "react";
 import { Button } from "@/components/ui/button";
 import {
-  Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle,
+  Dialog, DialogContent, DialogDescription, DialogHeader, DialogTitle,
 } from "@/components/ui/dialog";
 import { Field, FieldDescription, FieldError, FieldGroup, FieldLabel } from "@/components/ui/field";
 import { Input } from "@/components/ui/input";
-import { Separator } from "@/components/ui/separator";
 import { Textarea } from "@/components/ui/textarea";
 import { toast } from "sonner";
 import { api } from "@/lib/api";
@@ -22,7 +21,6 @@ export function SettingsDialog({
   const [draft, setDraft] = useState(base);
   const [err, setErr] = useState("");
   const [pem, setPem] = useState(state.pem);
-  const [pwOpen, setPwOpen] = useState(false);
 
   useEffect(() => { if (open) { setDraft(base); setPem(state.pem); setErr(""); } }, [open, base]);
 
@@ -73,22 +71,15 @@ export function SettingsDialog({
               </FieldDescription>
             </Field>
           </FieldGroup>
-          <Separator />
-          <DialogFooter className="items-center">
-            <Button variant="outline" onClick={() => setPwOpen(true)}>
-              修改密码…
-            </Button>
-          </DialogFooter>
         </DialogContent>
       </Dialog>
-      <PasswordDialog open={pwOpen} onOpenChange={setPwOpen} />
     </>
   );
 }
 
 /** 修改密码（plan-16 §2.2 真序列）：旧密码本地校验（login-begin+finish，不产生登录态）
  *  → pw-begin {m1} → 本地 reg finish → pw-commit {record} → 引导重登。 */
-function PasswordDialog({ open, onOpenChange }: { open: boolean; onOpenChange: (v: boolean) => void }) {
+export function PasswordDialog({ open, onOpenChange }: { open: boolean; onOpenChange: (v: boolean) => void }) {
   const [cur, setCur] = useState("");
   const [nw, setNw] = useState("");
   const [nw2, setNw2] = useState("");

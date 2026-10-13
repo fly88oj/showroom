@@ -10,7 +10,7 @@ import {
 } from "@/components/ui/navigation-menu";
 import { Tabs, TabsContent } from "@/components/ui/tabs";
 import { TooltipProvider } from "@/components/ui/tooltip";
-import { SettingsDialog } from "@/components/SettingsDialog";
+import { SettingsDialog, PasswordDialog } from "@/components/SettingsDialog";
 import { Login } from "@/pages/Login";
 import { Projects } from "@/pages/Projects";
 import { Images } from "@/pages/Images";
@@ -27,12 +27,13 @@ const PageFallback = () => (
     <Loader2Icon className="size-4 animate-spin" />加载中…
   </div>
 );
-import { LogOutIcon, SettingsIcon } from "lucide-react";
+import { KeyRoundIcon, LogOutIcon, SettingsIcon } from "lucide-react";
 
 /** 壳：登录门 → 顶栏（品牌/账号徽标菜单）+ NavigationMenu 主导航 + 1200px 居中内容卡（三层层级对齐原版） */
 export function Shell() {
   const { boot, session, logout, tab, setTab, pubPrefill, setPubPrefill, projects } = useApp();
   const [settingsOpen, setSettingsOpen] = useState(false);
+  const [pwOpen, setPwOpen] = useState(false);
   const [base, setBase] = useState(() => localStorage.getItem("sr.publicBase") || ""); // 对外访问域名（sr.publicBase）：空且 origin 为私网 → 项目列表出内网提示条
 
   if (boot === "loading") {
@@ -75,6 +76,9 @@ export function Shell() {
             <DropdownMenuContent align="end">
               <DropdownMenuItem onSelect={() => setSettingsOpen(true)}>
                 <SettingsIcon data-icon="inline-start" />设置…
+              </DropdownMenuItem>
+              <DropdownMenuItem onSelect={() => setPwOpen(true)}>
+                <KeyRoundIcon data-icon="inline-start" />修改密码…
               </DropdownMenuItem>
               <DropdownMenuSeparator />
               <DropdownMenuItem variant="destructive" onSelect={logout}>
@@ -135,6 +139,7 @@ export function Shell() {
       </Tabs>
 
       <SettingsDialog open={settingsOpen} onOpenChange={setSettingsOpen} base={base} onBaseChange={setBase} />
+      <PasswordDialog open={pwOpen} onOpenChange={setPwOpen} />
     </div>
   );
 }
