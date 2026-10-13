@@ -179,3 +179,55 @@ export function setComboOptions(input, options) {
   window.addEventListener('scroll', () => comboClose(input), true);
   window.addEventListener('resize', () => comboClose(input));
 }
+
+// —— 键控差分渲染（R1 自动刷新无感化核心）——
+// diffRows(tbody, items, keyOf, cellsHtml)：按 key 复用行元素——数据未变的行零 DOM 触碰
+// （抽屉/焦点/「更多」菜单展开态跨刷新保留），变化的行只替换变化的单元格；新增行就地挂载、
+// 消失行移除；现存键序与期望序不一致（中途插入等）时整体归位一次。
+// tbody 内无可寻址旧行（首次渲染 / 测试 DOM 垫片无树）→ 退化为整表 innerHTML 重建（行为等价）。
+export function diffRows(tb, items, keyOf, cellsHtml) {
+  const rows = new Map();
+  for (const tr of tb.querySelectorAll('tr[data-key]')) rows.set(tr.dataset.key, tr);
+  if (!rows.size) { // 重建路径（含空集整表）
+    tb.innerHTML = items.map((it) => `<tr data-key="${esc(keyOf(it))}">${cellsHtml(it)}</tr>`).join('');
+    return;
+  }
+  const alive = new Set();
+  for (const it of items) {
+    const key = String(keyOf(it));
+    alive.add(key);
+    let tr = rows.get(key);
+    if (!tr) {
+      tr = document.createElement('tr');
+      tr.dataset.key = key;
+      rows.set(key, tr);
+      tb.appendChild(tr); // 先挂表尾，顺序统一在下方收敛
+    }
+    const cur = tr.children, want = tplCells(cellsHtml(it));
+    let i = 0;
+    for (; i < want.length; i++) {
+      const c = cur[i], w = want[i];
+      if (!c) { tr.appendChild(w); continue; }
+      if (c.outerHTML !== w.outerHTML) c.replaceWith(w); // 只换变化的格（同格保留原节点）
+    }
+    while (tr.children.length > want.length) tr.lastChild.remove();
+  }
+  for (const [key, tr] of rows) {
+    if (!alive.has(key)) { tr.remove(); rows.delete(key); }
+  }
+  const actual = [...tb.querySelectorAll('tr[data-key]')].map((tr) => tr.dataset.key);
+  const desired = items.map((it) => String(keyOf(it)));
+  if (!(actual.length === desired.length && actual.every((k, i) => k === desired[i]))) {
+    const frag = document.createDocumentFragment();
+    for (const it of items) frag.appendChild(rows.get(String(keyOf(it))));
+    // 锚取首个非键行（行抽屉等）——它不在 frag 中，逐个前插保序；无锚（全键行）→ 表尾（抽屉随后由调用方归位）
+    const ref = [...tb.children].find((el) => !el.dataset?.key);
+    tb.insertBefore(frag, ref ?? null);
+  }
+}
+/** 行 HTML → 单元格节点序列（cellsHtml 由本文件两个调用点生成，td 为顶层元素，可安全分段）。 */
+function tplCells(rowHtml) {
+  const tr = document.createElement('tr');
+  tr.innerHTML = rowHtml;
+  return [...tr.children];
+}

@@ -80,10 +80,13 @@ const els = new Map();
 function makeEl(id) {
   const el = {
     id, value: '', textContent: '', innerHTML: '', checked: false, disabled: false, open: false,
-    dataset: {}, style: {}, listeners: {}, classList: new Cls(),
+    dataset: {}, style: {}, listeners: {}, classList: new Cls(), attrs: {},
     addEventListener(ev, fn) { (this.listeners[ev] ||= []).push(fn); },
     removeEventListener() {}, append() {}, focus() {}, select() {}, remove() {},
     closest() { return null; },
+    setAttribute(k, v) { this.attrs[k] = String(v); },
+    getAttribute(k) { return this.attrs[k] ?? null; },
+    removeAttribute(k) { delete this.attrs[k]; },
     querySelector() { return $s(id + ':q'); }, // 注册进 els：tbody 等子节点渲染结果可断言
     querySelectorAll() { return []; },
     content: { cloneNode: () => ({}) },
@@ -240,8 +243,8 @@ const resp = (status, obj) => ({ ok: status < 400, status, text: async () => JSO
 // plan-17 S1：whoami 附带平台公钥 PEM（服务端读 state/platform_rsa.pub 下发；假 PEM 仅作自动带回验证，密封前场景 7 会替换真钥）
 const WHOAMI_PEM = '-----BEGIN PUBLIC KEY-----\nMIIBsmokeAutoPem\n-----END PUBLIC KEY-----\n';
 const PROJECTS = { projects: [
-  { project: 'demo', user: 'alice', tag: 'v1', url: '/demo/', status: 'running', port: 8100, mem: '256m', cpu: 0, updated: 1760107200 },
-  { project: 'demo0', user: 'alice', tag: 'v0', url: '/demo0/', status: 'missing', port: 0, mem: '128m', cpu: 0, updated: 1760020800 }, // §4：仅镜像无容器 → 待发布
+  { project: 'demo', user: 'alice', tag: 'v1', version: 'v3', version_seq: 3, cport: 9000, url: '/demo/', status: 'running', port: 8100, mem: '256m', cpu: 0, updated: 1760107200 },
+  { project: 'demo0', user: 'alice', tag: 'v0', version: 'v0', version_seq: 0, cport: 8080, url: '/demo0/', status: 'missing', port: 0, mem: '128m', cpu: 0, updated: 1760020800 }, // §4：仅镜像无容器 → 待发布
 ] };
 let mode = 'unregistered'; // unregistered | ok（key-bind 成功 → ok）
 // —— plan-16 §2.2 auth 端点族 mock（与页面 MOCK 垫片同一 toy 协议：ke2 内嵌验证因子，
@@ -422,10 +425,21 @@ globalThis.fetch = async (url, init = {}) => {
     return resp(200, { ok: true });
   }
   if (u.includes('/_api/health')) return mode === 'ok' ? resp(200, { ok: true }) : resp(404, { error: 'E_AUTH' });
-  if (/\/_api\/(start|stop|rollback|rm)$/.test(u)) { // S4：行动作（rm 走诚实 confirm 后直达）；R5 E3：跨用户操作捕获
+  if (/\/_api\/(start|stop|rm)$/.test(u)) { // S4：行动作（rm 走诚实 confirm 后直达）；R5 E3：跨用户操作捕获
     const act = u.split('/').pop();
     projActs.push({ act, body: JSON.parse(t || '{}') });
-    return resp(200, { ok: true, ...((act === 'start' || act === 'rollback') ? { url: '/demo/' } : {}) });
+    return resp(200, { ok: true, ...(act === 'start' ? { url: '/demo/' } : {}) });
+  }
+  if (/\/_api\/rollback$/.test(u)) { // R2：回滚按版本 {project, version}；显式版本路径另有断言
+    projActs.push({ act: 'rollback', body: JSON.parse(t || '{}') });
+    return resp(200, { ok: true, url: '/demo/' });
+  }
+  if (u.includes('/_api/versions')) { // R2：发布历史（imagePresent=false → 灰置不可选）
+    return resp(200, { project: 'demo', current: 'v3', versions: [
+      { version: 'v1', image: 'alice/demo:u1a2b3c4', time: 1760020800, imagePresent: false },
+      { version: 'v2', image: 'alice/demo:u5d6e7f8', time: 1760064000, imagePresent: true },
+      { version: 'v3', image: 'alice/demo:u9a0b1c2', time: 1760107200, imagePresent: true },
+    ] });
   }
   if (u.includes('/_api/admin/projects')) { // R5 E3：全部项目面板（admin_guard 之后的全量 + owner）；置于 /_api/projects 之前
     adminProjectsN++;
@@ -492,7 +506,7 @@ globalThis.fetch = async (url, init = {}) => {
     dpBeginSnap = { txt: $s('dp-text').textContent || '' }; // import-begin 时状态条应处②上传段
     curUploadId = 'up-smoke-1';
     upSessions[curUploadId] = { received: [] }; // 新会话（旧会话已被 import-end 消费）
-    return resp(200, { upload_id: curUploadId });
+    return resp(200, { upload_id: curUploadId, tag: 'u-smoke-1' }); // R4：上传 tag 服务端分配（版本另有专账）
   }
   if (u.includes('/_api/import-chunk')) {
     if (chunkFailN > 0) { chunkFailN--; return resp(500, { error: 'E_NET', msg: '模拟上传网络失败' }); }
@@ -696,7 +710,8 @@ ok($s('rd-val').textContent.length === 5000, '值以等宽 pre 原样展示');
 // —— §13.1 镜像清单（部署表单数据源）：进入发布区惰性加载 + 前缀过滤 ComboBox 数据 ——
 const imgSrc = readFileSync(new URL('./dist/js/img.mjs', import.meta.url), 'utf8');
 ok(imagesN === 1, '进入管理壳（发布区）：/_api/images 惰性加载一次');
-ok(imgSrc.includes('setComboOptions($(\'dep-image\'), images)') || imgSrc.includes('setComboOptions($(",'), '镜像清单填充 ComboBox（R5b：img.mjs 调 setComboOptions 喂 dep-image）');
+ok(imgSrc.includes("setComboOptions($('dep-image'), images.filter((s) => s.startsWith(`${state.user}/`)))"),
+  '镜像清单填充 ComboBox（R5b：img.mjs 调 setComboOptions 喂 dep-image；R3 库源只显本人——按 <user>/ 前缀过滤）');
 ok(!($s('img-list').innerHTML || '').includes('bob/other'), '普通用户：清单不含他人镜像（服务端按 user 过滤）');
 ok(($s('img-sub').textContent || '') === '', 'S6：镜像库副题成功时保持空（「已加载 N 项」计数删除；清单以下拉 + 表格呈现）');
 // S3：手动「刷新镜像清单」按钮随部署 fieldset 溶解而删除（plan-17 §0-5：显式刷新归零，TTL+写路径失效取代；
@@ -748,7 +763,6 @@ ok(($s('img-list:q').innerHTML || '').includes('alice/demo2:v2'), '删除失败�
 publishQuota = { msg: '磁盘空间不足：可用 10240 MB（已预留 20480 MB）＜ 估算需求 30720 MB（7680 MB × 膨胀因子 4）；请先删除旧镜像后重试' };
 const pubProjKeep = $s('pub-project').value; // 保存当前（随机）项目名：单表单后 E_QUOTA 用例与 §11 共用 pub-project
 $s('pub-project').value = 'demo5';
-$s('pub-tag').value = 'v5';
 spBase = spaceN;
 fire($s('pub-form'), 'submit', { preventDefault() {} }); // plan-17 §5：单表单（原 dep-form）
 await sleep(60);
@@ -774,16 +788,33 @@ ok(!hidden('tab-proj') && hidden('tab-pub'), 'ArrowLeft：pub → proj 切回（
 const rp1 = $s('pub-project').value;
 ok(/^[a-zA-Z0-9]{8}$/.test(rp1), `发布表单预填随机 8 位项目名（${rp1}）`);
 ok(!els.has('pub-shuffle'), '「换一个」按钮已删（预填 + 留空自动生成已全覆盖，无手动重随机入口）');
-ok(($s('pub-url').textContent || '') === `/${rp1}/`, `URL 提示恒 /<项目名>/（当前 /${rp1}/）`);
+ok(($s('pub-url-chip').textContent || '') === `http://showroom.test/${rp1}/`, `访问地址 chip 恒 publicBase+/<项目名>/（当前 ${$s('pub-url-chip').textContent}）`);
+ok(($s('pub-version').textContent || '') === '将发布为 v1', 'R4：无命中项目时版本只读展示「将发布为 v1」（无版本输入框）');
+ok(!els.has('pub-tag'), 'R4：原 pub-tag 版本输入框已移除（版本由平台自动分配，不可编辑）');
 $s('pub-project').value = 'demo'; // 手输（用户可清空手输的路径）
 fire($s('pub-project'), 'input');
-ok($s('pub-url').textContent === '/demo/', 'URL 提示随手输联动');
+ok($s('pub-url-chip').textContent === 'http://showroom.test/demo/', '访问地址 chip 随手输联动');
+ok(($s('pub-version').textContent || '') === '将发布为 v4', 'R4：命中项目行 version_seq=3 → 「将发布为 v4」（单调向前，不占旧号）');
 // —— S3 §5 参数单源预填：命中已有项目 → mem=服务端行值、tag/cport=sr.conf.* 记忆 + 注记 ——
-store.set('sr.conf.demo', JSON.stringify({ tag: 'v9', cport: 9000, ts: Date.parse('2026-10-01T10:00:00') }));
+store.set('sr.conf.demo', JSON.stringify({ tag: 'v9', cport: 9001, ts: Date.parse('2026-10-01T10:00:00') }));
 $s('pub-project').value = 'demo';
 fire($s('pub-project'), 'change');
-ok($s('pub-mem').value === '256' && $s('pub-tag').value === 'v9' && $s('pub-cport').value === '9000',
-  'S3 预填：mem=projects 行值（C4：MiB 裸数字展示）、tag/cport=sr.conf.* 记忆');
+ok($s('pub-mem').value === '256' && $s('pub-cport').value === '9000',
+  'S3 预填：mem/cport=projects 行值（服务端 conf 权威；行缺字段才回落 sr.conf.* 记忆；R4 无 tag 记忆——版本服务端分配）');
+$s('pub-mem-changed').textContent = '与上次发布不同'; // 对齐真实 HTML 静态文案（惰性桩不解析 HTML）
+$s('pub-cport-changed').textContent = '与上次发布不同';
+ok(!$s('pub-mem').classList.contains('changed') && hidden('pub-mem-changed'),
+  'R5：回填值与上次发布相同 → 无变更高亮（amber 边框与「与上次发布不同」注均不出现）');
+$s('pub-mem').value = '512'; fire($s('pub-mem'), 'input');
+ok($s('pub-mem').classList.contains('changed') && !hidden('pub-mem-changed') && ($s('pub-mem-changed').textContent || '') === '与上次发布不同',
+  'R5：改成与上次发布不同 → amber 边框 + 行内注「与上次发布不同」');
+$s('pub-mem').value = '256'; fire($s('pub-mem'), 'input');
+ok(!$s('pub-mem').classList.contains('changed') && hidden('pub-mem-changed'), 'R5：改回相同值 → 高亮与提示消失');
+$s('pub-project').value = 'nosuch';
+fire($s('pub-project'), 'change');
+$s('pub-cport').value = '7777'; fire($s('pub-cport'), 'input');
+ok(!$s('pub-cport').classList.contains('changed') && hidden('pub-cport-changed'),
+  'R5：新项目（无历史行）不提示（无基线即无差异）；后续命中场景复用 demo');
 ok(($s('pub-pref-note').textContent || '').includes('沿用上次发布参数') && ($s('pub-pref-note').textContent || '').includes('10-01'),
   'S3 预填：注记「沿用上次发布参数（MM-DD）」');
 $s('pub-project').value = 'nosuch';
@@ -798,16 +829,18 @@ $s('pub-project').value = 'demo'; // 还原
   ok(!rowHtml.includes('>打开<') && idx('>发布<') >= 0
     && (idx('>停止<') > idx('>发布<') || idx('>启动<') > idx('>发布<')) && idx('更多') > idx('>发布<'),
     'S4：行操作固定顺序 发布·启动/停止·更多▾（R5 A2「打开」删除；R8 F2 与主动词统一）；日志经日志列 ▾ 单入口');
-  ok(idx('回滚到上一版本') > idx('更多') && idx('>环境变量<') > idx('回滚') && idx('>数据<') > idx('>环境变量<') && idx('>删除<') > idx('>数据<'),
-    'S4：更多▾菜单项序 回滚·环境变量·数据·删除');
+  ok(idx('>回滚…<') > idx('更多') && idx('>环境变量<') > idx('>回滚…<') && idx('>数据<') > idx('>环境变量<') && idx('>删除<') > idx('>数据<'),
+    'S4/R2：更多▾菜单项序 回滚·环境变量·数据·删除（回滚打开版本选择对话框）');
   ok(rowHtml.includes('role="menu"') && rowHtml.includes('aria-haspopup'), 'S4：更多菜单 role=menu/aria-haspopup');
   ok(rowHtml.includes('data-act="logs"') && rowHtml.includes('aria-expanded="false"'), 'R5 C4：日志列 ▾ 按钮（aria-expanded 初态 false）');
 }
 fire($s('proj-tbl'), 'click', { target: { closest: () => ({ dataset: { act: 'update', p: 'demo' } }) } });
 await sleep(20);
 ok(!hidden('tab-pub') && hidden('tab-proj'), 'S4：行「更新」→ 跳发布页');
-ok($s('pub-project').value === 'demo' && $s('pub-tag').value === 'v9' && String($s('pub-cport').value) === '9000' && $s('pub-mem').value === '256',
+ok($s('pub-project').value === 'demo' && String($s('pub-cport').value) === '9000' && $s('pub-mem').value === '256',
   'S4/验收 7：更新预填同一套参数（项目/内存/端口一致）');
+$s('pub-project').value = 'demo'; fire($s('pub-project'), 'change'); // 还原（上一步 nosuch 场景残留 7777）
+$s('pub-cport').value = '9000';
 ok(shown('pub-pref-note'), 'S4：更新预填注记可见（沿用上次发布参数）');
 clickTab('proj');
 fire($s('proj-tbl'), 'click', { target: { closest: () => ({ dataset: { act: 'dblink', p: 'demo' } }) } });
@@ -820,6 +853,39 @@ await sleep(30);
   const rmC = confirmMsgs.at(-1) || '';
   ok(rmC.includes('demo') && rmC.includes('数据库将一并删除，如需保留请先在数据页备份下载 .dump'),
     'S4/验收 14：删除 confirm 诚实文案（数据库一并删除 + 数据页备份 .dump 指引）');
+}
+
+// —— R2 回滚对话框：更多菜单打开 → 历史渲染（当前高亮/镜像已删除灰置）→ 选择 confirm 写明版本与镜像 → 提交体 {project, version} ——
+{
+  confirmMsgs.length = 0;
+  fire($s('proj-tbl'), 'click', { target: { closest: () => ({ dataset: { act: 'rollback', p: 'demo' } }) } });
+  await sleep(60);
+  ok($s('dlg-rollback').open === true, 'R2：行「回滚…」→ 版本选择对话框打开');
+  const rb = $s('rb-tbl:q').innerHTML || '';
+  ok(rb.includes('>v1<') && rb.includes('>v2<') && rb.includes('u9a0b1c2') && rb.includes('alice/demo:u1a2b3c4'),
+    'R2：发布历史渲染（版本 + 镜像 + 时间，GET /_api/versions 数据源）');
+  ok((rb.match(/>当前</g) || []).length === 1 && rb.includes('当前版本'), 'R2：当前版本（v3）唯一高亮「当前」且不可再选');
+  ok(rb.includes('镜像已删除') && !rb.includes('data-act="rb-pick" data-version="v1"'),
+    'R2：imagePresent=false 行灰置并注「镜像已删除」（v1 无选择按钮）');
+  ok((rb.match(/data-act="rb-pick"/g) || []).length === 1,
+    'R2：可选行仅 v2（v3=当前高亮不可选、v1=镜像已删除灰置——行级可选择性正确）');
+  confirmRet = false;
+  fire($s('rb-tbl'), 'click', { target: { closest: () => ({ dataset: { act: 'rb-pick', version: 'v2', img: 'alice/demo:u5d6e7f8' } }) } });
+  await sleep(40);
+  ok(projActs.at(-1)?.act !== 'rollback' || projActs.at(-1)?.body?.version !== 'v2' || confirmMsgs.length >= 1,
+    'R2：confirm 取消 → 不提交回滚');
+  const rbAsk = confirmMsgs.at(-1) || '';
+  ok(rbAsk.includes('从版本 v3') && rbAsk.includes('回滚到版本 v2') && rbAsk.includes('使用镜像 alice/demo:u5d6e7f8'),
+    'R2：confirm 文案写明「将从版本 X 回滚到版本 M，使用镜像 <ref>」（危险操作二次确认保持）');
+  confirmRet = true;
+  fire($s('rb-tbl'), 'click', { target: { closest: () => ({ dataset: { act: 'rb-pick', version: 'v2', img: 'alice/demo:u5d6e7f8' } }) } });
+  await sleep(60);
+  const rAct = projActs.at(-1);
+  ok(rAct?.act === 'rollback' && rAct?.body?.project === 'demo' && rAct?.body?.version === 'v2',
+    'R2：回滚提交体 {project, version}（按版本回滚，不再是无参数的「回上一版」）');
+  ok($s('dlg-rollback').open === false, 'R2：回滚成功对话框关闭');
+  ok(($s('proj-fb').textContent || '').includes('已回滚') && ($s('proj-fb').textContent || '').includes('v2'),
+    'R2：回滚结果就地播报（列表版本列刷新）');
 }
 
 // —— S1 §6 对外 URL 策略：设置公网域名后主链接换 base；清空回退；非法域名内联报错 ——
@@ -921,7 +987,7 @@ ok(($s('db-out').textContent || '') === 'pg_dump -Fc 导出完成（服务端原
   });
   $s('hd-pempub').value = ''; fire($s('hd-pempub'), 'input'); // 模拟未配置（Design#3：PEM 事实源 state.pem——字段改动走输入监听，清空即未配置态）
   $s('pub-pem-hint').classList.add('hidden'); // 对齐真实 HTML 初始 hidden（惰性桩无 class 信息）
-  $s('pub-project').value = 'demo9'; $s('pub-tag').value = 'v9';
+  $s('pub-project').value = 'demo9';
   $s('pub-file').files = [fakeFile(new Uint8Array(1024), 'pem-guide.tar')];
   fire($s('pub-form'), 'submit', { preventDefault() {} });
   await sleep(40);
@@ -938,7 +1004,6 @@ ok(($s('db-out').textContent || '') === 'pg_dump -Fc 导出完成（服务端原
 
   // 7a. 一键发布（§12.1）：状态条四段流转——压缩 2 片 → 上传 2 chunk（数据片+收尾片）→ 发布 → 完成
   $s('pub-project').value = 'demo2';
-  $s('pub-tag').value = 'v2';
   $s('pub-file').files = [fakeFile(raw, 'demo-img.tar')];
   dpSnaps.length = 0; compSnaps.length = 0; dpBeginSnap = null; dpPublishSnap = null;
   const spaceBase7a = spaceN;
@@ -949,7 +1014,7 @@ ok(($s('db-out').textContent || '') === 'pg_dump -Fc 导出完成（服务端原
   ok(!$s('dp-bar').classList.contains('err') && hidden('dp-retry'), '成功路径：状态条无标红、无重试按钮');
   ok(shown('dp-done') && $s('dp-url').textContent === 'http://showroom.test/demo2/', '④完成段：大字 URL 展示（externalUrl → http://showroom.test/demo2/）');
   ok(compSnaps.some((t) => /① 压缩中.*%/.test(t)), `①压缩中（x%）进度文案出现（快照 ${compSnaps.filter((t) => t.includes('① 压缩中')).length} 条）`);
-  ok(importBeginBody && importBeginBody.project === 'demo2' && importBeginBody.tag === 'v2', 'import-begin 携带项目与标签');
+  ok(importBeginBody && importBeginBody.project === 'demo2' && !('tag' in importBeginBody), 'R4：import-begin 携带项目、不再上送版本号（tag 由服务端分配）');
   ok(importBeginBody.total_bytes === sealedTotal(zref.length),
     `import-begin total_bytes 按压缩后长度申报（${importBeginBody.total_bytes} = 信封化 ${zref.length}）`);
   ok(uploadRec && uploadRec.zsize === zref.length && uploadRec.size === raw.length,
@@ -978,7 +1043,7 @@ ok(($s('db-out').textContent || '') === 'pg_dump -Fc 导出完成（服务端原
   ok((($s('dp-text').textContent || '').includes('发布')) && ($s('dp-text').textContent || '').includes('失败'), '失败文案含「发布/失败」与错误说明');
   ok(/^[a-zA-Z0-9]{8}$/.test(lastPublishBody.project) && $s('pub-project').value === lastPublishBody.project,
     `项目名留空：自动生成随机 8 位并回填表单（${lastPublishBody.project}）`);
-  ok(($s('pub-url').textContent || '') === `/${lastPublishBody.project}/`, 'URL 提示随自动生成名联动');
+  ok(($s('pub-url-chip').textContent || '') === `http://showroom.test/${lastPublishBody.project}/`, '访问地址 chip 随自动生成名联动');
   ok($s('dp-s1').classList.contains('skip') && $s('dp-s2').classList.contains('skip'), '未选文件：①②段标记为跳过');
   click('dp-retry');
   ok(await waitFor(() => publishN === 2 && shown('dp-done'), 10000), '重试：仅重发发布并完成');
@@ -989,7 +1054,6 @@ ok(($s('db-out').textContent || '') === 'pg_dump -Fc 导出完成（服务端原
   for (let i = 0; i < small.length; i++) small[i] = i % 251;
   chunkFailN = 3; // 首片三连败（页面内部重试 3 次后放弃）
   $s('pub-project').value = 'demo3';
-  $s('pub-tag').value = 'v3';
   $s('pub-file').files = [fakeFile(small, 'small-img.tar')];
   const importStatusBase = importStatusN;
   fire($s('pub-form'), 'submit', { preventDefault() {} });
@@ -1007,7 +1071,6 @@ ok(!($s('dp-text').textContent || '').includes('分片'), 'F9：上传失败文�
 
   // 7a-4. §13.1 入口二「仅上传」：同一 tar 选择，只压缩上传入库——无 publish 调用、③④ skip
   $s('pub-project').value = 'demo4';
-  $s('pub-tag').value = 'v4';
   $s('pub-file').files = [];
   fire($s('btn-upload-only'), 'click', { preventDefault() {} });
   ok(($s('pub-file-err').textContent || '').includes('仅上传'), '仅上传未选文件：字段旁内联错误（含下一步指引）');
@@ -1031,23 +1094,26 @@ ok(!($s('dp-text').textContent || '').includes('分片'), 'F9：上传失败文�
   // 7c. plan-17 §5 镜像库源：radio 切换 → ComboBox 选中镜像带出项目/标签 → ①②skip 直接发布
   fire($s('pub-src-registry'), 'change');
   ok(hidden('pub-src-file-box') && !hidden('pub-src-reg-box') && $s('btn-upload-only').disabled,
-    '镜像库源：tar 框收起、镜像下拉出现、「仅上传」禁用');
+    'R3 Tab：镜像库源选中 → tar 框收起、源镜像下拉出现、「仅上传」禁用（分段 Tab 等价原 radio 行为）');
+  ok($s('pub-src-registry').classList.contains('on') && $s('pub-src-registry').getAttribute('aria-selected') === 'true'
+    && !$s('pub-src-tar').classList.contains('on'), 'R3 Tab：选中态 on + aria-selected 同步');
   $s('dep-image').value = 'alice/demo:v1';
   fire($s('dep-image'), 'input');
-  ok($s('pub-project').value === 'demo' && $s('pub-tag').value === 'v1', '选中镜像：项目与标签自动带出到发布表单（user/project:tag 解析）');
+  ok($s('pub-project').value === 'demo', '选中镜像：项目自动带出到发布表单（user/project:tag 解析；tag 为镜像身份随发布提交）');
   $s('pub-mem').value = '512m'; $s('pub-cport').value = '9090';
   fire($s('pub-form'), 'submit', { preventDefault() {} });
   ok(await waitFor(() => $s('dp-s4').classList.contains('done'), 8000), '镜像库源：直接发布完成（③④ done）');
   ok($s('dp-s1').classList.contains('skip') && $s('dp-s2').classList.contains('skip'), '镜像库源：①压缩②上传自动跳过');
   ok(lastPublishBody.project === 'demo' && lastPublishBody.tag === 'v1'
     && lastPublishBody.mem === '512m' && lastPublishBody.container_port === 9090,
-    '镜像库源提交体：镜像带出的项目/标签 + 内存需求 + 监听端口');
+    '镜像库源提交体：镜像带出的项目 + 所选镜像 tag（部署身份；版本号由服务端另行分配）+ 内存需求 + 监听端口');
   ok(($s('dp-url').textContent || '').includes('/demo/'), '镜像库源：完成大字 URL 含访问地址');
   $s('pub-project').value = 'bad_name!';
   fire($s('pub-form'), 'submit', { preventDefault() {} });
   ok(($s('pub-project-err').textContent || '').includes('项目名仅限'), '发布表单：项目校验为字段内联错误（R5b：用户语言，无正则/保留名）');
   fire($s('pub-src-tar'), 'change');
-  ok(!hidden('pub-src-file-box') && hidden('pub-src-reg-box') && !$s('btn-upload-only').disabled, '切回 tar 源：文件框恢复、仅上传可用');
+  ok(!hidden('pub-src-file-box') && hidden('pub-src-reg-box') && !$s('btn-upload-only').disabled
+    && $s('pub-src-tar').classList.contains('on'), '切回上传镜像源：文件框恢复、仅上传可用（Tab 选中态同步）');
   $s('pub-project').value = 'demo'; // 还原
 
   // 7b. 恢复上传魔数两态：已是 zstd（备份下载产物）原样；原生 -Fc 压缩后
@@ -1093,8 +1159,8 @@ ok(shown('rd-admin-clause'), 'F11：管理员渲染「管理员可见全部逻�
 // —— §13.1/§13.2 管理员全量视角：镜像清单（whoami 回退）+ Redis 库（admin_view 全量）——
 ok(!els.has('img-scope') && !els.has('proj-scope'),
   'R4 裁决：镜像库/展项列表标题旁无「管理员视图」徽章（顶栏「管」角标唯一）');
-ok(imgSrc.includes('setComboOptions($(' + String.fromCharCode(39) + 'dep-image' + String.fromCharCode(39) + '), images)') && imgSrc.includes('renderImageList(images);'),
-  'admin 全量镜像（服务端按身份返回；前端 setComboOptions+renderImageList 原样呈现，不改数据）');
+ok(imgSrc.includes('renderImageList(images);') && imgSrc.includes("startsWith(`${state.user}/`)"),
+  'R3：admin 全量镜像仅用于镜像库清单页（renderImageList 原样呈现）；发布 ComboBox 只喂本人 <user>/ 前缀');
 
 // —— 管理页（R5 E1：五面板二级导航——账号|全部项目|平台状态|宿主配置|实时事件）——
 clickTab('admin');
@@ -1559,6 +1625,88 @@ whoamiFail = false;
 // ═══ 场景 5/6（B5/B6 后已删除）：原「忘记此设备」与登录窗专家路径链路整体移除，
 //     其行为断言由场景 7 的零残留静态断言取代 ═══
 
+// ═══ R1 键控差分渲染：DOM 节点身份断言（微 DOM）——同一 tr 引用跨刷新保留；变化的格才替换； ═══
+// ═══ 新增/删除行做增删；未变行零 DOM 触碰（抽屉/焦点/展开态因此跨刷新保留）。                    ═══
+{
+  // 最小表格 DOM：只覆盖本站生成的行形状（<tr data-key="…"><td…>…</td>…</tr>；td 为顶层元素可安全分段）
+  const parseCells = (html) => html.match(/<td[\s\S]*?<\/td>/g) || [];
+  class FakeTd {
+    constructor(html, parent) { this._html = html; this._parent = parent; }
+    get outerHTML() { return this._html; }
+    replaceWith(c) { const cs = this._parent._cells; cs[cs.indexOf(this)] = c; c._parent = this._parent; }
+    remove() { const cs = this._parent._cells; cs.splice(cs.indexOf(this), 1); }
+  }
+  class FakeTr {
+    constructor(key) { this.dataset = { key }; this._cells = []; }
+    get children() { return this._cells; }
+    get lastChild() { return this._cells[this._cells.length - 1]; }
+    querySelectorAll() { return this._cells; }
+    appendChild(c) { this._cells.push(c); c._parent = this; return c; }
+    set innerHTML(html) { this._cells = parseCells(html).map((c) => new FakeTd(c, this)); }
+    get innerHTML() { return this._cells.map((c) => c._html).join(''); }
+    remove() { const a = this._tb._rows; a.splice(a.indexOf(this), 1); }
+  }
+  class FakeFrag {
+    constructor() { this._nodes = []; }
+    appendChild(n) { this._nodes.push(n); return n; }
+  }
+  class FakeTb {
+    constructor() { this._rows = []; }
+    get children() { return this._rows; }
+    querySelectorAll(sel) { return sel === 'tr[data-key]' ? this._rows.slice() : []; }
+    appendChild(tr) { tr._tb = this; this._rows.push(tr); return tr; }
+    insertBefore(frag, ref) {
+      for (const n of frag._nodes) {
+        const a = this._rows;
+        if (a.includes(n)) a.splice(a.indexOf(n), 1);
+        a.splice(ref ? a.indexOf(ref) : a.length, 0, n);
+        n._tb = this;
+      }
+    }
+    set innerHTML(html) {
+      this._rows.length = 0;
+      for (const m of html.matchAll(/<tr data-key="([^"]*)">([\s\S]*?)<\/tr>/g)) {
+        const tr = new FakeTr(m[1].replace(/&amp;/g, '&'));
+        tr.innerHTML = m[2];
+        tr._tb = this;
+        this._rows.push(tr);
+      }
+    }
+  }
+  const realCreate = globalThis.document.createElement;
+  const realFragment = globalThis.document.createDocumentFragment;
+  globalThis.document.createElement = (tag) => (tag === 'tr' ? new FakeTr('') : realCreate(tag));
+  globalThis.document.createDocumentFragment = () => new FakeFrag();
+  try {
+    const { diffRows } = await import(new URL('./dist/js/util.mjs', import.meta.url).href);
+    const cell = (name, st, tagv) => `<td class="mono">${name}</td><td class="${st ? 'status-ok' : 'status-mid'}">● ${st ? '运行中' : '已停止'}</td><td class="mono">${tagv}</td>`;
+    const tb = new FakeTb();
+    diffRows(tb, [{ project: 'demo', status: 'running', tag: 'v1' }, { project: 'zoo', status: false, tag: 'v1' }],
+      (p) => p.project, (p) => cell(p.project, p.status, p.tag));
+    ok(tb._rows.length === 2 && tb._rows[0].dataset.key === 'demo' && tb._rows[1].dataset.key === 'zoo',
+      'R1：键控差分首渲建行（data-key=项目名，顺序一致）');
+    const trDemo0 = tb._rows[0], cellDemo0 = trDemo0._cells[0], cellDemoStat0 = trDemo0._cells[1], cellZooName0 = tb._rows[1]._cells[0];
+    // 第二次刷新：demo 状态翻转 + zoo 版本变 + 新增 mid + 不删任何行——demo/zoo 行元素身份必须保留
+    diffRows(tb, [{ project: 'demo', status: false, tag: 'v1' }, { project: 'mid', status: true, tag: 'v9' }, { project: 'zoo', status: false, tag: 'v2' }],
+      (p) => p.project, (p) => cell(p.project, p.status, p.tag));
+    ok(tb._rows[0] === trDemo0, 'R1 验收：刷新后同一 tr 元素引用未替换（demo 行身份保留——抽屉/焦点不跳的根保证）');
+    ok(tb._rows[0]._cells[0] === cellDemo0, 'R1：未变化的单元格节点原样保留（零 DOM 触碰）');
+    ok(tb._rows[0]._cells[1].outerHTML.includes('已停止') && tb._rows[0]._cells[1] !== cellDemoStat0,
+      'R1：变化的单元格（状态翻转）就地替换为新节点');
+    ok(tb._rows[2]._cells[0] === cellZooName0, 'R1：未变单元格跨刷新保留（zoo 名称格节点身份不变）');
+    ok(tb._rows[2]._cells[2].outerHTML.includes('v2'), 'R1：版本变化的单元格内容已更新');
+    ok(tb._rows.map((r) => r.dataset.key).join(',') === 'demo,mid,zoo', 'R1：中途插入的行按期望序收敛（插入归位）');
+    // 第三次刷新：删除 mid——行元素移除
+    diffRows(tb, [{ project: 'demo', status: false, tag: 'v1' }, { project: 'zoo', status: false, tag: 'v2' }],
+      (p) => p.project, (p) => cell(p.project, p.status, p.tag));
+    ok(tb._rows.length === 2 && tb._rows[0] === trDemo0 && !tb._rows.some((r) => r.dataset.key === 'mid'),
+      'R1：消失的行做 remove（键控删除），保留行身份继续不动');
+  } finally {
+    globalThis.document.createElement = realCreate;
+    globalThis.document.createDocumentFragment = realFragment;
+  }
+}
+
 // ═══ 场景 7：静态断言（plan-16 登录重设计 / §10.2 更名 / §10.3+§10.4 端点 / §11 零残留 / §12+§13 接入 / 界面规范） ═══
 // —— plan-16：一步登录 + 密钥无感 + OPAQUE 端点 + 专家折叠 ——
 ok(!html.includes('wz-s1') && !html.includes('wz-s2') && !html.includes('wz-s3') && !html.includes('wz-p1') && !html.includes('wz-p2')
@@ -1633,8 +1781,8 @@ ok(html.includes('data-drawer') || html.includes("drawerRow.dataset.drawer"), 'S
   ok(html.includes('markPublishing') && html.includes('markPublishDone') && html.includes('markPublishFail'),
     'S5：本地在途标记（发布中/上传中/异常终态/60s 重建窗口）已接线');
 }
-ok(html.includes('<th>名称</th><th>状态</th><th>对外 URL</th><th>标签</th><th class="num">更新</th><th>操作</th><th>日志</th>'),
-  'S4：列序 名称·状态·对外URL·标签·更新·操作·日志（R5 C4：「详情」列头改「日志」）');
+ok(html.includes('<th>名称</th><th>状态</th><th>对外 URL</th><th>版本</th><th class="num">更新</th><th>操作</th><th>日志</th>'),
+  'S4/R4：列序 名称·状态·对外URL·版本·更新·操作·日志（版本=平台自增版本号；R5 C4：「详情」列头改「日志」）');
 ok(html.includes('visibilitychange') && html.includes('暂无项目——到「发布」页发布第一个项目'),
   'S4：事件流可见性钩子 + 空态卡引导「发布」页（R5 A3：顶栏 CTA 删除后空态改指发布 Tab）');
 ok(html.includes('focusGuided') || html.includes('登录焦点引导'), 'S4/验收 16：登录焦点引导（首行打开 / +发布 CTA）');
@@ -1676,9 +1824,9 @@ ok(html.includes('compressToBlob') && html.includes('uploadPayload'), '上传压
 ok(html.includes('sr_zstd_begin') && html.includes('sr_zstd_push') && html.includes('sr_zstd_end'), 'wasm zstd 压缩会话（sr_zstd_*）已接线');
 ok((html.match(/压缩后上传/g) || []).length >= 1, '上传进度文案标注「压缩后上传」');
 // —— §12.1 一键发布 ——
-ok(html.includes('单表单双镜像源') && html.includes('id="pub-src-tar"') && html.includes('id="pub-src-registry"')
+ok(html.includes('单表单双镜像源') && html.includes('id="pub-src-tabs"') && html.includes('id="pub-src-tar"') && html.includes('id="pub-src-registry"')
   && html.includes('id="pub-src-file-box"') && html.includes('id="pub-src-reg-box"') && html.includes('id="pub-pref-note"'),
-  'plan-17 §5：发布单表单双镜像源（radio + 双源容器 + 预填注记）齐备');
+  'plan-17 §5/R3：发布单表单双镜像源（分段 Tab + 双源容器 + 预填注记）齐备');
 ok(!html.includes('id="dep-form"') && !html.includes('id="dep-project"') && !html.includes('id="dep-tag"')
   && !html.includes('id="dep-mem"') && !html.includes('id="dep-cport"') && !html.includes('id="dep-submit"')
   && !html.includes('id="dep-fb"') && !html.includes('id="dep-project-err"') && !html.includes('id="dep-tag-err"'),
@@ -1687,6 +1835,21 @@ ok((html.match(/内存需求/g) || []).length === 1 && (html.match(/项目端口
   'S3/验收 4：「内存需求」「项目端口」label 全站各恰好 1 次（C4 更名 + R5 A5 展项→项目全局更名）');
 for (const s of ['① 压缩', '② 上传', '③ 发布', '④ 完成']) ok(html.includes(s), `§12.1：状态条分段「${s}」`);
 ok(html.includes('沿用上次发布参数'), '§5：预填注记文案');
+ok(html.includes('id="pub-params"') && html.includes('<summary>部署参数</summary>')
+  && html.indexOf('id="pub-mem"') > html.indexOf('id="pub-params"') && html.indexOf('id="pub-cport"') > html.indexOf('id="pub-params"'),
+  'R5：内存需求/项目端口移入独立「部署参数」可折叠内容区（details，主栅格之外）');
+ok(html.includes('id="pub-mem-changed"') && html.includes('id="pub-cport-changed"') && html.includes('与上次发布不同') && html.includes('input.changed'),
+  'R5：变更高亮接线（行内注容器 + amber 边框样式）');
+ok(html.includes('id="dlg-rollback"') && html.includes('id="rb-tbl"') && html.includes('/_api/versions') && html.includes('data-act="rb-pick"'),
+  'R2：回滚对话框（历史版本表 + 选择按钮）与 GET /_api/versions 接线');
+ok(html.includes('imagePresent') && html.includes('镜像已删除'), 'R2：imagePresent=false 灰置并注「镜像已删除」');
+ok(html.includes('确认从版本') && html.includes('回滚到版本') && html.includes('使用镜像'),
+  'R2：回滚 confirm 写明「从版本 X 回滚到版本 M，使用镜像 <ref>」（危险操作二次确认保持）');
+ok(html.includes('id="pub-url-chip"') && html.includes('id="pub-version"') && !html.includes('id="pub-tag"'),
+  'R6/R4：访问地址就地预览 chip + 版本只读展示（pub-tag 输入框零残留）');
+ok(!html.includes('id="pub-url"') && html.includes('访问地址 /&lt;项目名&gt;/'), 'R6：发布说明静态化（动态注入 span 删除，字面描述）');
+ok(html.includes('diffRows') && html.includes("tr[data-key]") && html.includes('outerHTML'),
+  'R1：键控差分渲染接线（data-key 行复用 + 单元格级比较）');
 ok(html.includes('压缩后总长') && html.includes('断点续传') && html.includes('复制地址'), '§12.1：②段文案「已传/压缩后总长」+ 断点续传 + 完成段复制按钮');
 ok(html.includes('自动生成随机项目名') || html.includes('留空自动生成'), '§12.1：项目留空自动生成随机 8 位');
 ok(html.includes('重试'), '§12.1：失败可重试按钮');
@@ -1710,7 +1873,7 @@ ok(!html.includes('该账号任意钥匙登录即具管理权限') && html.inclu
 // —— §13.1 三入口并存（一键不取代分步）+ §13.2/13.3 Redis 隔离 ——
 ok(html.includes('id="pub-submit"') && html.includes('id="btn-upload-only"'),
   'plan-17 §5：发布主按钮 pub-submit + 次要按钮「仅上传」（三入口收敛为单表单）');
-for (const s of ['仅上传', '镜像已入库', '镜像库（已入库镜像）']) ok(html.includes(s), `§13.1/§5：入口与镜像源文案「${s}」`);
+for (const s of ['仅上传', '镜像已入库', '上传镜像', '镜像库']) ok(html.includes(s), `§13.1/§5/R3：入口与镜像源 Tab 文案「${s}」`);
 ok(html.includes('/_api/images'), '§13.1：/_api/images 已接线（镜像 ComboBox 数据源）');
 ok(html.includes('setComboOptions') && !html.includes('<datalist'), '§13.1：镜像 ComboBox（R5b 自绘下拉：同宽/token 样式/输入过滤）；原生 datalist 全站归零');
 ok(html.includes('onImagePick'), '§5：镜像库源选中即带出项目/标签（onImagePick 保留）');

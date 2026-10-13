@@ -266,18 +266,26 @@
   #rd-keys, #rd-val { height: min(24rem, 48vh); }
   /* C5：项目表行 hover 背景微变（抽屉行除外） */
   #proj-tbl tbody tr:not(.drawer-row):hover > td { background: rgba(231, 237, 245, .045); }
-  /* D4：发布页 radio 组行与同行输入框同高（label 基线对齐） */
-  .radio-row { min-height: var(--control-h); align-items: center; }
   /* D3：项目名输入与其余输入框同字号 14px */
   #pub-project { font-size: 14px; }
+  /* R6：项目输入旁访问地址就地预览 chip */
+  #pub-url-chip { align-self: center; border: 1px solid var(--bd); border-radius: 999px; padding: 2px 10px; white-space: nowrap; }
+  /* R5：部署参数可折叠区（details/summary 与 .fs 分隔线同层级）与变更高亮（amber 边框 + 行内注） */
+  #pub-params { border-top: 1px dashed var(--bd); margin-top: var(--sp-3); }
+  #pub-params summary { cursor: pointer; color: var(--fg); font-size: 14px; font-weight: 600; padding: var(--sp-2) 0; }
+  #pub-params[open] summary { margin-bottom: var(--sp-1); }
+  input.changed { border-color: var(--warn); }
+  .changed-note { color: var(--warn); }
   /* B6：hover 补齐——正文链接下划线 + 变亮；下拉边框微变 */
   a:hover:not(.act) { color: var(--fg-bright); text-decoration: underline; }
   select:not(:disabled):hover { border-color: var(--accent-bd); }
-  /* R5 E1：管理页二级导航（复用主 tab 栏配色，尺寸小一档） */
-  #admin-subnav, #help-subnav { display: flex; gap: var(--sp-2); flex-wrap: wrap; align-items: center; margin: 0 0 var(--sp-3); } /* R9：帮助页同构二级导航 */
-  #admin-subnav button, #help-subnav button { height: 26px; padding: 0 10px; font-size: 12px; background: var(--bg-input); border-color: var(--bd); color: var(--fg-dim); }
-  #admin-subnav button.on, #admin-subnav button[aria-selected="true"], #help-subnav button.on, #help-subnav button[aria-selected="true"] { background: var(--accent); border-color: var(--accent-bd); color: var(--fg-bright); }
-  #admin-subnav button:not(.on):hover, #help-subnav button:not(.on):hover { background: var(--bg-page); border-color: var(--accent-bd); color: var(--fg); }
+  /* R5 E1：管理页二级导航（复用主 tab 栏配色，尺寸小一档）；R3：发布页镜像源分段 Tab 同档 */
+  #admin-subnav, #help-subnav, #pub-src-tabs { display: flex; gap: var(--sp-2); flex-wrap: wrap; align-items: center; margin: 0 0 var(--sp-3); } /* R9：帮助页同构二级导航 */
+  #pub-src-tabs { margin-bottom: 0; } /* 表单内与输入控件同基线（子导航的底部距是页面排版用） */
+  #admin-subnav button, #help-subnav button, #pub-src-tabs button { height: 26px; padding: 0 10px; font-size: 12px; background: var(--bg-input); border-color: var(--bd); color: var(--fg-dim); }
+  #admin-subnav button.on, #admin-subnav button[aria-selected="true"], #help-subnav button.on, #help-subnav button[aria-selected="true"],
+  #pub-src-tabs button.on, #pub-src-tabs button[aria-selected="true"] { background: var(--accent); border-color: var(--accent-bd); color: var(--fg-bright); }
+  #admin-subnav button:not(.on):hover, #help-subnav button:not(.on):hover, #pub-src-tabs button:not(.on):hover { background: var(--bg-page); border-color: var(--accent-bd); color: var(--fg); }
   @media (prefers-reduced-motion: reduce) {
     *, *::before, *::after { transition: none !important; animation: none !important; scroll-behavior: auto !important; }
   }

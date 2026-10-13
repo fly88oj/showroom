@@ -1,8 +1,8 @@
 // —— img.mjs：镜像库清单/删除 + 空间条 + 加密信封分片上传（seal/zstd 压缩/断点续传）——
 // apiFail 随其磁盘 E_QUOTA 分支的依赖 refreshSpace 就近放置（全部模块均可 import 本层）。
 // upBusy 归 proj.mjs（deploy 流私有旗标）；onResumeUpload 入口亦在 proj.mjs。
-import { $, enc, esc, showMsg, errText, Buffer_fromHex, setComboOptions } from './util.mjs';
-import { SEG, WRAP, NONCE, TAG, CHUNK, dataFresh, dataMark, dataInvalidate, retryOnce, platformPem } from './state.mjs';
+import { $, enc, esc, showMsg, errText, Buffer_fromHex, setComboOptions, diffRows } from './util.mjs';
+import { SEG, WRAP, NONCE, TAG, CHUNK, state, dataFresh, dataMark, dataInvalidate, retryOnce, platformPem } from './state.mjs';
 import { ex, mem, alloc, put, unput, api, signHeaderPtr, checkResp } from './api.mjs';
 export const apiFail = (what, e) => {
   // §14.2/§14.3：磁盘空间不足的 E_QUOTA（msg 含「磁盘空间不足」）→ 顶部条追加删除引导并刷新空间条（内存类 E_QUOTA 不追加）
@@ -21,8 +21,10 @@ export async function ensureImages(force = false) {
   try {
     const j = await api('GET', '/_api/images');
     const images = (j.images || []).map(String);
-    setComboOptions($('dep-image'), images);
-    renderImageList(images); // §14.3：清单容器（删除按钮挂此）与 ComboBox 同源同刷
+    // R3 库源只显本人：发布源语义=用自己上传的镜像——ComboBox 按 `<user>/` 前缀过滤
+    // （服务端对非管理员本就只回本人；管理员发布自己项目时同样只看自己的）
+    setComboOptions($('dep-image'), images.filter((s) => s.startsWith(`${state.user}/`)));
+    renderImageList(images); // §14.3：清单容器（删除按钮挂此）保持服务端口径（admin 全量视角）
     dataMark('images');
     // B4 徽章已随 R4 用户裁决移除（管理员身份由顶栏「管」角标表达，同一信息只出现一次）
     $('img-sub').textContent = ''; // 成功不写「已加载 N 项」计数（清单即数据；自动刷新兜底，无手动重取入口）
@@ -35,12 +37,16 @@ export async function ensureImages(force = false) {
     retryOnce('images', () => ensureImages(true)); // §3：3s 自动重试 1 次
   }
 }
-/** §14.3 镜像清单渲染：发布 ComboBox 同源数据；每行尾「删除」按钮（POST /_api/image-rm，内联 GC 秒级回收）。 */
+/** §14.3 镜像清单渲染（R1 键控差分：按镜像引用复用行元素，未变行不动 DOM）：
+ *  发布 ComboBox 同源数据；每行尾「删除」按钮（POST /_api/image-rm，内联 GC 秒级回收）。 */
 function renderImageList(images) {
   const tb = $('img-list').querySelector('tbody');
-  tb.innerHTML = images.length
-    ? images.map((s) => `<tr><td class="mono wrap">${esc(s)}</td><td><button class="act danger" data-act="image-rm" data-img="${esc(s)}">删除</button></td></tr>`).join('')
-    : '<tr><td colspan="2" class="note">（暂无镜像；到「发布」页上传后此处可管理）</td></tr>';
+  if (!images.length) {
+    tb.innerHTML = '<tr><td colspan="2" class="note">（暂无镜像；到「发布」页上传后此处可管理）</td></tr>';
+    return;
+  }
+  diffRows(tb, images, (s) => String(s),
+    (s) => `<td class="mono wrap">${esc(s)}</td><td><button class="act danger" data-act="image-rm" data-img="${esc(s)}">删除</button></td>`);
 }
 
 /** §14.3 删除镜像：confirm 写明镜像名与回滚失效语义 → image-rm → alert 回收量 → 刷新清单+空间条。 */

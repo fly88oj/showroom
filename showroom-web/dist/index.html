@@ -88,7 +88,7 @@
       <div class="tbl-xwrap"><!-- B3：窄视口横向滚动容器 -->
       <table id="proj-tbl">
         <thead><tr>
-          <th>名称</th><th>状态</th><th>对外 URL</th><th>标签</th><th class="num">更新</th><th>操作</th><th>日志</th>
+          <th>名称</th><th>状态</th><th>对外 URL</th><th>版本</th><th class="num">更新</th><th>操作</th><th>日志</th>
         </tr></thead>
         <tbody><tr><td colspan="7" class="note">正在加载…</td></tr></tbody>
       </table>
@@ -98,24 +98,25 @@
 
   <!-- ———— 标签页 2：发布（plan-17 §5：全站唯一参数输入处） ———— -->
   <section id="tab-pub" class="hidden" role="tabpanel" aria-labelledby="tabbtn-pub">
-    <!-- plan-17 §5：发布表单=全站唯一参数输入处。单表单双镜像源：tar→压缩+上传+发布；镜像库→①②skip 直接发布 -->
+    <!-- plan-17 §5：发布表单=全站唯一参数输入处。单表单双镜像源：上传镜像→压缩+上传+发布；镜像库→①②skip 直接发布 -->
     <h2>发布</h2>
     <form id="pub-form" novalidate>
       <div class="grid">
         <label class="field" for="pub-project"><span>项目<span class="q" title="可随意修改，或从已有项目选择；清空后发布将自动生成随机名">&#63;</span></span>
           <span class="row combo">
             <input type="text" id="pub-project" size="12" aria-describedby="pub-project-err">
+            <span class="note mono" id="pub-url-chip" aria-live="polite"></span>
           </span></label>
       </div>
-      <!-- 视觉QA P1-3：镜像源 radio 与其余字段同列栅格（原独立成行脱离列轴，左移 90px） -->
+      <!-- R3：镜像源 radio 组改分段 Tab（两枚按钮，样式复用帮助/管理子导航 26px 档）；控制 tar 文件盒与源镜像盒显隐 -->
       <div class="grid mt-2">
-        <div class="field" role="radiogroup" aria-label="镜像源"><span>镜像源</span>
-          <span class="row radio-row">
-            <label class="row" for="pub-src-tar"><input type="radio" name="pub-src" id="pub-src-tar" checked>本地 tar 文件</label>
-            <label class="row" for="pub-src-registry"><input type="radio" name="pub-src" id="pub-src-registry">镜像库（已入库镜像）</label>
-          </span>
+        <div class="field"><span>镜像源</span>
+          <nav id="pub-src-tabs" aria-label="镜像源">
+            <button type="button" id="pub-src-tar" class="on" role="tab" aria-selected="true" aria-controls="pub-src-file-box" data-src="tar">上传镜像</button>
+            <button type="button" id="pub-src-registry" role="tab" aria-selected="false" aria-controls="pub-src-reg-box" data-src="registry">镜像库</button>
+          </nav>
         </div>
-        <span class="field" id="pub-src-file-box">
+        <span class="field" id="pub-src-file-box" role="tabpanel">
           <span>镜像 tar 文件<span class="q" title="不选则直接发布，要求镜像已入镜像库；选择后自动压缩并上传再发布">&#63;</span></span>
           <span class="row combo">
             <input type="file" id="pub-file" class="file-hidden" aria-describedby="pub-file-err">
@@ -123,28 +124,35 @@
             <span class="note">未选择文件</span>
           </span>
         </span>
-        <span class="field hidden" id="pub-src-reg-box">
-          <label class="field" for="dep-image"><span>镜像<span class="q" title="从已上传的镜像中选择：输入前缀过滤，自动加载">&#63;</span></span>
+        <span class="field hidden" id="pub-src-reg-box" role="tabpanel">
+          <label class="field" for="dep-image"><span>源镜像<span class="q" title="从已上传的镜像中选择：输入前缀过滤，自动加载；只显示本人上传的镜像">&#63;</span></span>
             <input type="text" id="dep-image" size="34" class="mono" placeholder="输入前缀过滤，如 alice/demo:…" aria-describedby="dep-image-err"></label>
           <span class="fb" id="dep-images-fb" aria-live="polite"></span>
         </span>
-        <label class="field" for="pub-tag"><span>版本<span class="q" title="本次发布的版本号（项目列表与回滚按此标识）；选源镜像后自动带出，可改">&#63;</span></span>
-          <input type="text" id="pub-tag" required size="10" aria-describedby="pub-tag-err"></label>
-        <label class="field" for="pub-mem"><span>内存需求（MiB）</span>
-          <input type="text" id="pub-mem" value="256" size="6" placeholder="单位 MiB，如 256…"></label>
-        <label class="field" for="pub-cport"><span>项目端口（容器内）</span>
-          <input type="number" id="pub-cport" value="8080" min="1" max="65535" size="5"></label>
-        <!-- 视觉QA P2-3：「发布」「仅上传」同一行排列（row 包组，不再随栅格换行分离） -->
-        <span class="row" id="pub-actions">
-          <button type="submit" id="pub-submit">发布</button>
-          <button type="button" id="btn-upload-only">仅上传</button>
-        </span>
+        <label class="field" for="pub-version"><span>版本<span class="q" title="版本由平台自动分配，单调递增；回滚后继续向前编号">&#63;</span></span>
+          <span class="row combo"><span class="note mono" id="pub-version" aria-live="polite">将发布为 v1</span></span></label>
+        <!-- R5：内存/端口移入独立「部署参数」可折叠区（与主栅格分离，label 明确）；选中已有项目自动回填上次发布值 -->
       </div>
+      <details class="fs mt-2" id="pub-params">
+        <summary>部署参数</summary>
+        <div class="grid mt-2">
+          <label class="field" for="pub-mem"><span>内存需求（MiB）</span>
+            <input type="text" id="pub-mem" value="256" size="6" placeholder="单位 MiB，如 256…">
+            <span class="note changed-note hidden" id="pub-mem-changed">与上次发布不同</span></label>
+          <label class="field" for="pub-cport"><span>项目端口（容器内）</span>
+            <input type="number" id="pub-cport" value="8080" min="1" max="65535" size="5">
+            <span class="note changed-note hidden" id="pub-cport-changed">与上次发布不同</span></label>
+        </div>
+      </details>
+      <!-- 视觉QA P2-3：「发布」「仅上传」同一行排列（row 包组，不再随栅格换行分离） -->
+      <span class="row" id="pub-actions">
+        <button type="submit" id="pub-submit">发布</button>
+        <button type="button" id="btn-upload-only">仅上传</button>
+      </span>
       <!-- 第1轮UI审查P1：空间条在发布页可见（镜像 tar 上传发生在本页；与镜像库页 #space-note 同数据同刷新） -->
       <p class="note mt-2" id="pub-space-note" aria-live="polite">可用空间：…</p>
       <p class="note hidden" id="pub-pref-note" aria-live="polite"></p>
       <p class="ferr" id="pub-project-err" aria-live="polite"></p>
-      <p class="ferr" id="pub-tag-err" aria-live="polite"></p>
       <p class="ferr" id="pub-file-err" aria-live="polite"></p>
       <p class="ferr" id="dep-image-err" aria-live="polite"></p>
     </form>
@@ -175,7 +183,7 @@
     <div class="fs">
       <h3>发布说明</h3>
       <ol class="note help-list">
-        <li>选「本地 tar 文件」→ 自动压缩 → 上传 → 发布 → 展示访问地址（恒为 <span class="mono" id="pub-url">/&lt;project&gt;/</span>）。</li>
+        <li>选「上传镜像」→ 自动压缩 → 上传 → 发布 → 展示访问地址（恒为「访问地址 /&lt;项目名&gt;/」形式）。</li>
         <li>选「镜像库」→ 直接发布已入库镜像（①②两段自动跳过）。</li>
         <li>任一步失败状态条标红，可点「重试」；「仅上传」只把镜像送入镜像库（不发布），适合先备好镜像、稍后发布。</li>
       </ol>
@@ -397,6 +405,20 @@
     </table></div>
     </div>
   </section>
+
+  <!-- 回滚对话框（R2 版本选择）：历史版本列表（当前高亮/镜像已删除灰置）→ 选择即 confirm 写明版本与镜像 -->
+  <dialog id="dlg-rollback" aria-labelledby="dlg-rollback-title">
+    <div class="dlg-head">
+      <h2 id="dlg-rollback-title">回滚 · <span class="mono" id="rb-project"></span></h2>
+      <button type="button" id="rb-close">关闭</button>
+    </div>
+    <p class="note">选择要回滚到的版本：将用该版本发布时的镜像重新部署，当前版本随即切换（此后新发布继续向前编号）。</p>
+    <div class="tbl-wrap mt-2"><table id="rb-tbl">
+      <thead><tr><th>版本</th><th>镜像</th><th class="num">发布时间</th><th>操作</th></tr></thead>
+      <tbody><tr><td colspan="4" class="note">正在加载…</td></tr></tbody>
+    </table></div>
+    <p class="fb" id="rb-fb" aria-live="polite"></p>
+  </dialog>
 
   <!-- 环境变量模态（§6 键值 + 中文说明） -->
   <dialog id="dlg-env" aria-labelledby="dlg-env-title">

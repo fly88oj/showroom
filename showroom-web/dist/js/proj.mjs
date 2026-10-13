@@ -1,6 +1,6 @@
 // —— proj.mjs：项目列表/行操作/更多菜单/行抽屉/日志流/事件流 + 发布表单与发布 dp-*（deploy 流）——
 // activateTab/wireTabs 的页签切换与各页签数据源同层。
-import { $, esc, fmtTime, showMsg, errText, fieldErr, clearErrs, busy, copyText, randAlnum, toHex, setComboOptions } from './util.mjs';
+import { $, esc, fmtTime, showMsg, errText, fieldErr, clearErrs, busy, copyText, randAlnum, toHex, setComboOptions, diffRows } from './util.mjs';
 import { state, ENV_DESC, checkProj, platformPem, pemReady, dataFresh, dataMark, retryOnce, myProjectNames } from './state.mjs';
 import { api, consumeNdjson } from './api.mjs';
 import { ensureImages, refreshSpace, onImageRm, apiFail, uploadPayload, resumeUploadCore, sealedTotal, sealBegin, uploadRest, refreshResumeUi, latestUpId, upProgress } from './img.mjs';
@@ -59,7 +59,7 @@ function rowActionsHtml(p) {
   if (st.act.more) html += `<span class="more-wrap">
           <button class="act" data-act="more" data-p="${q}" aria-haspopup="menu" aria-expanded="false">更多 ▾</button>
           <span class="menu hidden" role="menu" aria-label="更多操作">
-            <button class="act" role="menuitem" data-act="rollback" data-p="${q}">回滚到上一版本</button>
+            <button class="act" role="menuitem" data-act="rollback" data-p="${q}">回滚…</button>
             <button class="act" role="menuitem" data-act="env" data-p="${q}">环境变量</button>
             <button class="act" role="menuitem" data-act="dblink" data-p="${q}">数据</button>
             <button class="act danger" role="menuitem" data-act="rm" data-p="${q}">删除</button>
@@ -79,9 +79,20 @@ const usingLanOrigin = () => !localStorage.getItem('sr.publicBase')
   && location.protocol !== 'https:' && PRIV_HOST_RE.test(location.hostname);
 const externalUrl = (p) => `${publicBase()}/${p.project}/`;
 
+/** R4 版本自动自增：发布表单版本只读展示——「将发布为 v{seq+1}」（seq 取自项目行 conf.version_seq；
+ *  新项目无行 → v1）。真实分配在服务端发布时发生，此处为即时预览。 */
+const nextVersion = () => {
+  const p = $('pub-project').value.trim();
+  const seq = Number(state.projects.find((x) => x.project === p)?.version_seq) || 0;
+  return `v${seq + 1}`;
+};
+const updatePubVersion = () => { const el = $('pub-version'); if (el) el.textContent = `将发布为 ${nextVersion()}`; };
+
 export const updatePubUrl = () => {
   const v = $('pub-project').value.trim();
-  $('pub-url').textContent = `/${v || '<project>'}/`; // §11：访问地址恒 /<project>/
+  const chip = $('pub-url-chip');
+  if (chip) chip.textContent = `${publicBase()}/${v || '<项目名>'}/`; // R6 访问地址就地预览（publicBase 空 → origin，同 externalUrl 口径）
+  updatePubVersion();
 };
 
 // —— 标签页导航（role=tablist/tab/tabpanel：aria-selected 同步 + 左右方向键切换） ——
@@ -118,11 +129,18 @@ export function wireProjTab() {
   $('img-list').addEventListener('click', onImageRm);                       // §14.3：镜像清单行删除（事件委托）
   $('pub-form').addEventListener('submit', onDeploy); // 单表单提交：tar→压缩+上传+发布 / 镜像库→直接发布（plan-17 §5）
   $('btn-upload-only').addEventListener('click', onUploadOnly); // 次要按钮「仅上传」：同一 tar，只入库不发布
-  for (const r of ['tar', 'registry']) $(`pub-src-${r}`).addEventListener('change', () => pickPubSource(r));
+  // R3 镜像源分段 Tab（复用帮助/管理子导航样式）：click 真实浏览器；change 兼容测试垫片触发
+  for (const r of ['tar', 'registry']) {
+    $(`pub-src-${r}`).addEventListener('click', () => pickPubSource(r));
+    $(`pub-src-${r}`).addEventListener('change', () => pickPubSource(r));
+  }
   $('dep-image').addEventListener('input', onImagePick);
-  for (const id of ['pub-project', 'pub-tag', 'pub-file']) $(id).addEventListener('input', () => fieldErr(id, ''));
+  for (const id of ['pub-project', 'pub-file']) $(id).addEventListener('input', () => fieldErr(id, ''));
   $('pub-project').addEventListener('change', onPubProjectChange); // 命中已有项目 → 沿用上次发布参数
+  for (const id of ['pub-mem', 'pub-cport']) $(id).addEventListener('input', markParamChanged); // R5 变更高亮
   $('dlg-env-close').addEventListener('click', () => $('dlg-env').close());
+  $('rb-close').addEventListener('click', () => $('dlg-rollback').close());
+  $('rb-tbl').addEventListener('click', onRollbackPick);
   $('dp-retry').addEventListener('click', () => {
     if (deploy.busy) return;
     // 失败阶段决定重试入口：上传失败且有会话 → 断点续传；发布失败 → 仅重发；否则全新开始
@@ -140,28 +158,34 @@ export function wireProjTab() {
   refreshResumeUi();
 }
 
-// —— 镜像库源：选中镜像 → 自动带出项目与标签到发布表单（形如 user/project:tag；可手改） ——
+// —— 镜像库源：选中镜像 → 自动带出项目到发布表单（形如 user/project:tag；tag 为镜像身份随发布提交，不再可编辑） ——
 function onImagePick() {
   fieldErr('dep-image', '');
   const m = $('dep-image').value.trim().match(/^[^\/\s]+\/([^\/\s:]+):(\S+)$/);
   if (m) {
     $('pub-project').value = m[1];
-    $('pub-tag').value = m[2];
+    deploy.tag = m[2]; // 所选库源镜像的 tag（部署身份；版本号由服务端分配）
     updatePubUrl();
-    fieldErr('pub-project', ''); fieldErr('pub-tag', '');
-    pubPrefill(m[1], { keepTag: true }); // 参数预填（镜像 tag 优先于本地记忆 tag）
+    fieldErr('pub-project', '');
+    pubPrefill(m[1]);
   }
 }
-/** plan-17 §5：镜像源 radio（默认 tar）。「镜像库」源发布时 ①压缩②上传自动跳过。 */
-const pubSrc = () => ($('pub-src-registry').checked ? 'registry' : 'tar');
+/** plan-17 §5 镜像源（R3 分段 Tab 化，默认「上传镜像」）。「镜像库」源发布时 ①压缩②上传自动跳过。 */
+const pubSrc = () => ($('pub-src-registry').classList.contains('on') ? 'registry' : 'tar');
 function pickPubSource(v) {
-  for (const r of ['tar', 'registry']) $(`pub-src-${r}`).checked = r === v;
+  for (const r of ['tar', 'registry']) {
+    const b = $(`pub-src-${r}`);
+    const on = r === v;
+    b.classList.toggle('on', on);
+    b.setAttribute?.('aria-selected', on ? 'true' : 'false');
+  }
   $('pub-src-file-box').classList.toggle('hidden', v !== 'tar');
   $('pub-src-reg-box').classList.toggle('hidden', v !== 'registry');
   $('btn-upload-only').disabled = v !== 'tar'; // 仅上传只对本地 tar 有意义
   if (v === 'tar') fieldErr('dep-image', '');
 }
-/** 命中已有项目名 → 沿用上次发布参数（mem=服务端 conf 行；tag/cport=本机 sr.conf.* 记忆）。 */
+/** 命中已有项目名 → 沿用上次发布参数（mem/cport=服务端 conf 行，R5 数据源 /_api/projects；
+ *  行缺字段时回落本机 sr.conf.* 记忆）。 */
 // C4：内存输入以 MiB 裸数字为准（如 256）；服务端 parse_mem 把裸数字按字节解释，故提交时补 m 后缀
 const memToUi = (v) => String(v ?? '').trim().replace(/^(\d+)[mM]$/, '$1');       // 「256m」→「256」（展示）
 const memFromUi = (v) => { const s = String(v ?? '').trim(); return /^\d+$/.test(s) ? `${s}m` : s; }; // 「256」→「256m」（提交）
@@ -169,6 +193,7 @@ function onPubProjectChange() {
   const v = $('pub-project').value.trim();
   if (state.projects.some((x) => x.project === v)) pubPrefill(v);
   else $('pub-pref-note')?.classList.add('hidden');
+  markParamChanged();
 }
 function pubPrefill(project, opts = {}) {
   const row = state.projects.find((x) => x.project === project);
@@ -176,8 +201,8 @@ function pubPrefill(project, opts = {}) {
   try { conf = JSON.parse(localStorage.getItem('sr.conf.' + project) || 'null'); } catch { /* 坏记录忽略 */ }
   let hit = false;
   if (row && row.mem) { $('pub-mem').value = memToUi(row.mem); hit = true; } // 服务端 conf 权威（GET /_api/projects）
-  if (conf && conf.cport) { $('pub-cport').value = String(conf.cport); hit = true; } // 响应无 cport 字段 → 本地记忆补（字符串赋值）
-  if (conf && conf.tag && !opts.keepTag) { $('pub-tag').value = conf.tag; hit = true; }
+  const cport = row && row.cport ? String(row.cport) : (conf && conf.cport ? String(conf.cport) : '');
+  if (cport) { $('pub-cport').value = cport; hit = true; } // 响应无 cport 字段 → 本地记忆补（字符串赋值）
   const note = $('pub-pref-note');
   if (note) {
     if (hit) {
@@ -187,12 +212,30 @@ function pubPrefill(project, opts = {}) {
       note.classList.remove('hidden');
     } else note.classList.add('hidden');
   }
-
+  markParamChanged();
+}
+/** R5 部署参数变更高亮：与该项目上次发布值（projects 行 mem/cport）不同 → amber 边框 + 行内注；
+ *  改回相同值提示消失；新项目（无历史行）不提示。 */
+function markParamChanged() {
+  const row = state.projects.find((x) => x.project === $('pub-project').value.trim());
+  for (const [id, cur, base] of [
+    ['pub-mem', memFromUi($('pub-mem').value), row ? String(row.mem ?? '') : null],
+    ['pub-cport', String(parseInt($('pub-cport').value, 10) || ''), row && row.cport != null ? String(row.cport) : null],
+  ]) {
+    const el = $(id), note = $(`${id}-changed`);
+    const diff = base != null && base !== '' && cur !== '' && cur !== base;
+    el.classList.toggle('changed', diff);
+    note?.classList.toggle('hidden', !diff);
+  }
 }
 export async function refreshProjects(force = false) {
   if (!force && dataFresh('projects')) return; // plan-17 §3：TTL 内跳过（内存单源）
   const tb = $('proj-tbl').querySelector('tbody');
-  if (tb) tb.innerHTML = '<tr><td colspan="7" class="note">加载中…</td></tr>';
+  // R1：加载占位只在首载（表内尚无数据行）出现——已有数据表不再清空，30s 自动刷新走键控差分（抽屉/焦点不跳）
+  if (tb && tb.dataset.mode !== 'data') {
+    tb.innerHTML = '<tr><td colspan="7" class="note">加载中…</td></tr>';
+    tb.dataset.mode = 'loading';
+  }
   try {
     const j = await api('GET', '/_api/projects');
     state.projects = j.projects || [];
@@ -208,40 +251,47 @@ export async function refreshProjects(force = false) {
   }
 }
 
+/** 行 HTML（键控差分的单元格序列）：名称·状态·URL·版本·更新·操作·日志。 */
+const rowVersion = (p) => String(p.version || p.tag || '');
+function projRowHtml(p) {
+  const q = esc(p.project);
+  return `<td class="mono">${q}</td>
+      ${rowStatusHtml(p)}
+      <td class="wrap"><a href="${esc(externalUrl(p))}" target="_blank" rel="noopener">${esc(externalUrl(p))}</a></td>
+      <td class="mono">${esc(rowVersion(p))}</td>
+      <td class="mono num">${esc(fmtTime(p.updated))}</td>
+      <td>${rowActionsHtml(p)}</td>
+      <td><button class="act" data-act="logs" data-p="${q}" title="展开日志抽屉" aria-expanded="false">▾</button></td>`;
+}
+
 export function renderProjects() {
   const tb = $('proj-tbl').querySelector('tbody');
   // B4 徽章已随 R4 用户裁决移除（管理员身份由顶栏「管」角标表达，同一信息只出现一次）
-  if (!state.projects.length) { tb.innerHTML = '<tr><td colspan="7" class="note">暂无项目——到「发布」页发布第一个项目。</td></tr>'; }
-  else {
-    const acts = state.projects.map((p) => {
-      const q = esc(p.project);
-      return `<tr data-row="${q}">
-      <td class="mono">${q}</td>
-      ${rowStatusHtml(p)}
-      <td class="wrap"><a href="${esc(externalUrl(p))}" target="_blank" rel="noopener">${esc(externalUrl(p))}</a></td>
-      <td class="mono">${esc(p.tag)}</td>
-      <td class="mono num">${esc(fmtTime(p.updated))}</td>
-      <td>${rowActionsHtml(p)}</td>
-      <td><button class="act" data-act="logs" data-p="${q}" title="展开日志抽屉" aria-expanded="false">▾</button></td>
-    </tr>`;
-    }).join('');
-    tb.innerHTML = acts;
+  if (!state.projects.length) {
+    if (tb.dataset.mode !== 'empty') {
+      tb.innerHTML = '<tr><td colspan="7" class="note">暂无项目——到「发布」页发布第一个项目。</td></tr>';
+      tb.dataset.mode = 'empty';
+    }
+  } else {
+    tb.dataset.mode = 'data';
+    diffRows(tb, state.projects, (p) => String(p.project), projRowHtml); // R1 键控差分：未变行不动 DOM
   }
   $('proj-base-note')?.classList.toggle('hidden', !usingLanOrigin()); // 兜底 origin 为内网才提示（配置 base 即收敛）
-  // 行抽屉常驻：重渲后重新挂回（hidden 状态保持；展开时移到原项目行后不丢抽屉）
+  // 行抽屉常驻：差分/重渲后重新挂回（hidden 状态保持；展开时移到原项目行后不丢抽屉）
   const tbEl = $('proj-tbl')?.querySelector?.('tbody');
   if (tbEl && !tbEl.contains?.(drawerRow)) tbEl.append?.(drawerRow);
   if (drawerRow.dataset.drawer) {
-    const r = $('proj-tbl')?.querySelector?.(`tr[data-row="${drawerRow.dataset.drawer}"]`);
+    const r = $('proj-tbl')?.querySelector?.(`tr[data-key="${drawerRow.dataset.drawer}"]`);
     if (r && r.after) r.after(drawerRow);
   }
   syncLogsDrawerBtn(); // B1：重渲后恢复该行 ▴/aria-expanded（抽屉展开态不因重渲丢失）
   if (moreOpen && moreOpen.isConnected === false) moreOpen = null; // B2：重渲后旧「更多」按钮已脱离文档——指向即清
   // 项目下拉候选 = 已有项目（R5b 自绘 Combo；C16：集合提取 state.mjs myProjectNames）
   setComboOptions($('pub-project'), myProjectNames());
+  updatePubVersion(); // R4：版本预览随最新行 version_seq 刷新
 }
 
-const ACT_CN = { start: '启动', stop: '停止', rollback: '回滚', rm: '删除' };
+const ACT_CN = { start: '启动', stop: '停止', rm: '删除' };
 let moreOpen = null; // 当前展开的「更多 ▾」菜单按钮（单例；翻页/重渲自然收起）
 function closeMoreMenu() {
   if (!moreOpen) return;
@@ -272,7 +322,7 @@ function updateViaPub(p) {
   $('pub-project').value = p.project;
   updatePubUrl();
   pubPrefill(p.project);
-  $('pub-tag').focus?.();
+  $('pub-project').focus?.();
 }
 
 async function onProjAction(ev) {
@@ -280,6 +330,7 @@ async function onProjAction(ev) {
   if (!btn || btn.disabled) return;
   const { act, p: project } = btn.dataset;
   if (act === 'env') return showEnvDlg(project);
+  if (act === 'rollback') { closeMoreMenu(); return openRollbackDlg(project); } // R2：回滚=选版本对话框（危险操作 confirm 保持）
   if (act === 'logs') { closeMoreMenu(); return drawerRow.dataset.drawer === project ? closeDrawer() : openDrawer(project); } // ▾ 开关语义：再点同项目即收起（R4 用户反馈"收不起来"）
   if (act === 'more') return toggleMoreMenu(btn);
   if (act === 'retry-projects') { btn.disabled = true; return refreshProjects(true); } // 内联重试（§3）
@@ -298,7 +349,7 @@ async function onProjAction(ev) {
   // B1：停止与删除/重置同款二次确认（危险操作警示对齐：按钮红 + confirm 写明影响）
   if (act === 'stop' && !confirm(`确认停止项目 ${project}？容器即刻停止、对外不可访问（数据与凭据保留，可随时重新「启动」）。`)) return;
   // 第1轮UI审查P3：启停/回滚/删除请求期间按钮就地变「…中」并禁用（busy 状态），完成后恢复
-  const ACT_BUSY_CN = { start: '启动中…', stop: '停止中…', rollback: '回滚中…', rm: '删除中…' }[act];
+  const ACT_BUSY_CN = { start: '启动中…', stop: '停止中…', rm: '删除中…' }[act];
   if (ACT_BUSY_CN) busy(btn, true, ACT_BUSY_CN); else btn.disabled = true;
   try {
     await api('POST', `/_api/${act}`, { project });
@@ -367,7 +418,7 @@ async function deployRun(mode) {
         });
         dpSet(1, 'done');
       } else {
-        await deployUpload(project, tag);
+        await deployUpload(project);
       }
       deploy.uploadId = null;
       dpSet(2, 'done');
@@ -385,7 +436,7 @@ async function deployRun(mode) {
     markPublishing(project); // 行内标记「发布中…」
     dpSet(3, 'on');
     dpText('③ 发布中…');
-    const body = { project, tag, container_port: parseInt($('pub-cport').value, 10) || 8080 };
+    const body = { project, tag, container_port: parseInt($('pub-cport').value, 10) || 8080 }; // tag=部署镜像 tag（镜像身份）；版本号由服务端分配
     const memv = memFromUi($('pub-mem').value); // C4：裸数字按 MiB 提交（补 m 后缀，服务端字节语义不变）
     if (memv) body.mem = memv;
     await api('POST', '/_api/publish', body);
@@ -411,7 +462,7 @@ async function deployRun(mode) {
   } finally { deploy.busy = false; upBusy = false; deploy.phase = null; renderProjects(); }
 }
 
-/** 校验并填充公共发布参数（项目留空自动生成回填；标签必填）；返回 null=校验未过。 */
+/** 校验并填充公共发布参数（项目留空自动生成回填；版本由服务端分配，表单无版本输入）；返回 null=校验未过。 */
 function collectPubFields(requireFile) {
   let project = $('pub-project').value.trim();
   if (!project) { // §12.1：项目名为空 = 自动生成随机 8 位并回填表单
@@ -420,14 +471,11 @@ function collectPubFields(requireFile) {
     updatePubUrl();
     showMsg(`项目名为空：已自动生成随机项目名 ${project} 并填入表单。`, 'ok');
   }
-  const tag = $('pub-tag').value.trim();
   const badP = checkProj(project);
   if (badP) { fieldErr('pub-project', badP); return null; }
-  if (!tag) { fieldErr('pub-tag', '请填写版本号'); return null; }
-  if (/\s|\//.test(tag)) { fieldErr('pub-tag', `版本号「${tag}」不能含空白或斜杠，请修改后重试`); return null; }
   const file = ($('pub-file').files || [])[0] || null;
   if (requireFile && !file) { fieldErr('pub-file', '「仅上传」需要选择镜像 tar 文件（不选文件的直发请用「发布」，已有镜像请改选「镜像库」源）'); return null; }
-  return { project, tag, file };
+  return { project, file };
 }
 
 /** 两入口共用：请求期间互斥禁用对方按钮（各自显示「发布中…/上传中…」）。 */
@@ -440,19 +488,22 @@ function pubBtnsBusy(on) {
 async function onDeploy(ev) {
   ev.preventDefault();
   if (deploy.busy || upBusy) return showMsg('已有发布或上传进行中，请等待完成');
-  clearErrs('pub-project', 'pub-tag', 'pub-file', 'dep-image');
+  clearErrs('pub-project', 'pub-file', 'dep-image');
   let file = null;
-  if (pubSrc() === 'registry') { // 镜像库源：①②跳过直接发布；镜像必须已选（选中即带出项目/标签）
+  if (pubSrc() === 'registry') { // 镜像库源：①②跳过直接发布；镜像必须已选（选中即带出项目）
     const img = $('dep-image').value.trim();
-    if (!/^[^\/\s]+\/[^\/\s:]+:\S+$/.test(img)) return fieldErr('dep-image', '请先在「镜像库」源选择镜像（格式 user/project:tag），或切换回「本地 tar 文件」源');
+    const m = img.match(/^[^\/\s]+\/([^\/\s:]+):(\S+)$/);
+    if (!m) return fieldErr('dep-image', '请先在「镜像库」源选择镜像（格式 user/project:tag），或切换回「上传镜像」源');
+    deploy.tag = m[2]; // 所选镜像的 tag（部署身份；版本号由服务端分配）
   } else {
     file = ($('pub-file').files || [])[0] || null; // files 恒存在（FileList）；防御stub/异常环境
+    deploy.tag = ''; // tar 源：上传 tag 由 import-begin 服务端下发（见 deployUpload）
   }
   const f = collectPubFields(false);
   if (!f) return;
   if (file && !pemReady()) return; // plan-17 验收 6：未配置 PEM → 内联「去设置」引导
   deploy.intent = 'deploy';
-  deploy.project = f.project; deploy.tag = f.tag;
+  deploy.project = f.project;
   deploy.file = file; // tar 源才携带文件；镜像库源恒 null（①②跳过）
   deploy.blob = null; deploy.uploadId = null;
   dpReset();
@@ -465,12 +516,12 @@ async function onDeploy(ev) {
 async function onUploadOnly() {
   if (deploy.busy || upBusy) return showMsg('已有发布或上传进行中，请等待完成');
   if (pubSrc() !== 'tar') return showMsg('「仅上传」用于本地 tar 文件：请先选回「本地 tar 文件」镜像源');
-  clearErrs('pub-project', 'pub-tag', 'pub-file');
+  clearErrs('pub-project', 'pub-file');
   const f = collectPubFields(true);
   if (!f) return;
   if (!pemReady()) return; // 仅上传同样走加密信封
   deploy.intent = 'upload';
-  deploy.project = f.project; deploy.tag = f.tag;
+  deploy.project = f.project; deploy.tag = ''; // 上传 tag 由 import-begin 服务端下发
   deploy.file = f.file;
   deploy.blob = null; deploy.uploadId = null;
   dpReset();
@@ -486,18 +537,20 @@ function dpUploadNote(sent, total) {
   dpText(`② 上传中：已传 ${sent} / 压缩后总长 ${total} 字节（${total ? ((sent / total) * 100).toFixed(1) : '0'}%）`);
 }
 
-/** 全新上传（发布②段）：import-begin → 本地会话登记 → 逐片加密上传 → 收尾。 */
-async function deployUpload(project, tag) {
+/** 全新上传（发布②段）：import-begin（tag 服务端分配）→ 本地会话登记 → 逐片加密上传 → 收尾。 */
+async function deployUpload(project) {
   const pem = platformPem();
   if (!pem.startsWith('-----BEGIN PUBLIC KEY-----')) throw { error: 'E_STATE', msg: '尚未完成安全配置：到「设置」完成' };
   const zb = deploy.blob, file = deploy.file;
   const total = sealedTotal(zb.size);
   dpUploadNote(0, total); // 状态条切入②上传段（已传 0 / 压缩后总长）
   const sessSeed = new Uint8Array(32); crypto.getRandomValues(sessSeed);
-  let uploadId;
+  let uploadId, tag;
   try {
-    const j = await api('POST', '/_api/import-begin', { project, tag, image_id: file.name, total_bytes: total });
+    const j = await api('POST', '/_api/import-begin', { project, image_id: file.name, total_bytes: total });
     uploadId = j.upload_id;
+    deploy.tag = String(j.tag || ''); // 服务端分配的镜像库内身份 tag，发布时按它部署
+    tag = deploy.tag;
   } catch (e) {
     if (e.error === 'E_QUOTA') e.msg += `（信封总长 ${total} 字节）`;
     throw e;
@@ -508,6 +561,59 @@ async function deployUpload(project, tag) {
   // 上传开始即自动记录（localStorage sr.up.<id>），恢复时自动取最近会话——用户无需知道编号
   const sid = sealBegin(pem, sessSeed);
   await uploadRest(uploadId, sid, zb, 0, 0, total, dpUploadNote);
+}
+
+// —— 回滚对话框（R2 版本选择语义）：GET /_api/versions 列历史（当前高亮/镜像已删除灰置），
+//     选择即 confirm（写明从 X 回滚到 M 及所用镜像）→ POST /_api/rollback {project, version} ——
+const rollbackCtx = { project: '', current: '' };
+function rbRowHtml(v) {
+  const img = `<td class="mono wrap">${esc(v.image)}</td>`;
+  const time = `<td class="mono num">${esc(fmtTime(v.time))}</td>`;
+  if (v.version === rollbackCtx.current)
+    return `<tr class="rb-cur"><td class="mono">${esc(v.version)} <span class="badge">当前</span></td>${img}${time}<td><span class="note">当前版本</span></td></tr>`;
+  if (v.imagePresent === false)
+    return `<tr class="rb-gone"><td class="mono">${esc(v.version)}</td>${img}${time}<td><span class="note">镜像已删除，不可回滚</span></td></tr>`;
+  if (v.imagePresent == null)
+    return `<tr class="rb-gone"><td class="mono">${esc(v.version)}</td>${img}${time}<td><span class="note">镜像状态未知，暂不可回滚</span></td></tr>`;
+  return `<tr><td class="mono">${esc(v.version)}</td>${img}${time}<td><button class="act" data-act="rb-pick" data-version="${esc(v.version)}" data-img="${esc(v.image)}">回滚到此版本</button></td></tr>`;
+}
+async function openRollbackDlg(project) {
+  const dlg = $('dlg-rollback');
+  rollbackCtx.project = project;
+  rollbackCtx.current = '';
+  $('rb-project').textContent = project;
+  const tb = $('rb-tbl').querySelector('tbody');
+  tb.innerHTML = '<tr><td colspan="4" class="note">加载中…</td></tr>';
+  $('rb-fb').textContent = '';
+  dlg.showModal();
+  try {
+    const j = await api('GET', `/_api/versions?project=${encodeURIComponent(project)}`);
+    rollbackCtx.current = String(j.current || '');
+    const versions = j.versions || [];
+    tb.innerHTML = versions.length
+      ? versions.map(rbRowHtml).join('')
+      : '<tr><td colspan="4" class="note">暂无发布历史（该项目在本功能上线前发布，或仅发布过一个版本）。</td></tr>';
+  } catch (e) {
+    tb.innerHTML = `<tr><td colspan="4" class="status-bad">${esc(errText(e))}</td></tr>`;
+  }
+}
+async function onRollbackPick(ev) {
+  const btn = ev.target.closest('button[data-act="rb-pick"]');
+  if (!btn || btn.disabled) return;
+  const { version, img } = btn.dataset;
+  const from = rollbackCtx.current || '（当前版本）';
+  // 危险操作 confirm 保持：写明从哪个版本回滚到哪个版本、用哪个镜像
+  if (!confirm(`确认从版本 ${from} 回滚到版本 ${version}？将使用镜像 ${img} 重新部署，确认执行。`)) return;
+  busy(btn, true, '回滚中…');
+  try {
+    await api('POST', '/_api/rollback', { project: rollbackCtx.project, version });
+    $('dlg-rollback').close();
+    await refreshProjects(true); // 写操作强制失效（plan-17 §3；先刷列表再就地播报——refresh 成功会清空 proj-fb）
+    $('proj-fb').textContent = `已回滚 ${rollbackCtx.project} 到版本 ${version}`; // 结果落列表行（版本列），不另发顶部条
+  } catch (e) {
+    $('rb-fb').textContent = '';
+    apiFail(`回滚 ${rollbackCtx.project} 到 ${version}`, e);
+  } finally { busy(btn, false); }
 }
 
 // —— 环境变量模态（§6 键 + 当前值 + 中文说明）——
@@ -662,7 +768,7 @@ drawerRow.innerHTML = `<td colspan="7">
  *  三处调用：openDrawer / closeDrawer / renderProjects（重渲后恢复）。 */
 function syncLogsDrawerBtn() {
   const project = drawerRow.dataset.drawer;
-  const btn = project ? $('proj-tbl')?.querySelector?.(`tr[data-row="${project}"] button[data-act="logs"]`) : null;
+  const btn = project ? $('proj-tbl')?.querySelector?.(`tr[data-key="${project}"] button[data-act="logs"]`) : null;
   if (!btn) return;
   const open = !drawerRow.hidden && !!project;
   btn.textContent = open ? '▴' : '▾';
@@ -672,7 +778,7 @@ function syncLogsDrawerBtn() {
 function openDrawer(project) {
   closeDrawer();
   const esc2 = (typeof CSS !== 'undefined' && CSS.escape) ? CSS.escape(project) : project; // 项目名恒 [a-zA-Z0-9-]，转义仅防御
-  const row = $('proj-tbl').querySelector(`tr[data-row="${esc2}"]`);
+  const row = $('proj-tbl').querySelector(`tr[data-key="${esc2}"]`);
   if (row && row.after) row.after(drawerRow); else $('proj-tbl').querySelector('tbody')?.append?.(drawerRow);
   drawerRow.hidden = false;
   drawerRow.dataset.drawer = project;
