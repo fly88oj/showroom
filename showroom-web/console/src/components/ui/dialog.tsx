@@ -65,6 +65,11 @@ function DialogContent({
           className
         )}
         {...props}
+        // 用户裁决：modal 必须由明确关闭按钮（或 Esc）关闭，禁止点击遮罩误关
+        onInteractOutside={(e) => {
+          props.onInteractOutside?.(e);
+          e.preventDefault();
+        }}
       >
         {children}
         {showCloseButton && (
