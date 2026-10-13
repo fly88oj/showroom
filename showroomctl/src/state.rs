@@ -127,7 +127,8 @@ pub fn pass_opaque_path(root: &Path, user: &str) -> PathBuf {
     users_dir(root, user).join("pass.opaque")
 }
 
-// —— project.conf：key=value（owner tag port cport mem cpu redisdb updated [stopped] [legacyslot]）——
+// —— project.conf：key=value（owner tag port cport mem cpu redisdb updated [stopped] [legacyslot]
+//     [version] [version_seq]）——
 // 注：磁盘键名沿用存量 `owner=`（不 break 主机存量 conf，语义即下方 user 字段）。
 
 #[derive(Debug, Clone, PartialEq)]
@@ -144,13 +145,19 @@ pub struct Conf {
     /// v1.4 迁移来源槽位名（§11）：据此检测沿用老库 `sr_<p>_<slot>`（§9 双名思路），
     /// db-reset 重建为新名后清空。全新项目恒 None。
     pub legacyslot: Option<String>,
+    /// 当前版本号（版本自增）：`v<N>`。存量 conf 无此键 → 空（展示层回落 tag）。
+    pub version: String,
+    /// 版本计数器（单调递增，绝不复用）：每次发布 +1；回滚不改它（回滚后再发布 = v{seq+1}）。
+    /// 存量 conf 无此键 → 0。
+    pub version_seq: u32,
 }
 
 impl Conf {
     pub fn to_conf(&self) -> String {
         let mut s = format!(
-            "owner={}\ntag={}\nport={}\ncport={}\nmem={}\ncpu={}\nredisdb={}\nupdated={}\n",
-            self.user, self.tag, self.port, self.cport, self.mem, self.cpu, self.redisdb, self.updated
+            "owner={}\ntag={}\nport={}\ncport={}\nmem={}\ncpu={}\nredisdb={}\nupdated={}\nversion={}\nversion_seq={}\n",
+            self.user, self.tag, self.port, self.cport, self.mem, self.cpu, self.redisdb, self.updated,
+            self.version, self.version_seq
         );
         if self.stopped {
             s.push_str("stopped=1\n");
@@ -179,6 +186,8 @@ impl Conf {
             updated: need("updated")?.parse().map_err(|e| ApiError::state(format!("conf updated: {e}")))?,
             stopped: map.get("stopped").map(|v| v == "1").unwrap_or(false),
             legacyslot: map.get("legacyslot").cloned().filter(|v| !v.is_empty()),
+            version: map.get("version").cloned().unwrap_or_default(),
+            version_seq: map.get("version_seq").and_then(|v| v.parse().ok()).unwrap_or(0),
         })
     }
 
@@ -194,11 +203,14 @@ impl Conf {
     }
 
     /// ps / GET /_api/projects 共用的列表行（SPEC §3 projects 响应字段，§11 无 slot）。
+    /// version：当前版本号；存量 conf（无 version 键）回落 tag——旧项目标签本就是 vN 形态。
     pub fn to_json(&self, p: &str, status: &str) -> Value {
+        let version = if self.version.is_empty() { self.tag.clone() } else { self.version.clone() };
         json!({
-            "project": p, "user": self.user, "tag": self.tag,
+            "project": p, "user": self.user, "tag": self.tag, "version": version,
+            "version_seq": self.version_seq,
             "url": public_url(p), "status": status,
-            "port": self.port, "mem": self.mem, "cpu": self.cpu, "updated": self.updated,
+            "port": self.port, "cport": self.cport, "mem": self.mem, "cpu": self.cpu, "updated": self.updated,
         })
     }
 }
@@ -208,6 +220,60 @@ pub fn read_last2(root: &Path, p: &str) -> Option<String> {
         .ok()
         .map(|t| t.trim().to_string())
         .filter(|t| !t.is_empty())
+}
+
+// —— versions.json：每项目发布历史（append-only）+ 版本计数真相 ——
+// 形状：`[{"version":"v1","image":"<user>/<p>:<tag>","time":<unix>},…]`。
+// publish 落一条；回滚不落条（只改 conf.version 指向）；并发写经 VERSIONS_LOCK 串行（conf 同款整文件重写）。
+
+/// 发布历史记录。
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+pub struct VersionRec {
+    pub version: String,
+    pub image: String,
+    pub time: u64,
+}
+
+pub fn versions_path(root: &Path, p: &str) -> PathBuf {
+    projects_dir(root).join(format!("{p}.versions.json"))
+}
+
+/// 版本号纯函数：`v{seq}`。
+pub fn version_of(seq: u32) -> String {
+    format!("v{seq}")
+}
+
+/// 从镜像引用拆 tag（`<any>:<tag>` → tag；无冒号 None）——rollback 按 image 复原部署 tag 用。
+pub fn tag_of_image(image: &str) -> Option<String> {
+    let t = image.rsplit_once(':')?.1;
+    (!t.is_empty() && !t.contains('/')).then(|| t.to_string())
+}
+
+/// 读发布历史（文件缺失/损坏 → 空历史；损坏不阻塞发布主流程）。
+pub fn read_versions(root: &Path, p: &str) -> Vec<VersionRec> {
+    fs::read_to_string(versions_path(root, p))
+        .ok()
+        .and_then(|t| serde_json::from_str(&t).ok())
+        .unwrap_or_default()
+}
+
+/// 进程内串行化 versions.json 读改写（serve 并发 blk 任务 + CLI 同进程并发面）。
+pub static VERSIONS_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+/// 追加一条历史（append-only；持有 VERSIONS_LOCK 调用方负责，或直接用本函数）。
+pub fn append_version(root: &Path, p: &str, rec: VersionRec) -> R<()> {
+    let _g = VERSIONS_LOCK.lock();
+    let mut all = read_versions(root, p);
+    all.push(rec);
+    let j = serde_json::to_string(&all).map_err(|e| ApiError::state(format!("versions serialize: {e}")))?;
+    fs::create_dir_all(projects_dir(root))?;
+    fs::write(versions_path(root, p), j)?;
+    Ok(())
+}
+
+/// 按版本号查历史记录。
+pub fn find_version<'a>(all: &'a [VersionRec], version: &str) -> Option<&'a VersionRec> {
+    all.iter().find(|r| r.version == version)
 }
 
 /// 全部项目 conf（项目名字典序）。v1.4 起为扁平布局 state/projects/<p>.conf；
@@ -1246,6 +1312,8 @@ mod tests {
             updated,
             stopped: false,
             legacyslot: None,
+            version: "v1".into(),
+            version_seq: 1,
         }
     }
 
@@ -1277,12 +1345,22 @@ mod tests {
         assert!(v.get("slot").is_none(), "§11 响应不再含 slot");
         assert_eq!(v["user"], "alice");
         assert_eq!(v["tag"], "v1");
+        assert_eq!(v["version"], "v1", "当前版本随行下发（发布页「将发布为 v{{seq+1}}」数据源）");
+        assert_eq!(v["version_seq"], 1);
+        assert_eq!(v["cport"], 3000, "cport 随行下发（部署参数回填数据源）");
         assert_eq!(v["status"], "running");
         assert_eq!(v["url"], public_url("demo"));
         assert_eq!(v["port"], 8100);
         assert_eq!(v["mem"], "256m");
         assert_eq!(v["cpu"], 1.5);
         assert_eq!(v["updated"], 1_700_000_000);
+        // 存量 conf（version 空）→ 展示回落 tag
+        let mut legacy = base_conf(1);
+        legacy.version = String::new();
+        legacy.version_seq = 0;
+        let lv = legacy.to_json("old", "running");
+        assert_eq!(lv["version"], "v1", "legacy 行 version 回落 tag");
+        assert_eq!(lv["version_seq"], 0);
     }
 
     // 2a. conf 序列化往返（全字段，含/不含 stopped 与 legacyslot）
@@ -1308,6 +1386,37 @@ mod tests {
         let mut c4 = c.clone();
         c4.cpu = 1.0;
         assert_eq!(Conf::parse(&c4.to_conf()).unwrap(), c4);
+    }
+
+    // 2a-2. 存量 conf（无 version/version_seq 键）兼容读取 + versions.json 历史读写
+    #[test]
+    fn legacy_conf_parse_and_versions_store() {
+        // 升级前的存量 conf：无 version/version_seq 键 → 默认空/0（不 break 存量主机）
+        let legacy = "owner=alice\ntag=v2\nport=8100\ncport=8080\nmem=256m\ncpu=1\nredisdb=1\nupdated=5\n";
+        let c = Conf::parse(legacy).unwrap();
+        assert_eq!((c.version.as_str(), c.version_seq), ("", 0));
+
+        let root = troot("versions");
+        assert!(read_versions(&root, "demo").is_empty(), "无历史文件 → 空");
+        append_version(&root, "demo", VersionRec {
+            version: "v1".into(), image: "127.0.0.1:5000/alice/demo:u1a2b3c4".into(), time: 100,
+        }).unwrap();
+        append_version(&root, "demo", VersionRec {
+            version: "v2".into(), image: "127.0.0.1:5000/alice/demo:u5d6e7f8".into(), time: 200,
+        }).unwrap();
+        let all = read_versions(&root, "demo");
+        assert_eq!(all.len(), 2, "append-only：两条按序保留");
+        assert_eq!(all[0].version, "v1");
+        assert_eq!(find_version(&all, "v2").map(|r| r.time), Some(200));
+        assert!(find_version(&all, "v9").is_none());
+        // 损坏文件不阻塞（读 → 空历史）
+        fs::write(versions_path(&root, "bad"), "not-json").unwrap();
+        assert!(read_versions(&root, "bad").is_empty());
+        // 纯函数
+        assert_eq!(version_of(3), "v3");
+        assert_eq!(tag_of_image("127.0.0.1:5000/alice/demo:u1a2b3c4").as_deref(), Some("u1a2b3c4"));
+        assert_eq!(tag_of_image("localhost:5000/a/b:v7").as_deref(), Some("v7"), "仓库路径可含多个冒号，取最后一段");
+        assert_eq!(tag_of_image("no-tag"), None);
     }
 
     // 2b. env 文件往返（§6 全字段具体化；§11 无 SHOWROOM_SLOT；§15.2 mw 自适应注入）

@@ -28,18 +28,18 @@ pub fn stop(root: &Path, p: &str) -> R<()> {
     c.save(root, p)
 }
 
-/// start：清 stopped 标记；容器缺失则按 conf 的 tag 走 publish 内核重建。
+/// start：清 stopped 标记；容器缺失则按 conf 的 tag 原地重建（版本记账不动——重建不是发布）。
 pub fn start(root: &Path, p: &str) -> R<()> {
     let mut c = conf_of(root, p)?;
     let name = publish::container_name(p);
     if dockerops::container_status(&name).is_some() {
         dockerops::docker(&["start", &name])?;
     } else {
-        publish::publish(root, &c.user, p, &c.tag, PublishOpts {
+        publish::redeploy(root, &c.user, p, &c.tag, PublishOpts {
             mem: Some(c.mem.clone()),
             cpu: Some(c.cpu),
             cport: Some(c.cport),
-        })?;
+        }, None)?;
     }
     c.stopped = false;
     c.save(root, p)
@@ -81,16 +81,72 @@ pub fn rm(root: &Path, p: &str) -> R<()> {
     Ok(())
 }
 
-/// rollback：读 last2 按其 tag 重跑 publish 内核；内核自身会把旧 tag 写回 last2（SPEC §7）。
+/// 上一版本选取（纯函数）：发布历史中当前版本之前最近的一条（append-only，倒序首个 ≠ 当前）。
+pub fn previous_version(all: &[state::VersionRec], current: &str) -> Option<String> {
+    all.iter().rev().find(|r| r.version != current).map(|r| r.version.clone())
+}
+
+/// rollback：回滚到上一版本（无显式版本号的入口——CLI 与旧客户端）。
+/// 有发布历史 → 取历史中当前版本之前最近的一条按其镜像重部署；无历史的老项目按 last2 兜底。
+/// 回滚语义（修订）：回滚到 vM = 用 vM 记录的镜像重部署 + 当前版本置为 vM；version_seq 不动
+/// （单调不复用，回滚后再发布 = v{seq+1}）。
 pub fn rollback(root: &Path, p: &str) -> R<PublishOut> {
     let c = conf_of(root, p)?;
+    let all = state::read_versions(root, p);
+    if let Some(v) = previous_version(&all, &c.version) {
+        return rollback_to(root, p, &v);
+    }
+    if !all.is_empty() {
+        return Err(ApiError::new("E_STATE", format!("'{p}' 无可回滚的历史版本（仅一个版本）")));
+    }
+    // 升级前发布的老项目：无发布历史 → last2 兜底（原地重部署，版本记账不动）
     let prev = state::read_last2(root, p)
         .ok_or_else(|| ApiError::new("E_NOTFOUND", format!("no last2 for '{p}'")))?;
-    publish::publish(root, &c.user, p, &prev, PublishOpts {
+    publish::redeploy(root, &c.user, p, &prev, PublishOpts {
         mem: Some(c.mem.clone()),
         cpu: Some(c.cpu),
         cport: Some(c.cport),
-    })
+    }, None)
+}
+
+/// 回滚到指定版本：按 versions.json 该条记录的镜像重部署 + 当前版本置为该版本（不落新历史、不动计数）。
+pub fn rollback_to(root: &Path, p: &str, version: &str) -> R<PublishOut> {
+    let c = conf_of(root, p)?;
+    let all = state::read_versions(root, p);
+    let rec = state::find_version(&all, version)
+        .ok_or_else(|| ApiError::new("E_NOTFOUND", format!("no version '{version}' for '{p}'")))?;
+    let tag = state::tag_of_image(&rec.image)
+        .ok_or_else(|| ApiError::new("E_STATE", format!("version '{version}' 记录的镜像引用无 tag：{}", rec.image)))?;
+    publish::redeploy(root, &c.user, p, &tag, PublishOpts {
+        mem: Some(c.mem.clone()),
+        cpu: Some(c.cpu),
+        cport: Some(c.cport),
+    }, Some(version.to_string()))
+}
+
+/// GET /_api/versions 数据源：发布历史 + 当前版本 + 每条附 imagePresent
+/// （复用镜像删除的 manifest 检查通道：404 → false「镜像已删除」；registry 不可达等错误 →
+/// null「未知」——不冒充已删除，也不因一次抖动拖垮整个回滚对话框）。
+pub fn versions_of(root: &Path, p: &str) -> R<Value> {
+    let c = conf_of(root, p)?;
+    let all = state::read_versions(root, p);
+    let repo = format!("{}/{}", c.user, p.to_ascii_lowercase());
+    let mut items = Vec::with_capacity(all.len());
+    for r in &all {
+        let present = match state::tag_of_image(&r.image) {
+            Some(t) => match dockerops::manifest_size(root, &repo, &t) {
+                Ok(Some(_)) => json!(true),
+                Ok(None) => json!(false),
+                Err(_) => Value::Null,
+            },
+            None => json!(false),
+        };
+        items.push(json!({
+            "version": r.version, "image": r.image, "time": r.time, "imagePresent": present,
+        }));
+    }
+    let current = if c.version.is_empty() { c.tag.clone() } else { c.version.clone() };
+    Ok(json!({"project": p, "current": current, "versions": items}))
 }
 
 /// ps / GET /_api/projects 的数据源：conf 全量 + docker 实况。
@@ -216,11 +272,11 @@ pub fn reconcile(root: &Path) -> Vec<String> {
         }
         let name = publish::container_name(&p);
         match statuses.get(&name).map(|s| s.as_str()).map(str::to_string) {
-            None => match publish::publish(root, &c.user, &p, &c.tag, PublishOpts {
+            None => match publish::redeploy(root, &c.user, &p, &c.tag, PublishOpts {
                 mem: Some(c.mem.clone()),
                 cpu: Some(c.cpu),
                 cport: Some(c.cport),
-            }) {
+            }, None) {
                 Ok(_) => log.push(format!("{p}: rebuilt (container was missing)")),
                 Err(e) => log.push(format!("{p}: E_STATE rebuild failed: {e}")),
             },
@@ -260,11 +316,11 @@ pub fn autoheal(root: &Path) -> Vec<String> {
         }
         let name = publish::container_name(&p);
         match statuses.get(&name).map(|s| s.as_str()).map(str::to_string) {
-            None => match publish::publish(root, &c.user, &p, &c.tag, PublishOpts {
+            None => match publish::redeploy(root, &c.user, &p, &c.tag, PublishOpts {
                 mem: Some(c.mem.clone()),
                 cpu: Some(c.cpu),
                 cport: Some(c.cport),
-            }) {
+            }, None) {
                 Ok(_) => log.push(format!("{p}: rebuilt (container gone)")),
                 Err(e) => log.push(format!("{p}: E_STATE rebuild failed: {e}")),
             },
@@ -892,6 +948,56 @@ mod tests {
         }
     }
 
+    // 回滚按版本：上一版本选取（纯函数）+ rollback_to/versions_of 的校验与数据形状（不触 docker 的路径）
+    #[test]
+    fn rollback_version_selection() {
+        let rec = |v: &str| state::VersionRec {
+            version: v.into(),
+            image: format!("127.0.0.1:5000/alice/demo:u{v}"),
+            time: 1,
+        };
+        let all: Vec<_> = ["v1", "v2", "v3"].iter().map(|v| rec(v)).collect();
+        // 当前 v3 → 上一版本 v2；当前 v2（已回滚态）→ 最近一个非当前 = v3
+        assert_eq!(previous_version(&all, "v3").as_deref(), Some("v2"));
+        assert_eq!(previous_version(&all, "v2").as_deref(), Some("v3"));
+        assert_eq!(previous_version(&all, "v1").as_deref(), Some("v3"));
+        assert_eq!(previous_version(&[], "v1"), None, "无历史 → None（走 last2 兜底）");
+        let single = vec![rec("v1")];
+        assert_eq!(previous_version(&single, "v1"), None, "仅一个版本 → 无可回");
+
+        // rollback_to：未知版本 → E_NOTFOUND；项目不存在 → E_NOTFOUND（先于版本查）
+        let root = troot("rollback-ver");
+        fs::create_dir_all(state::projects_dir(&root)).unwrap();
+        let c = state::Conf {
+            user: "alice".into(), tag: "u3".into(), port: 8100, cport: 8080,
+            mem: "256m".into(), cpu: 1.0, redisdb: 1, updated: 1, stopped: false,
+            legacyslot: None, version: "v3".into(), version_seq: 3,
+        };
+        c.save(&root, "demo").unwrap();
+        state::append_version(&root, "demo", rec("v1")).unwrap();
+        state::append_version(&root, "demo", rec("v2")).unwrap();
+        state::append_version(&root, "demo", rec("v3")).unwrap();
+        assert_eq!(rollback_to(&root, "demo", "v9").unwrap_err().code, "E_NOTFOUND");
+        assert_eq!(rollback_to(&root, "noproj", "v1").unwrap_err().code, "E_NOTFOUND");
+
+        // versions_of：历史 + 当前版本 + imagePresent（测试环境无 registry → null「未知」，不阻塞）
+        let v = versions_of(&root, "demo").unwrap();
+        assert_eq!(v["current"], "v3");
+        let items = v["versions"].as_array().unwrap();
+        assert_eq!(items.len(), 3);
+        assert_eq!(items[0]["version"], "v1");
+        assert_eq!(items[2]["image"], "127.0.0.1:5000/alice/demo:uv3");
+        assert!(items[0]["imagePresent"].is_null(), "registry 不可达 → imagePresent=null（未知，不冒充已删除）");
+        // 无历史的项目：current 回落 tag（存量 conf 无 version 键）
+        let mut legacy = c.clone();
+        legacy.version = String::new();
+        legacy.version_seq = 0;
+        legacy.save(&root, "old").unwrap();
+        let lv = versions_of(&root, "old").unwrap();
+        assert_eq!(lv["current"], "u3", "current 回落 tag");
+        assert!(lv["versions"].as_array().unwrap().is_empty());
+    }
+
     // R4 账号级 admin：users/<user>/admin 存在即管理员；他人 user/非法名恒假；
     // 旧 kid 级标记经 migrate_admin_markers 迁移为账号级并清除
     #[test]
@@ -1149,6 +1255,8 @@ mod tests {
                 user: user.into(), tag: "v1".into(), port: 8100, cport: 8080,
                 mem: "256m".into(), cpu: 1.0, redisdb: 0, updated: 1,
                 stopped: false, legacyslot: None,
+                version: String::new(),
+                version_seq: 0,
             };
             c.user = user.into();
             c.save(&root, p).unwrap();

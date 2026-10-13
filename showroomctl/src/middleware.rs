@@ -855,6 +855,8 @@ mod tests {
             updated: 1,
             stopped: false,
             legacyslot: None,
+                version: String::new(),
+                version_seq: 0,
         };
         c.save(root, p).unwrap();
     }

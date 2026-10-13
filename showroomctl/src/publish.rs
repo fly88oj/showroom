@@ -21,6 +21,7 @@ pub struct PublishOpts {
     pub cport: Option<u16>,
 }
 
+#[derive(Debug)]
 pub struct PublishOut {
     pub url: String,
     pub port: u16,
@@ -89,12 +90,47 @@ fn disk_admit(root: &Path, sealed_bytes: u64) -> R<()> {
         .map_err(|m| ApiError::new("E_QUOTA", m))
 }
 
+/// 版本记账模式：Bump=用户发起的发布（版本自增 + 落发布历史）；Keep=原地重建/回滚式重部署
+/// （不改 version_seq、不落历史；Some(v) 同时把当前版本置为 v——回滚语义，None 保持现状——重建）。
+#[derive(Debug, Clone, PartialEq)]
+pub enum VerMode {
+    Bump,
+    Keep(Option<String>),
+}
+
+/// 发布（版本自动自增入口）：版本号由服务端按项目单调分配（v{version_seq+1}），
+/// `tag` 参数是**部署的镜像 tag**（镜像身份，不再是版本号）。分配结果落 conf.version/
+/// version_seq 与 versions.json 发布历史。
 pub fn publish(
     root: &Path,
     user: &str,
     project: &str,
     tag: &str,
     opts: PublishOpts,
+) -> R<PublishOut> {
+    publish_mode(root, user, project, tag, opts, VerMode::Bump)
+}
+
+/// 原地重部署（start 容器缺失重建 / reconcile / autoheal / 回滚）：不动版本计数与历史；
+/// `version`=Some(v) 用于回滚（当前版本置为 v）。
+pub fn redeploy(
+    root: &Path,
+    user: &str,
+    project: &str,
+    tag: &str,
+    opts: PublishOpts,
+    version: Option<String>,
+) -> R<PublishOut> {
+    publish_mode(root, user, project, tag, opts, VerMode::Keep(version))
+}
+
+fn publish_mode(
+    root: &Path,
+    user: &str,
+    project: &str,
+    tag: &str,
+    opts: PublishOpts,
+    mode: VerMode,
 ) -> R<PublishOut> {
     state::check_name("project", project)?;
     check_tag(tag)?;
@@ -192,10 +228,29 @@ pub fn publish(
     dockerops::docker(&["rename", &newname, &name])?;
     state::register_port(root, port, project)?;
 
-    // last2 = 上一 tag（rollback 据此回跳；幂等重发也刷新）
+    // last2 = 上一 tag（回滚兜底：无发布历史的老项目据此回跳；幂等重发也刷新）
     if let Some(o) = &old {
         let _ = fs::write(state::last2_path(root, project), &o.tag);
     }
+    // 版本记账：Bump=自增分配 v{seq+1} 并落历史（发布事件）；Keep=回滚/重建（计数与历史原样）。
+    // 历史落条在容器切换成功之后（失败发布不留幽灵版本）。
+    let prev_seq = old.as_ref().map(|c| c.version_seq).unwrap_or(0);
+    let (version, version_seq) = match &mode {
+        VerMode::Bump => {
+            let seq = prev_seq + 1;
+            let v = state::version_of(seq);
+            state::append_version(
+                root,
+                project,
+                state::VersionRec { version: v.clone(), image: image.clone(), time: state::unix_now() },
+            )?;
+            (v, seq)
+        }
+        VerMode::Keep(v) => (
+            v.clone().or_else(|| old.as_ref().map(|c| c.version.clone())).unwrap_or_default(),
+            prev_seq,
+        ),
+    };
     let conf = state::Conf {
         user: user.to_string(),
         tag: tag.to_string(),
@@ -207,6 +262,8 @@ pub fn publish(
         updated: state::unix_now(),
         stopped: false,
         legacyslot: old.and_then(|c| c.legacyslot), // 迁移来源槽位保留（DB 检测沿用）
+        version,
+        version_seq,
     };
     conf.save(root, project)?;
     apply_route(root, project, port)?;
@@ -408,15 +465,22 @@ fn save_meta(root: &Path, id: &str, m: &ImportMeta) -> R<()> {
     Ok(())
 }
 
-/// begin：名字/归属/tag 已由 serve 校验；限 total ≤ IMPORT_MAX_GB → 建 .meta + 空 .bin，返回 upload_id。
+/// 控制台上传的镜像 tag（版本字段已从发布表单移除）：服务端生成 `u<8hex>`——镜像库内唯一即可，
+/// 版本号另有专账（conf.version_seq）。CLI/单发 import 仍显式传 tag。
+pub fn gen_upload_tag() -> String {
+    format!("u{}", state::rand_hex(4))
+}
+
+/// begin：名字/归属/tag 已由 serve 校验（tag=None → 服务端生成上传 tag）；限 total ≤ IMPORT_MAX_GB
+/// → 建 .meta + 空 .bin，返回 (upload_id, tag)。
 pub fn import_begin(
     root: &Path,
     user: &str,
     project: &str,
-    tag: &str,
+    tag: Option<&str>,
     image_id: &str,
     total_bytes: u64,
-) -> R<String> {
+) -> R<(String, String)> {
     let cap = state::Policy::load(root).import_cap_bytes();
     if total_bytes > cap {
         return Err(ApiError::new(
@@ -429,13 +493,19 @@ pub fn import_begin(
     }
     // 磁盘准入（§14.2）：sealed(total) × UPLOAD_SPACE_FACTOR ≤ avail − DISK_RESERVE_GB
     disk_admit(root, total_bytes)?;
-    check_tag(tag)?;
+    let tag = match tag {
+        Some(t) => {
+            check_tag(t)?;
+            t.to_string()
+        }
+        None => gen_upload_tag(),
+    };
     fs::create_dir_all(root.join("_tmp"))?;
     let id = state::rand_hex(16);
     let m = ImportMeta {
         user: user.to_string(),
         project: project.to_string(),
-        tag: tag.to_string(),
+        tag: tag.clone(),
         image_id: image_id.to_string(),
         total: total_bytes,
         received: vec![],
@@ -443,7 +513,7 @@ pub fn import_begin(
     };
     save_meta(root, &id, &m)?;
     fs::File::create(upload_bin(root, &id))?;
-    Ok(id)
+    Ok((id, tag))
 }
 
 /// chunk：seq 必须连续（==received.len()）→ 追加 .bin、push seq、写回 meta；返回已收片数。
@@ -535,8 +605,9 @@ mod tests {
     fn import_session_flow() {
         let root = troot("session");
         neutral_disk_policy(&root);
-        let id = import_begin(&root, "alice", "demo", "v1", "sha256:abcd", 10).unwrap();
+        let (id, tag) = import_begin(&root, "alice", "demo", Some("v1"), "sha256:abcd", 10).unwrap();
         assert_eq!(id.len(), 32);
+        assert_eq!(tag, "v1");
 
         // meta 读写往返
         let m = load_meta(&root, &id).unwrap();
@@ -583,12 +654,16 @@ mod tests {
     fn import_begin_limits() {
         let root = troot("begin");
         neutral_disk_policy(&root);
-        assert_eq!(import_begin(&root, "alice", "demo", "v1", "sha256:x", 9 << 30).unwrap_err().code, "E_QUOTA");
-        assert_eq!(import_begin(&root, "alice", "demo", "v1", "", 10).unwrap_err().code, "E_NAME");
-        assert_eq!(import_begin(&root, "alice", "demo", "a b", "i", 10).unwrap_err().code, "E_NAME");
-        assert_eq!(import_begin(&root, "alice", "demo", "a/b", "i", 10).unwrap_err().code, "E_NAME");
+        assert_eq!(import_begin(&root, "alice", "demo", Some("v1"), "sha256:x", 9 << 30).unwrap_err().code, "E_QUOTA");
+        assert_eq!(import_begin(&root, "alice", "demo", Some("v1"), "", 10).unwrap_err().code, "E_NAME");
+        assert_eq!(import_begin(&root, "alice", "demo", Some("a b"), "i", 10).unwrap_err().code, "E_NAME");
+        assert_eq!(import_begin(&root, "alice", "demo", Some("a/b"), "i", 10).unwrap_err().code, "E_NAME");
+        // tag=None → 服务端生成 u<8hex>（版本字段已从发布表单移除；tag 仅作镜像库内唯一身份）
+        let (id2, gtag) = import_begin(&root, "alice", "demo2", None, "i", 10).unwrap();
+        assert!(gtag.starts_with('u') && gtag.len() == 9 && check_tag(&gtag).is_ok(), "生成上传 tag 形状 u+8hex（{gtag}）");
+        assert_eq!(load_meta(&root, &id2).unwrap().tag, gtag);
         // 8GB 边界通过
-        assert!(import_begin(&root, "alice", "demo", "v1", "i", 8 << 30).is_ok());
+        assert!(import_begin(&root, "alice", "demo", Some("v1"), "i", 8 << 30).is_ok());
     }
 
     // §14.2 准入接线：DISK_RESERVE_GB 调大（远超任何真机 avail）→ total×factor 超限 →
@@ -598,7 +673,7 @@ mod tests {
         let root = troot("disk-quota");
         fs::create_dir_all(root.join("state")).unwrap();
         fs::write(root.join("state/policy.env"), "DISK_RESERVE_GB=999999\n").unwrap();
-        let e = import_begin(&root, "alice", "demo", "v1", "sha256:x", 10 << 20).unwrap_err();
+        let e = import_begin(&root, "alice", "demo", Some("v1"), "sha256:x", 10 << 20).unwrap_err();
         assert_eq!(e.code, "E_QUOTA", "{}", e.msg);
         assert!(e.msg.contains("膨胀因子"), "msg 含膨胀因子: {}", e.msg);
         assert!(e.msg.contains("磁盘空间不足"), "msg 前缀: {}", e.msg);
@@ -606,7 +681,7 @@ mod tests {
         // 通过侧：factor=0（需求 0）在同 policy 下也过不了（reserve 巨大 → avail−reserve<0），
         // 恢复中性 policy 后同一上传立即可过——闭环「调整 policy → 可传」
         fs::write(root.join("state/policy.env"), "DISK_RESERVE_GB=0\nUPLOAD_SPACE_FACTOR=0\n").unwrap();
-        assert!(import_begin(&root, "alice", "demo", "v1", "sha256:x", 10 << 20).is_ok());
+        assert!(import_begin(&root, "alice", "demo", Some("v1"), "sha256:x", 10 << 20).is_ok());
     }
 
     // A6 回归：end 进入 import 管道后失败（root 无 platform_rsa，解密前即败）→ .bin/.meta 双清
@@ -614,7 +689,7 @@ mod tests {
     fn import_end_failure_cleans_bin_and_meta() {
         let root = troot("end-clean");
         neutral_disk_policy(&root);
-        let id = import_begin(&root, "alice", "demo", "v1", "sha256:x", 4).unwrap();
+        let (id, _) = import_begin(&root, "alice", "demo", Some("v1"), "sha256:x", 4).unwrap();
         import_chunk(&root, "alice", &id, 0, &chunk_file(&root, b"abcd")).unwrap();
         let (bin, meta) = (upload_bin(&root, &id), upload_meta(&root, &id));
         assert!(bin.exists() && meta.exists());

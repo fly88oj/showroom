@@ -529,7 +529,7 @@ async fn dispatch(
 
         (
             "POST",
-            "/_api/stop" | "/_api/start" | "/_api/rm" | "/_api/rollback",
+            "/_api/stop" | "/_api/start" | "/_api/rm",
             Collected::Mem(b),
         ) => {
             let req: ProjectReq = jbody(b)?;
@@ -538,22 +538,46 @@ async fn dispatch(
             let act: &'static str = match path {
                 "/_api/stop" => "stop",
                 "/_api/start" => "start",
-                "/_api/rm" => "rm",
-                _ => "rollback",
+                _ => "rm",
             };
             let root = s.root.clone();
             let p = req.project;
-            let r = blk(move || match act {
-                "stop" => ops::stop(&root, &p).map(|_| None),
-                "start" => ops::start(&root, &p).map(|_| None),
-                "rm" => ops::rm(&root, &p).map(|_| None),
-                _ => ops::rollback(&root, &p).map(Some),
+            blk(move || match act {
+                "stop" => ops::stop(&root, &p),
+                "start" => ops::start(&root, &p),
+                _ => ops::rm(&root, &p),
+            })
+            .await?;
+            Ok(Json(json!({"ok": true})))
+        }
+
+        // —— 回滚（版本选择语义）：{project, version?}；version 缺省 = 上一版本（CLI/旧客户端兼容），
+        //     显式 version = 回滚到该版本（按发布历史记录的镜像重部署 + 当前版本置为该版本） ——
+        ("POST", "/_api/rollback", Collected::Mem(b)) => {
+            let req: RollbackReq = jbody(b)?;
+            state::check_name("project", &req.project)?;
+            user_check(&s.root, &req.project, &user)?;
+            let root = s.root.clone();
+            let p = req.project;
+            let r = blk(move || match &req.version {
+                Some(v) => ops::rollback_to(&root, &p, v).map(Some),
+                None => ops::rollback(&root, &p).map(Some),
             })
             .await?;
             Ok(match r {
                 Some(o) => Json(json!({"ok": true, "url": o.url, "port": o.port})),
                 None => Json(json!({"ok": true})),
             })
+        }
+
+        // —— 发布历史（回滚对话框数据源）：历史 + 当前版本 + 每条 imagePresent（registry 存在性） ——
+        ("GET", "/_api/versions", _) => {
+            let project = qget(&q, "project")?;
+            state::check_name("project", &project)?;
+            user_check(&s.root, &project, &user)?;
+            let root = s.root.clone();
+            let v = blk(move || ops::versions_of(&root, &project)).await?;
+            Ok(Json(v))
         }
 
         ("POST", "/_api/import", Collected::File(tmp)) => {
@@ -579,15 +603,14 @@ async fn dispatch(
         ("POST", "/_api/import-begin", Collected::Mem(b)) => {
             let req: BeginReq = jbody(b)?;
             state::check_name("project", &req.project)?;
-            publish::check_tag(&req.tag)?;
             publish::check_ownership(&s.root, &req.project, &user)?;
             let root = s.root.clone();
             let o = user.clone();
-            let id = blk(move || {
-                publish::import_begin(&root, &o, &req.project, &req.tag, &req.image_id, req.total_bytes)
+            let (id, tag) = blk(move || {
+                publish::import_begin(&root, &o, &req.project, req.tag.as_deref(), &req.image_id, req.total_bytes)
             })
             .await?;
-            Ok(Json(json!({"upload_id": id})))
+            Ok(Json(json!({"upload_id": id, "tag": tag})))
         }
 
         ("POST", "/_api/import-chunk", Collected::File(tmp)) => {
@@ -1270,6 +1293,13 @@ struct ProjectReq {
     project: String,
 }
 
+/// POST /_api/rollback body：`{"project":p,"version":"v2"}`；version 缺省 = 上一版本（CLI 兼容）。
+#[derive(Deserialize)]
+struct RollbackReq {
+    project: String,
+    version: Option<String>,
+}
+
 #[derive(Deserialize)]
 struct IdReq {
     image_id: String,
@@ -1284,7 +1314,8 @@ struct ImageRmReq {
 #[derive(Deserialize)]
 struct BeginReq {
     project: String,
-    tag: String,
+    /// 镜像 tag（镜像库内身份）。控制台已不收集版本——None → 服务端生成 u<8hex>。
+    tag: Option<String>,
     image_id: String,
     total_bytes: u64,
 }
@@ -1568,6 +1599,8 @@ mod tests {
                 user: user.into(), tag: "v1".into(), port: 8100, cport: 8080,
                 mem: "256m".into(), cpu: 1.0, redisdb: db, updated: 1,
                 stopped: false, legacyslot: None,
+                version: String::new(),
+                version_seq: 0,
             };
             c.save(&root, p).unwrap();
         }
@@ -1673,6 +1706,8 @@ mod tests {
                 user: "alice".into(), tag: "v1".into(), port: 8100, cport: 8080,
                 mem: "256m".into(), cpu: 1.0, redisdb: db, updated: 1,
                 stopped: false, legacyslot: None,
+                version: String::new(),
+                version_seq: 0,
             };
             c.save(&root, p).unwrap();
         }
@@ -2103,6 +2138,8 @@ mod tests {
                 user: user.into(), tag: "v1".into(), port: 8100, cport: 8080,
                 mem: "256m".into(), cpu: 1.0, redisdb: 0, updated: 1,
                 stopped: false, legacyslot: None,
+                version: String::new(),
+                version_seq: 0,
             };
             c.save(&root, p).unwrap();
         }
