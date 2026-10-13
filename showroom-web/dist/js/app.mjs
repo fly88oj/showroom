@@ -25,7 +25,7 @@ async function onLoginSubmit(ev) {
     $('lg-pass').value = ''; // 用后即清，不留在 DOM
     $('lg-fb').textContent = '';
     enterApp();
-    if (state.boundAdmin) showMsg('已进入管理员账号。', 'ok'); // R5 追加裁决：管理 tab 自明，机制词零残留
+    // R9 终裁决：登录成功横幅全删——进得来就是登录成功，「管」角标已示身份（成功静默铁律收口）
   } catch (e) {
     $('lg-fb').textContent = '';
     if (e && e.error === 'E_PW_LOCAL') {

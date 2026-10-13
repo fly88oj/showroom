@@ -1525,7 +1525,7 @@ ok(keyBindBodies.at(-1).user === 'bob' && keyBindBodies.at(-1).pubkey === pubOf(
   '换账号密码登录：用本机既有钥匙绑定新账号');
 ok(store.get('sr.seed') === seed4 && store.get('sr.user') === 'bob', '沿用同一 seed，记忆新账号');
 ok(hidden('login') && shown('app') && $s('hd-user').textContent === 'bob', '进入管理壳（回显新账号）');
-ok(($s('msg').textContent || '').includes('已进入管理员账号'), 'admin 账号登录提示（R5：无机制词）');
+ok(($s('msg').textContent || '') === '', 'R9 终裁决：登录成功零播报（进壳即证明，「管」角标唯一）');
 // —— 4c-2. 换号顶栏刷新 + 退出清顶部条（第2轮xiaozhi P2/P3）：logout → 密码登录另一账号 → #hd-user/即时复位 ——
 whoamiAdmin = true;
 clickTab('db'); // bob 视角点亮数据页（换号前作旧值残留的对照）
