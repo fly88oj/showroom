@@ -17,7 +17,8 @@ import { cn } from "cn";
 import { toast } from "sonner";
 import { api } from "@/lib/api";
 import { useApp, apiFailToast, externalUrl } from "@/lib/app";
-import { platformPem, PROJ_RE, RESERVED } from "@/lib/state";
+import { checkProj, pemReady } from "@/lib/state";
+import { randAlnum } from "@/lib/bytes";
 import { freshUpload, resumeUploadCore, uploadPayload } from "@/lib/upload";
 
 type Phase = "idle" | "compress" | "upload" | "publish" | "done" | "fail";
@@ -48,7 +49,7 @@ export function Publish({
   const [prog, setProg] = useState({ cur: 0, total: 1 });
   const [text, setText] = useState("（未开始）");
   const [doneUrl, setDoneUrl] = useState("");
-  const deployRef = useRef<{ file: File | null; blob: Blob | null; tag: string; uploadId: string | null }>({ file: null, blob: null, tag: "", uploadId: null });
+  const deployRef = useRef<{ file: File | null; blob: Blob | null; tag: string; uploadId: string | null; target?: string }>({ file: null, blob: null, tag: "", uploadId: null });
 
   useEffect(() => {
     if (prefill) {
@@ -93,7 +94,7 @@ export function Publish({
   }
 
   /** 部署主流程：mode = fresh / resume（断点续传）/ publish（仅重发发布）。 */
-  async function deployRun(mode: "fresh" | "resume" | "publish") {
+  async function deployRun(mode: "fresh" | "resume" | "publish", projectName: string) {
     const d = deployRef.current;
     let phaseNow: keyof typeof PHASE_CN = "compress";
     if (name) markRow(name, "uploading", 10 * 60 * 1000); // 在途兜底标记（成功/失败各按终态改写）
@@ -117,7 +118,7 @@ export function Publish({
       }
       if (d.file && mode !== "publish") {
         phaseNow = "upload";
-        if (name) markRow(name, "uploading", 10 * 60 * 1000);
+        markRow(projectName, "uploading", 10 * 60 * 1000);
         setPhase("upload"); setStep(1, "run");
         const upNote = (sent: number, total: number) => {
           setProg({ cur: sent, total });
@@ -132,7 +133,7 @@ export function Publish({
           });
           setStep(0, "ok");
         } else {
-          const r = await freshUpload(name, d.file, d.blob as Blob, upNote, () => void refreshSpace(true));
+          const r = await freshUpload(projectName, d.file, d.blob as Blob, upNote, () => void refreshSpace(true));
           d.uploadId = r.uploadId;
           d.tag = r.tag;
         }
@@ -141,15 +142,15 @@ export function Publish({
         setText("上传完成：镜像已导入镜像库。");
       }
       phaseNow = "publish";
-      if (name) markRow(name, "publishing", 10 * 60 * 1000);
-      await doPublish(name, d.tag);
+      markRow(projectName, "publishing", 10 * 60 * 1000);
+      await doPublish(projectName, d.target ?? d.tag);
       setStep(2, "ok"); setStep(3, "ok");
       setProg({ cur: 1, total: 1 });
-      const eurl = externalUrl(base, name);
+      const eurl = externalUrl(base, projectName);
       setDoneUrl(eurl);
       setText("④ 完成：发布成功。");
       setPhase("done");
-      if (name) markRow(name, "rebuilding", 60 * 1000); // §4 「重建中」60s 滚动窗口
+      markRow(projectName, "rebuilding", 60 * 1000); // §4 「重建中」60s 滚动窗口
       deployRef.current = { file: null, blob: null, tag: "", uploadId: null };
       setFile(null);
       await publishDone(name);
@@ -157,7 +158,7 @@ export function Publish({
       const err = e as { error?: string; msg?: string };
       setFailAt(phaseNow);
       setPhase("fail");
-      if (name && phaseNow !== "compress") markRow(name, "failed", 60 * 1000); // §4 「异常」滚动窗口
+      if (phaseNow !== "compress") markRow(projectName, "failed", 60 * 1000); // §4 「异常」滚动窗口
       setStep(phaseNow === "compress" ? 0 : phaseNow === "upload" ? 1 : 2, "fail");
       setText(
         `「${PHASE_CN[phaseNow]}」步骤失败：${err.msg || err.error || "网络异常"}`
@@ -186,29 +187,31 @@ export function Publish({
     }
     let project2 = name;
     if (!project2) {
-      // §12.1：项目名为空 = 自动生成随机 8 位
-      project2 = Array.from({ length: 8 }, () => "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789"[Math.floor(Math.random() * 62)]).join("");
+      // §12.1：项目名为空 = 自动生成随机 8 位（crypto 拒绝采样）
+      project2 = randAlnum(8);
       setProject(project2);
     }
-    if (!PROJ_RE.test(project2) || RESERVED.has(project2)) {
-      setProjErr("项目名仅限字母、数字与连字符（且不得使用系统保留名），请修改后重试（E_NAME）");
+    const bad = checkProj(project2);
+    if (bad) {
+      setProjErr(bad);
       return;
     }
     if (src === "tar" && file) {
-      const pem = platformPem();
-      if (!pem.startsWith("-----BEGIN PUBLIC KEY-----")) {
+      if (!pemReady()) {
         toast.error("尚未完成安全配置", { description: "登录后通常已自动配置；可到「设置」完成" });
         onOpenSettings();
         return;
       }
     }
-    await deployRun("fresh");
+    deployRef.current.target = project2;
+    await deployRun("fresh", project2);
   }
 
   function retry() {
-    if (failAt === "upload" && deployRef.current.uploadId) void deployRun("resume");
-    else if (failAt === "publish") void deployRun("publish");
-    else void deployRun("fresh");
+    const pn = deployRef.current.target || name;
+    if (failAt === "upload" && deployRef.current.uploadId) void deployRun("resume", pn);
+    else if (failAt === "publish") void deployRun("publish", pn);
+    else void deployRun("fresh", pn);
   }
 
   const STEPS = ["① 压缩", "② 上传", "③ 发布", "④ 完成"];

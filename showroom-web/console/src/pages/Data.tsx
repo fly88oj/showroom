@@ -24,13 +24,42 @@ import { toast } from "sonner";
 import { api, apiDo, respErr } from "@/lib/api";
 import { useApp, apiFailToast } from "@/lib/app";
 import { derToPem, enc } from "@/lib/bytes";
-import { checkProj, DUMP_CHUNK, platformPem, SEG } from "@/lib/state";
+import { checkProj, DUMP_CHUNK, pemReady, platformPem, SEG } from "@/lib/state";
 import { ex, mem, put, shimCStr, unput, alloc } from "@/lib/wasm";
 import { sealBegin, pushSlice, pushFlush, uploadPayload } from "@/lib/upload";
 
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 const PREVIEW_MAX = 200; // 服务端 db-preview 上限（本地分页基于全量 ≤200 行）
 const DANGEROUS_SQL = /\b(drop|truncate|delete|alter)\b/i;
+
+/** 按分号拆分多语句：单引号（含 '' 转义）/双引号/$$ 美元引用内的分号不拆（psql 语义）。 */
+export function splitSql(text: string): string[] {
+  const out: string[] = [];
+  let cur = "", q: "'" | '"' | null = null, dollar = false;
+  for (let i = 0; i < text.length; i++) {
+    const c = text[i];
+    if (dollar) {
+      if (c === "$" && text.slice(i, i + 2) === "$$") { dollar = false; cur += "$$"; i++; continue; }
+      cur += c;
+      continue;
+    }
+    if (q) {
+      if (c === q) {
+        if (q === "'" && text[i + 1] === "'") { cur += "''"; i++; continue; } // SQL '' 转义
+        q = null;
+      }
+      cur += c;
+      continue;
+    }
+    if (c === "'") { q = "'"; cur += c; continue; }
+    if (c === '"') { q = '"'; cur += c; continue; }
+    if (c === "$" && text.slice(i, i + 2) === "$$") { dollar = true; cur += "$$"; i++; continue; }
+    if (c === ";") { if (cur.trim()) out.push(cur.trim()); cur = ""; continue; }
+    cur += c;
+  }
+  if (cur.trim()) out.push(cur.trim());
+  return out;
+}
 
 interface SqlPanel {
   info: string[];
@@ -133,7 +162,7 @@ export function Data({ onOpenSettings }: { onOpenSettings: () => void }) {
   async function runSql() {
     const bad = checkProj(dbProject);
     if (bad) { setProjErr(bad); return; }
-    const stmts = sql.split(";").map((x) => x.trim()).filter(Boolean);
+    const stmts = splitSql(sql);
     if (stmts.length === 0) { setSqlResult({ info: ["请输入要执行的 SQL 语句"], tables: [] }); return; }
     if (stmts.some((st) => DANGEROUS_SQL.test(st))) { setDangerSql(stmts); return; }
     await execSql(stmts);
@@ -237,8 +266,7 @@ export function Data({ onOpenSettings }: { onOpenSettings: () => void }) {
   async function restore() {
     const f = restoreFile;
     if (!f) return;
-    const pem = platformPem();
-    if (!pem.startsWith("-----BEGIN PUBLIC KEY-----")) {
+    if (!pemReady()) {
       toast.error("尚未完成安全配置：到「设置」完成");
       setRestoreConfirm(false);
       onOpenSettings();
@@ -251,7 +279,7 @@ export function Data({ onOpenSettings }: { onOpenSettings: () => void }) {
         setProg({ cur: done, total: raw });
         setProgTxt(`压缩中 ${done} / ${raw} 字节…`);
       });
-      const sid = sealBegin(pem, crypto.getRandomValues(new Uint8Array(32)));
+      const sid = sealBegin(platformPem(), crypto.getRandomValues(new Uint8Array(32)));
       const parts: Uint8Array[] = [];
       const C2 = 4 * 1024 * 1024;
       for (let o = 0; o < payload.size; o += C2) {

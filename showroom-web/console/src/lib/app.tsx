@@ -1,6 +1,5 @@
-// —— app.tsx：迁移过渡数据层（阶段一）——
-// 会话/项目/镜像/空间走真实 /_api（协议与 TTL 纪律同 dist/js）；发布上传链路、DB、管理端、
-// 事件流为阶段二目标，本层保留接口形状让全站可构建可部署。
+// —— app.tsx：全局会话与数据层（真链路）——
+// 会话生命周期（boot/登录/退出/心跳踢回/改密收口）+ 四路资源（projects/images/space TTL 缓存）+ 事件流订阅 + 行内在途标记。
 import {
   createContext, useCallback, useContext, useEffect, useMemo, useRef, useState,
   type ReactNode,
@@ -110,7 +109,6 @@ export function AppProvider({ children }: { children: ReactNode }) {
     if (!state.loggedIn || (!force && dataFresh("projects"))) return;
     const j = (await api("GET", "/_api/projects")) as { projects?: Record<string, unknown>[] };
     const list = (j.projects || []).map(mapProject);
-    state.projects = list as never;
     setProjects(list);
     dataMark("projects");
   }, []);
@@ -242,30 +240,49 @@ export function AppProvider({ children }: { children: ReactNode }) {
       return;
     }
     if (evAc.current) return; // 已订阅
-    const ac = new AbortController();
-    evAc.current = ac;
-    setEvConnected(true);
+    let alive = true;
     let evDebounce: ReturnType<typeof setTimeout> | null = null;
-    consumeNdjson("/_api/events", (j) => {
-      setEvents((evs) => [...evs.slice(-19), new Date().toLocaleTimeString("sv-SE") + "  " + JSON.stringify(j)]);
-      // 恒实时（§3）：事件 2s 去抖 → 项目列表即时收敛（容器启停/发布完成等）
-      if (evDebounce) clearTimeout(evDebounce);
-      evDebounce = setTimeout(() => { void refreshProjects(true); }, 2000);
-    }, ac.signal).catch(() => {
-      if (evAc.current === ac) { evAc.current = null; setEvConnected(false); }
-    });
+    let retryTimer: ReturnType<typeof setTimeout> | null = null;
+    const start = () => {
+      if (!alive || evAc.current) return;
+      const ac = new AbortController();
+      evAc.current = ac;
+      setEvConnected(true);
+      consumeNdjson("/_api/events", (j) => {
+        // §10.4：心跳/非平台动作不入面板；平台动作（sr-*）驱动面板与列表刷新
+        const actor = typeof j.actor === "string" ? j.actor : "";
+        if (j.hb === true) return;
+        if (actor && !actor.startsWith("sr-")) return;
+        setEvents((evs) => [...evs.slice(-19), new Date().toLocaleTimeString("sv-SE") + "  " + JSON.stringify(j)]);
+        // 恒实时（§3）：事件 2s 去抖 → 项目列表即时收敛（容器启停/发布完成等）
+        if (evDebounce) clearTimeout(evDebounce);
+        evDebounce = setTimeout(() => { void refreshProjects(true); }, 2000);
+      }, ac.signal).catch(() => {
+        if (evAc.current === ac) { evAc.current = null; setEvConnected(false); }
+        if (alive) retryTimer = setTimeout(start, 5000); // §3 断流 5s 重订
+      });
+    };
+    start();
     const onVis = () => {
-      if (document.hidden) { ac.abort(); if (evAc.current === ac) evAc.current = null; setEvConnected(false); }
+      if (document.hidden) {
+        evAc.current?.abort();
+        evAc.current = null;
+        setEvConnected(false);
+      } else {
+        start(); // 回开 proj/admin 自动重订
+      }
     };
     document.addEventListener("visibilitychange", onVis);
     return () => {
+      alive = false;
       document.removeEventListener("visibilitychange", onVis);
-      ac.abort();
-      if (evAc.current === ac) evAc.current = null;
+      if (retryTimer) clearTimeout(retryTimer);
+      evAc.current?.abort();
+      evAc.current = null;
     };
   }, [boot, tab, refreshProjects]);
 
-  // 断网恢复（§3/验收 8）：连网即强制重取项目与空间（免刷新自动补齐）
+  // 断网恢复（§3/验收 8）：连网即重订事件流 + 强制重取项目与空间
   useEffect(() => {
     const onOnline = () => {
       if (!state.loggedIn) return;

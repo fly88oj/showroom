@@ -52,6 +52,10 @@ export async function initWasm(): Promise<void> {
   mem().set(b, p);
   if (ex.sr_entropy(p, 64) !== 0) throw new Error("sr_entropy 失败");
   ex.sr_free(p, 64);
+  // 垫片导出齐备断言（坏 wasm 早败，调用方无需降级分支）
+  for (const fn of ["sr_login_start", "sr_login_ke1", "sr_login_finish", "sr_reg_start", "sr_reg_msg", "sr_reg_finish"]) {
+    if (typeof ex[fn] !== "function") throw new Error(`垫片缺少导出 ${fn}`);
+  }
 }
 
 // wasm 内存可能随分配增长而换代：任何 wasm 调用后都重取 view
@@ -90,8 +94,4 @@ export function shimCStr(call: (p: number, cap: number) => number, cap0: number)
   return s;
 }
 
-// 垫片探测：惰性求值（initWasm 之后才可用；.mjs 版为顶层 await，此处装载移入 initWasm）
-export const OPAQUE_SHIM = () =>
-  !!ex && typeof ex.sr_login_start === "function" && typeof ex.sr_login_ke1 === "function" && typeof ex.sr_login_finish === "function";
-export const REG_SHIM = () =>
-  !!ex && typeof ex.sr_reg_start === "function" && typeof ex.sr_reg_msg === "function" && typeof ex.sr_reg_finish === "function";
+

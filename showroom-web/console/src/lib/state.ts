@@ -29,7 +29,6 @@ export const ENV_DESC: Record<string, string> = {
 const DATA_TTL: Record<string, number> = { projects: 30000, images: 300000, space: 60000 };
 const dataAt: Record<string, number> = { projects: 0, images: 0, space: 0 };
 export const dataFresh = (k: string) => Date.now() - dataAt[k] < DATA_TTL[k];
-export const dataLoaded = (k: string) => dataAt[k] > 0;
 export const dataMark = (k: string) => {
   dataAt[k] = Date.now();
   retryCounts[k] = 0;
@@ -53,30 +52,18 @@ export const state = {
   pub: "",
   user: "",
   loggedIn: false,
-  projects: [] as ProjectRow[],
   kid: "",
   admin: false,
   boundAdmin: false,
   pem: typeof localStorage !== "undefined" ? localStorage.getItem("sr.pempub") || "" : "",
 };
-
-export interface ProjectRow {
-  project: string;
-  status: string;
-  version: number;
-  url?: string;
-  updated?: number; // epoch ms（渲染层格式化）
-  [k: string]: unknown;
-}
+// 注：项目列表事实源在 React 层（app.tsx），单例只承载会话事实（seed/user/pem/admin）。
 
 /** 水合 PEM（写 state.pem 并缓存 sr.pempub）；守卫（不覆盖已有配置）由调用方保持。 */
 export function hydratePem(pem: string) {
   state.pem = pem;
   localStorage.setItem("sr.pempub", pem);
 }
-
-/** 项目名集合（去重）：发布/数据两处下拉候选共用。 */
-export const myProjectNames = () => [...new Set(state.projects.map((p) => p.project))];
 
 export function checkProj(project: string): string | null {
   if (!PROJ_RE.test(project) || RESERVED.has(project)) {

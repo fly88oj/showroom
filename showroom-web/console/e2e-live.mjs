@@ -4,8 +4,9 @@
 // 账号由部署方提供（勿入库真实凭据）；截图输出到 /tmp/live/。
 import { createRequire } from "node:module";
 import { mkdirSync } from "node:fs";
-const require = createRequire("/home/jeffrey/works/personal/share-state/node_modules/"); // playwright 复用本机安装
+const require = createRequire(process.env.SR_PLAYWRIGHT_REQUIRE || "/usr/lib/node_modules"); // playwright 解析路径（SR_PLAYWRIGHT_REQUIRE 可覆盖）
 const { chromium } = require("playwright");
+const CHROME = process.env.SR_CHROME || "google-chrome";
 
 const BASE = process.env.SR_BASE || "http://192.168.4.55/_console/";
 const USER = process.env.SR_USER, PASS = process.env.SR_PASS;
@@ -21,7 +22,7 @@ const shot = async (page, name) => {
 };
 const ok = (c, w) => { if (!c) errors.push("[assert] " + w); };
 
-const browser = await chromium.launch({ executablePath: "/usr/bin/google-chrome", args: ["--no-sandbox"] });
+const browser = await chromium.launch({ executablePath: CHROME, args: ["--no-sandbox"] });
 const page = await browser.newPage({ viewport: { width: 1440, height: 900 } });
 page.on("pageerror", (e) => errors.push("[pageerror] " + e.message.slice(0, 200)));
 const nav = (t) => page.locator("nav").first().getByText(t, { exact: true });

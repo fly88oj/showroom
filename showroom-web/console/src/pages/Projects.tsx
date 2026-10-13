@@ -3,7 +3,7 @@ import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { StatusBadge } from "@/components/StatusBadge";
-import { Confirm, failMsg } from "@/components/Confirm";
+import { Confirm } from "@/components/Confirm";
 import {
   DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuSeparator, DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu";
@@ -19,10 +19,9 @@ import {
   ExternalLinkIcon, InfoIcon, MoreHorizontalIcon, ScrollTextIcon,
 } from "lucide-react";
 import { cn } from "cn";
-import { toast } from "sonner";
 import { consumeNdjson, api } from "@/lib/api";
-import { ENV_VARS } from "@/lib/mock";
-import { useApp, fmtTime, externalUrl, isPrivateHost, type Project } from "@/lib/app";
+import { ENV_DESC } from "@/lib/state";
+import { useApp, apiFailToast, fmtTime, externalUrl, isPrivateHost, type Project } from "@/lib/app";
 
 /** 我的项目：状态机行操作 + 更多菜单 + 日志抽屉 + 回滚/环境变量（对齐原版 proj.mjs） */
 export function Projects({ base, onOpenSettings }: { base: string; onOpenSettings: () => void }) {
@@ -34,9 +33,13 @@ export function Projects({ base, onOpenSettings }: { base: string; onOpenSetting
   const [busy, setBusy] = useState(false);
   const [opBusy, setOpBusy] = useState<string | null>(null); // 行内启动执行中
   const [firstLoad, setFirstLoad] = useState(true);
+  const [loadErr, setLoadErr] = useState<string | null>(null);
 
   useEffect(() => {
-    (async () => { await refreshProjects(); setFirstLoad(false); })();
+    (async () => {
+      try { await refreshProjects(); setLoadErr(null); } catch { setLoadErr("加载失败"); }
+      setFirstLoad(false);
+    })();
   }, [refreshProjects]);
 
   async function doConfirm() {
@@ -46,7 +49,7 @@ export function Projects({ base, onOpenSettings }: { base: string; onOpenSetting
       await projOp(confirm.p.project, confirm.kind);
       setConfirm(null);
       // 成功静默：不弹 toast（仅错误才显著）
-    } catch { failMsg(confirm.kind === "rm" ? "删除" : "停止"); }
+    } catch (e) { apiFailToast(e, `${confirm.kind === "rm" ? "删除" : "停止"} ${confirm.p.project}`); }
     finally { setBusy(false); }
   }
 
@@ -57,7 +60,7 @@ export function Projects({ base, onOpenSettings }: { base: string; onOpenSetting
 
   async function startProj(name: string) {
     setOpBusy(name);
-    try { await projOp(name, "start"); } finally { setOpBusy(null); }
+    try { await projOp(name, "start"); } catch (e) { apiFailToast(e, `启动 ${name}`); } finally { setOpBusy(null); }
   }
 
   return (
@@ -184,7 +187,10 @@ export function Projects({ base, onOpenSettings }: { base: string; onOpenSetting
                   </TableRow>
               );
             })}
-            {!firstLoad && projects.length === 0 && (
+            {!firstLoad && loadErr && projects.length === 0 && (
+              <TableRow><TableCell colSpan={7} className="py-6 text-center text-xs text-bad">{loadErr}　<Button size="sm" variant="outline" onClick={() => void refreshProjects(true).then(() => setLoadErr(null)).catch(() => setLoadErr("加载失败"))}>重试</Button></TableCell></TableRow>
+            )}
+            {!firstLoad && !loadErr && projects.length === 0 && (
               <TableRow><TableCell colSpan={7} className="py-6 text-center text-xs text-muted-foreground">尚无项目——到「发布」页发布第一个 Demo。</TableCell></TableRow>
             )}
           </TableBody>
@@ -224,8 +230,13 @@ function LogsDialog({ project, onClose }: { project: string | null; onClose: () 
       consumeNdjson(
         `/_api/logs-stream?project=${encodeURIComponent(project)}&tail=100`,
         (j) => {
-          const line = typeof j.line === "string" ? j.line : JSON.stringify(j);
-          setLines((ls) => [...ls.slice(-999), line]);
+          // streams.rs ndjson：{t:<unix 秒>, l:"日志行"}；hb 等非行事件跳过
+          if (typeof j.l !== "string") return;
+          const t = Number(j.t);
+          const ts = Number.isFinite(t) && t > 0
+            ? new Date(t * 1000).toLocaleTimeString("sv-SE") + " "
+            : "";
+          setLines((ls) => [...ls.slice(-999), ts + j.l]);
         },
         ac.signal,
       ).catch(() => {
@@ -295,10 +306,9 @@ function RollbackDialog({
     setBusy(true);
     try {
       await onRollback(project.project, pending.v);
-      toast.success(`已回滚 ${project.project} → ${pending.v}（部署重建中）`);
       setPending(null);
       onClose();
-    } finally { setBusy(false); }
+    } catch (e) { apiFailToast(e, `回滚 ${project.project}`); } finally { setBusy(false); }
   }
 
   return (
@@ -363,7 +373,24 @@ function RollbackDialog({
 }
 
 /** 环境变量模态：键/当前值/用途（§6） */
+/** 环境变量弹窗（§6）：GET /_api/env 真数据（键/当前值/用途），用途取 ENV_DESC。 */
 function EnvDialog({ project, onClose }: { project: Project | null; onClose: () => void }) {
+  const [env, setEnv] = useState<Record<string, string> | null>(null);
+  useEffect(() => {
+    if (!project) return;
+    setEnv(null);
+    let alive = true;
+    (async () => {
+      try {
+        const j = (await api("GET", `/_api/env?project=${encodeURIComponent(project.project)}`)) as { env?: Record<string, string> };
+        if (alive) setEnv(j.env || {});
+      } catch {
+        if (alive) setEnv({});
+      }
+    })();
+    return () => { alive = false; };
+  }, [project?.project]); // eslint-disable-line react-hooks/exhaustive-deps
+  const keys = env ? Object.keys(env).sort() : [];
   return (
     <Dialog open={!!project} onOpenChange={(v) => !v && onClose()}>
       <DialogContent className="sm:max-w-2xl">
@@ -372,22 +399,26 @@ function EnvDialog({ project, onClose }: { project: Project | null; onClose: () 
           <DialogDescription>发布时自动注入（<span className="font-mono">showroom env</span> 同）。</DialogDescription>
         </DialogHeader>
         <div className="rounded-lg border">
-            <Table>
-              <TableHeader>
-                <TableRow>
-                  <TableHead className="w-56">键</TableHead>
-                  <TableHead>当前值</TableHead>
-                  <TableHead>用途</TableHead>
-                </TableRow>
-              </TableHeader>
+          <Table>
+            <TableHeader>
+              <TableRow className="bg-muted/30">
+                <TableHead className="w-56">键</TableHead>
+                <TableHead>当前值</TableHead>
+                <TableHead>用途</TableHead>
+              </TableRow>
+            </TableHeader>
             <TableBody>
-              {ENV_VARS.map((v) => (
-                <TableRow key={v.key}>
-                  <TableCell className="font-mono text-xs">{v.key}</TableCell>
-                  <TableCell className="max-w-56 truncate font-mono text-xs">{v.value}</TableCell>
-                  <TableCell className="text-xs text-muted-foreground">{v.desc}</TableCell>
+              {env === null ? (
+                <TableRow><TableCell colSpan={3} className="py-6 text-center text-xs text-muted-foreground">加载中…</TableCell></TableRow>
+              ) : keys.length ? keys.map((k) => (
+                <TableRow key={k}>
+                  <TableCell className="font-mono text-xs">{k}</TableCell>
+                  <TableCell className="break-all font-mono text-xs">{env[k]}</TableCell>
+                  <TableCell className="text-xs text-muted-foreground">{ENV_DESC[k] || ""}</TableCell>
                 </TableRow>
-              ))}
+              )) : (
+                <TableRow><TableCell colSpan={3} className="py-6 text-center text-xs text-muted-foreground">（空）</TableCell></TableRow>
+              )}
             </TableBody>
           </Table>
         </div>

@@ -1,7 +1,7 @@
 // —— auth.ts：OPAQUE 客户端（登录/改密）+ 密钥无感生成 + 60s 心跳（移植自 dist/js/auth.mjs）——
-import { Buffer_fromHex, bytesToB64, dec, enc, nonceHex, toHex } from "@/lib/bytes";
+import { Buffer_fromHex, dec, enc, toHex } from "@/lib/bytes";
 import { api, checkResp, signHeaderPtr } from "@/lib/api";
-import { ex, mem, put, shimCStr, unput, OPAQUE_SHIM, REG_SHIM } from "@/lib/wasm";
+import { ex, mem, put, shimCStr, unput } from "@/lib/wasm";
 import { state } from "@/lib/state";
 
 function loadSeed() {
@@ -32,23 +32,11 @@ export function ensureSeed() {
 }
 
 // —— OPAQUE 客户端适配层（plan-16 §2.2 报文序列 / §6.1 垫片导出）——
-// 真分支 ABI：b64 串进出；输出 NUL 结尾、容量不足 -(所需) ≤ -40；finish 一次性消费会话；密码错误 = -7。
-// mock 兜底层仅在垫片探测失败时降级（正常永不触发）。
-
-const MOCK_FP = (s: string) => {
-  let h = 0x811c9dc5;
-  for (const b of enc.encode(s)) { h ^= b; h = Math.imul(h, 0x01000193) >>> 0; }
-  return h.toString(16).padStart(8, "0");
-};
-const MOCK_B64 = (o: unknown) => bytesToB64(enc.encode(JSON.stringify(o)));
-function MOCK_PARSE(b64: string): Record<string, unknown> | null {
-  try { return JSON.parse(dec.decode(Uint8Array.from(atob(b64), (c) => c.charCodeAt(0)))); } catch { return null; }
-}
-let mockSidSeq = 0;
-const MOCK_SESS = new Map<number, { user: string; r: string }>();
+// ABI：b64 串进出；输出 NUL 结尾、容量不足 -(所需) ≤ -40；finish 一次性消费会话；密码错误 = -7。
+// 垫片随包分发（initWasm 已断言导出齐备），无降级分支。
 
 export function opaqueStart(user: string, pass: string): { sid: number; ke1: string } {
-  if (OPAQUE_SHIM()) {
+  {
     const [pp, pl] = put(enc.encode(pass)), [up, ul] = put(enc.encode(user));
     let sid: number;
     try {
@@ -58,13 +46,10 @@ export function opaqueStart(user: string, pass: string): { sid: number; ke1: str
     const ke1 = shimCStr((p, c) => (ex.sr_login_ke1 as (a: number, b: number, c: number) => number)(sid, p, c), 2048);
     return { sid, ke1 };
   }
-  const sid = ++mockSidSeq;
-  MOCK_SESS.set(sid, { user, r: MOCK_FP(`showroom-opaque-mock|${user}|${pass}`) });
-  return { sid, ke1: MOCK_B64({ v: 1, m: "ke1", u: user, n: nonceHex() }) };
 }
 
 export function opaqueFinish(sid: number, pass: string, ke2: string): string {
-  if (OPAQUE_SHIM()) {
+  {
     const [pp, pl] = put(enc.encode(pass)), [kp, kl] = put(enc.encode(ke2));
     const cap = 2048, out = (ex.sr_alloc as (n: number) => number)(cap);
     const r = (ex.sr_login_finish as (a: number, b: number, c: number, d: number, e: number, f: number, g: number) => number)(sid, pp, pl, kp, kl, out, cap);
@@ -75,9 +60,6 @@ export function opaqueFinish(sid: number, pass: string, ke2: string): string {
     if (!ke3) throw { error: "E_NET", msg: `login_finish 失败（${r}）` };
     return ke3;
   }
-  const st = MOCK_SESS.get(sid), j = MOCK_PARSE(ke2);
-  if (!st || !j || j.m !== "ke2" || j.mac !== MOCK_FP(`mac|${j.n}|${st.r}`)) throw { error: "E_PW_LOCAL", msg: "" };
-  return MOCK_B64({ v: 1, m: "ke3", mac: j.mac });
 }
 
 // readCStr 延迟取用（wasm.ts 的 mem 视图需在调用后重取；直接 import readCStr 亦可，此处保持同构）
@@ -90,11 +72,11 @@ function require_readCStr() {
   };
 }
 
-export function opaqueEnd(sid: number) { MOCK_SESS.delete(sid); }
+export function opaqueEnd(_sid: number) { /* 真垫片会话在 finish 时一次性自弃 */ }
 
 // —— OPAQUE 注册适配（改密码：m1 → m2 → record）——
 export function opaqueRegStart(user: string, pass: string): { sid: number; m1: string } {
-  if (REG_SHIM()) {
+  {
     const [pp, pl] = put(enc.encode(pass)), [up, ul] = put(enc.encode(user));
     let sid: number;
     try {
@@ -104,13 +86,10 @@ export function opaqueRegStart(user: string, pass: string): { sid: number; m1: s
     const m1 = shimCStr((p, c) => (ex.sr_reg_msg as (a: number, b: number, c: number) => number)(sid, p, c), 2048);
     return { sid, m1 };
   }
-  const sid = ++mockSidSeq;
-  MOCK_SESS.set(sid, { user, r: MOCK_FP(`showroom-opaque-mock|${user}|${pass}`) });
-  return { sid, m1: MOCK_B64({ v: 1, m: "m1", u: user, n: nonceHex() }) };
 }
 
 export function opaqueRegFinish(sid: number, pass: string, m2: string): string {
-  if (REG_SHIM()) {
+  {
     const [pp, pl] = put(enc.encode(pass)), [mp, ml] = put(enc.encode(m2));
     const cap = 4096, out = (ex.sr_alloc as (n: number) => number)(cap);
     const r = (ex.sr_reg_finish as (a: number, b: number, c: number, d: number, e: number, f: number, g: number) => number)(sid, pp, pl, mp, ml, out, cap);
@@ -120,12 +99,9 @@ export function opaqueRegFinish(sid: number, pass: string, m2: string): string {
     if (!record) throw { error: "E_NET", msg: `reg_finish 失败（${r}）` };
     return record;
   }
-  const st = MOCK_SESS.get(sid), j = MOCK_PARSE(m2);
-  if (!st || !j || j.m !== "m2") throw { error: "E_NET", msg: "" };
-  return MOCK_B64({ v: 1, m: "record", u: st.user, mac: MOCK_FP(`rec|${j.n}|${st.r}`) });
 }
 
-export function opaqueRegEnd(sid: number) { MOCK_SESS.delete(sid); }
+export function opaqueRegEnd(_sid: number) { /* 同上 */ }
 
 // —— 一步登录（plan-16 §2.2/§3）：login-begin → 本地 finish → login-finish → key-bind → 进入 ——
 export async function postAuthJson(path: string, body: unknown) {
@@ -191,7 +167,9 @@ export function startHeartbeat(onAuthLost: () => void) {
   heartbeatTimer = setInterval(async () => {
     try {
       await api("GET", "/_api/whoami");
-    } catch {
+    } catch (e) {
+      // 仅钥匙失效（E_AUTH）销毁本机会话；网络闪断留给 30s 轮询自愈
+      if ((e as { error?: string })?.error !== "E_AUTH") return;
       if (heartbeatTimer) clearInterval(heartbeatTimer);
       heartbeatTimer = null;
       localStorage.removeItem("sr.seed");

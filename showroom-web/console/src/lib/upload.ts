@@ -1,10 +1,10 @@
 // —— upload.ts：加密信封分片上传链路（移植自 dist/js/img.mjs，协议零改动）——
 // zstd 全量压缩（两遍法第一遍）→ import-begin → seal 逐 8MB 片（octet-stream 签名）→ flush → 总长校验 → import-end。
 // 断点续传：sr.up.<id> 记录会话 seed；压缩确定性 ⇒ 重放已收分片密文一致。
-import { enc, toHex } from "@/lib/bytes";
+import { Buffer_fromHex, enc, toHex } from "@/lib/bytes";
 import { api, checkResp, signHeaderPtr } from "@/lib/api";
 import { ex, mem, put, unput, alloc } from "@/lib/wasm";
-import { CHUNK, SEG, NONCE, TAG, WRAP, platformPem, dataInvalidate } from "@/lib/state";
+import { CHUNK, SEG, NONCE, TAG, WRAP, platformPem, pemReady, dataInvalidate } from "@/lib/state";
 
 export const sealedTotal = (n: number) => WRAP + n + Math.ceil(n / SEG) * (NONCE + TAG);
 
@@ -147,10 +147,8 @@ export async function freshUpload(
   note?: (sent: number, total: number) => void,
   onSpaceInvalidate?: () => void,
 ): Promise<{ uploadId: string; tag: string }> {
+  if (!pemReady()) throw { error: "E_STATE", msg: "尚未完成安全配置：到「设置」完成" };
   const pem = platformPem();
-  if (!pem.startsWith("-----BEGIN PUBLIC KEY-----")) {
-    throw { error: "E_STATE", msg: "尚未完成安全配置：到「设置」完成" };
-  }
   const total = sealedTotal(zb.size);
   const sessSeed = new Uint8Array(32);
   crypto.getRandomValues(sessSeed);
@@ -180,10 +178,8 @@ export async function resumeUploadCore(
   if (!file || file.size !== saved.size) {
     throw { error: "E_STATE", msg: `续传需选择同一文件（${saved.name}，${saved.size} 字节）` };
   }
+  if (!pemReady()) throw { error: "E_STATE", msg: "尚未完成安全配置：到「设置」完成" };
   const pem = platformPem();
-  if (!pem.startsWith("-----BEGIN PUBLIC KEY-----")) {
-    throw { error: "E_STATE", msg: "尚未完成安全配置：到「设置」完成" };
-  }
   const st = (await api("GET", `/_api/import-status?upload=${encodeURIComponent(id)}`)) as { received?: unknown[] };
   const rec = (st.received || []).length;
   opts.onRec?.(rec);
@@ -193,7 +189,7 @@ export async function resumeUploadCore(
   }
   const total = sealedTotal(zb.size);
   const slices = Math.ceil(zb.size / CHUNK) || 1;
-  const sid = sealBegin(pem, BufferFromHex(saved.seed));
+  const sid = sealBegin(pem, Buffer_fromHex(saved.seed));
   let sent = 0;
   for (let i = 0; i < Math.min(rec, slices); i++) { // 重放已收分片（同 seed+同产物 ⇒ 密文一致，只推进会话状态）
     const part = zb.slice(i * CHUNK, Math.min((i + 1) * CHUNK, zb.size));
@@ -222,11 +218,5 @@ export async function resumeUploadCore(
   dataInvalidate("space");
   opts.onSpaceInvalidate?.();
   return { zstd: pre, zsize: zb.size };
-}
-
-function BufferFromHex(hex: string): Uint8Array {
-  const b = new Uint8Array(hex.length / 2);
-  for (let i = 0; i < b.length; i++) b[i] = parseInt(hex.substr(i * 2, 2), 16);
-  return b;
 }
 

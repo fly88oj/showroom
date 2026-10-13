@@ -7,7 +7,7 @@ import {
 import { DownloadIcon } from "lucide-react";
 import { toast } from "sonner";
 import { apiDo, respErr } from "@/lib/api";
-import { CLI_TABLE, ERROR_TABLE, HELP_ENV_TABLE, TOOLS_TABLE } from "@/lib/mock";
+import { CLI_TABLE, ERROR_TABLE, HELP_ENV_TABLE, TOOLS_TABLE } from "@/lib/help";
 import { useApp } from "@/lib/app";
 
 /** 帮助：账号 / CLI / 镜像规范 / 工具下载 / 错误码（子导航小一档，对齐原版 help-subnav） */

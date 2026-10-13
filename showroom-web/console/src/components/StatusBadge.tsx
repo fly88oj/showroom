@@ -13,6 +13,7 @@ const MAP: Record<string, { label: string; variant: "success" | "warning" | "dan
   dead: { label: "异常", variant: "danger", tip: "可看日志排查，或点「发布」重新发布" },
   missing: { label: "待发布", variant: "info", tip: "仅镜像无容器：从发布页选择镜像即可拉起" },
   publishing: { label: "发布中…", variant: "info", tip: "发布请求进行中：行操作已禁用" },
+  uploading: { label: "上传中", variant: "info", tip: "镜像上传进行中（状态条见发布页）；失败可断点续传" },
 };
 
 function BadgeInner({ status }: { status: string }) {

@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState } from "react";
+import { Fragment, useCallback, useEffect, useState } from "react";
 import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
@@ -20,6 +20,7 @@ import { toast } from "sonner";
 import { api } from "@/lib/api";
 import { useApp, fmtTime } from "@/lib/app";
 import { randAlnum } from "@/lib/bytes";
+import { StatusBadge } from "@/components/StatusBadge";
 import { NAME_RE } from "@/lib/state";
 
 const MW_NAMES = ["postgres", "redis", "registry"] as const;
@@ -153,8 +154,8 @@ function UsersPanel() {
             {users === null ? (
               <TableRow><TableCell colSpan={3} className="py-6 text-center text-xs text-muted-foreground">加载中…</TableCell></TableRow>
             ) : users.map((u) => (
-              <>
-                <TableRow key={u.user} className="bg-muted/20">
+              <Fragment key={u.user}>
+                <TableRow className="bg-muted/20">
                   <TableCell colSpan={3}>
                     <div className="flex flex-wrap items-center gap-2">
                       <span className="font-mono text-sm">{u.user}</span>
@@ -183,11 +184,11 @@ function UsersPanel() {
                   </TableRow>
                 ))}
                 {(!u.keys || u.keys.length === 0) && (
-                  <TableRow key={`${u.user}-none`}>
+                  <TableRow>
                     <TableCell colSpan={3} className="py-1 text-xs text-muted-foreground">（该账号暂无设备）</TableCell>
                   </TableRow>
                 )}
-              </>
+              </Fragment>
             ))}
             {users?.length === 0 && (
               <TableRow><TableCell colSpan={3} className="py-6 text-center text-xs text-muted-foreground">暂无账号</TableCell></TableRow>
@@ -399,7 +400,7 @@ function AllProjectsPanel() {
               <TableRow key={p.user + p.project}>
                 <TableCell className="font-mono text-xs">{p.project}</TableCell>
                 <TableCell className="font-mono text-xs">{p.user}</TableCell>
-                <TableCell><StatusCell status={p.status} /></TableCell>
+                <TableCell><StatusBadge status={p.status} /></TableCell>
                 <TableCell className="text-right font-mono text-xs text-muted-foreground">{fmtTime(p.updated)}</TableCell>
                 <TableCell className="text-right">
                   <div className="flex flex-wrap justify-end gap-1">
@@ -425,12 +426,6 @@ function AllProjectsPanel() {
       </Confirm>
     </div>
   );
-}
-
-function StatusCell({ status }: { status: string }) {
-  const CN: Record<string, string> = { running: "运行中", exited: "已退出", paused: "已暂停", restarting: "重启中", created: "已创建", dead: "异常终止", missing: "待发布" };
-  const v = status === "running" ? "success" : status === "dead" ? "danger" : status === "missing" ? "info" : "secondary";
-  return <Badge variant={v as "success" | "danger" | "info" | "secondary"} className="min-w-16 justify-center font-normal">{CN[status] || status || "未知"}</Badge>;
 }
 
 function StatusPanel() {
@@ -505,7 +500,7 @@ function StatusPanel() {
                 {ctrs.length ? ctrs.map((c, i) => (
                   <TableRow key={i}>
                     <TableCell className="font-mono text-xs">{c.name ?? ""}</TableCell>
-                    <TableCell className={c.status === "running" ? "text-ok" : "text-warn"}>{c.status || "—"}</TableCell>
+                    <TableCell><StatusBadge status={c.status || ""} /></TableCell>
                   </TableRow>
                 )) : <TableRow><TableCell colSpan={2} className="py-4 text-center text-xs text-muted-foreground">（无容器）</TableCell></TableRow>}
               </TableBody>

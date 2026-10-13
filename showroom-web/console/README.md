@@ -1,21 +1,13 @@
-# React + TypeScript + Vite + shadcn/ui
+# showroom-console
 
-This is a template for a new Vite project with React, TypeScript, and shadcn/ui.
+Showroom 控制台前端（React + shadcn/ui，Vite 构建；密码学层为 wasm32 垫片）。
 
-## Adding components
-
-To add components to your app, run the following command:
-
-```bash
-npx shadcn@latest add button
+```sh
+npm install
+npm run dev            # 本地开发（无后端时停在登录窗）
+npm run build          # 产物 dist/（base=/_console/，随提交入库）
+npx tsc --noEmit -p tsconfig.app.json   # 类型检查
 ```
 
-This will place the ui components in the `src/components` directory.
-
-## Using components
-
-To use the components in your app, import them as follows:
-
-```tsx
-import { Button } from "@/components/ui/button"
-```
+线上验收：`SR_BASE=… SR_USER=… SR_PASS=… node e2e-live.mjs`（playwright 需另行安装，
+路径可用 SR_PLAYWRIGHT_REQUIRE / SR_CHROME 覆盖）。

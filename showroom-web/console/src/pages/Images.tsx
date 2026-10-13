@@ -11,7 +11,8 @@ import {
 import { FolderOpenIcon, RotateCcwIcon } from "lucide-react";
 import { toast } from "sonner";
 import { useApp, apiFailToast } from "@/lib/app";
-import { platformPem } from "@/lib/state";
+import { api } from "@/lib/api";
+import { pemReady } from "@/lib/state";
 import { freshUpload, latestUpId, loadUpSession, resumeUploadCore, sealedTotal, uploadPayload } from "@/lib/upload";
 import { dataInvalidate } from "@/lib/state";
 
@@ -43,7 +44,7 @@ export function Images() {
     if (!delTarget) return;
     setBusy(true);
     try {
-      const j = (await (await import("@/lib/api")).api("POST", "/_api/image-rm", { image: delTarget })) as { freed_est_mb?: number };
+      const j = (await api("POST", "/_api/image-rm", { image: delTarget })) as { freed_est_mb?: number };
       toast.success(`已回收约 ${Number(j.freed_est_mb ?? 0)} MB`);
       setDelTarget(null);
       await refreshAll();
@@ -63,8 +64,7 @@ export function Images() {
   async function upload() {
     const f = file;
     if (!f) { toast.error("请先选择镜像 tar 文件"); return; }
-    const pem = platformPem();
-    if (!pem.startsWith("-----BEGIN PUBLIC KEY-----")) { toast.error("尚未完成安全配置：到「设置」完成"); return; }
+    if (!pemReady()) { toast.error("尚未完成安全配置：到「设置」完成"); return; }
     setUpBusy(true); setResumeId(null);
     try {
       setUpText("① 压缩中…");
@@ -207,7 +207,7 @@ export function Images() {
       <Separator />
       <div className="flex flex-col gap-1">
         <div className="text-xs text-muted-foreground" aria-live="polite">
-          可用空间：{space.availGb > 0 ? `${space.availGb.toFixed(1)} GB（预留 ${space.reserveGb} GB）` : "…"}
+          可用空间：{space.availGb > 0 ? `${space.availGb.toFixed(1)} GB（预留 ${space.reserveGb} GB）` : "空间信息不可用"}
         </div>
         {space.totalGb > 0 && <Progress value={pct} />}
       </div>

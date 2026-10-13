@@ -108,9 +108,31 @@ pub struct SqlResult {
 }
 
 /// 单条 SELECT 判定：trim 后以 SELECT 开头（前端已按分号拆分；带 CTE 的 WITH…SELECT
-/// 走文本通道，不影响正确性）。
+/// 走文本通道——csv 通道只收最平凡形状，宁缺勿错）。
 fn is_plain_select(sql: &str) -> bool {
     sql.trim_start().get(..6).map(|s| s.eq_ignore_ascii_case("select")).unwrap_or(false)
+}
+
+#[cfg(test)]
+mod sql_csv_tests {
+    use super::is_plain_select;
+
+    #[test]
+    fn plain_select_shapes() {
+        assert!(is_plain_select("SELECT 1"));
+        assert!(is_plain_select("select * from t"));
+        assert!(is_plain_select("  \n SELECT x")); // 前导空白
+        assert!(is_plain_select("SeLeCt 1")); // 大小写不敏感
+    }
+
+    #[test]
+    fn non_select_goes_text_channel() {
+        assert!(!is_plain_select("WITH c AS (SELECT 1) SELECT * FROM c")); // CTE 走文本通道
+        assert!(!is_plain_select("UPDATE t SET x=1"));
+        assert!(!is_plain_select("-- comment\nSELECT 1"));
+        assert!(!is_plain_select(""));
+        assert!(!is_plain_select("EXPLAIN SELECT 1"));
+    }
 }
 
 /// POST /_api/db-sql：confirm 门 + psql 定库执行（stdin）。
