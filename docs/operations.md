@@ -9,14 +9,14 @@
 | 发新账号（初始密码 + registry 密码两把分开发放，均仅显示一次） | `showroomctl user-add <USER> --gen-password [--admin]` | `POST /_api/admin/user-add`；控制台「管理 → 发放新账号」 |
 | 补发/重置登录密码（一次性返回，原密码即刻失效，**不动既有钥匙**） | `showroomctl user-passwd <USER> --gen-password` | `POST /_api/admin/passwd-set`；控制台账号表「补发密码」 |
 | 删除泄露的某把钥匙 | `showroomctl user-key-rm <USER> <KID>` | `POST /_api/admin/key-rm`；控制台账号表快捷动作 |
-| 收/授管理员权限（账号属性，钥匙级临时收权） | `showroomctl key-admin <USER> <KID> --admin false\|true` | `POST /_api/admin/key-admin` |
-| 吊销整账号（签名 + registry 全失效，展项不动） | `showroomctl user-revoke <USER>` | `POST /_api/admin/user-revoke` |
+| 收/授管理员权限（账号级属性，对整账号全部钥匙生效） | `showroomctl user-admin <USER> --admin false\|true` | `POST /_api/admin/user-admin`；控制台账号行「设为/取消管理员」 |
+| 吊销整账号（签名 + registry 全失效，项目不动） | `showroomctl user-revoke <USER>` | `POST /_api/admin/user-revoke` |
 | Redis 逻辑库扩容（需重启实例，约 3 秒，AOF 持久；**不静默重启**） | `showroomctl middleware set redis databases=256 --confirm`（取值 16–256） | `GET /_api/admin/host` 黄条 → 控制台「扩容」确认流 |
 | 主机形状变更（中间件增减/开关） | 编辑 `state/host.env` → `showroomctl setup --apply` | `POST /_api/admin/host` 两段式：无 confirm 返回变更清单与影响面（removed_middleware/affected_projects），`confirm=true` 才执行 |
-| 主机状态面板（服务/磁盘/内存/容器/timers/Redis 池水位） | `showroomctl admin status` | `GET /_api/admin/status`；控制台「管理 → 状态」30s 自动刷新 |
-| 账号/钥匙清单（kid/admin/登记时间/项目数/未设密码徽标） | `showroomctl admin users` | `GET /_api/admin/users` |
+| 主机状态面板（服务/磁盘/内存/容器/timers/Redis 池水位） | `showroomctl admin status` | `GET /_api/admin/status`；控制台「管理 → 平台状态」面板 30s 自动刷新 |
+| 账号与设备清单（账号级 admin/设备 kid+登录时间/项目数/未设密码徽标） | `showroomctl admin users` | `GET /_api/admin/users` |
 
-发卡要点（plan-16 §1.3）：登录密码（OPAQUE 保护）与 registry 密码（bcrypt）**两把密码分开发放**——前者登录控制台/CLI，后者随 docker push 以 basic-auth 走线，不可合并。`--admin` 纯密码发卡时管理员意图经 `admin.pending` 由该账号**首把登录绑定钥匙**继承（一次性）。
+发卡要点（plan-16 §1.3）：登录密码（OPAQUE 保护）与 registry 密码（bcrypt）**两把密码分开发放**——前者登录控制台/CLI，后者随 docker push 以 basic-auth 走线，不可合并。`--admin` **即刻**落账号级标记（`users/<u>/admin`）生效；旧钥匙级 `.admin`/`admin.pending` 文件仅作存量迁移输入（serve 启动时一次性迁移清除）。
 
 ## 2. 服务与 timer 清单
 
@@ -25,8 +25,8 @@
 | 服务 | 作用 | 备注 |
 |---|---|---|
 | `showroom-api.service` | 控制面 HTTP（127.0.0.1:8090） | root 运行，`Restart=always`（3s）；本机健康检查用 `systemctl is-active`，**不要**依赖 HTTP health（未签名恒 404） |
-| `caddy` | 静态面 + 反代（site A :80 内网面；site B :8080 公网面） | 展项路由变更由 showroomctl 自动 `caddy reload` |
-| `docker` / `containerd` | 容器运行时 | 展项容器 `--restart unless-stopped` |
+| `caddy` | 静态面 + 反代（site A :80 内网面；site B :8080 公网面） | 项目路由变更由 showroomctl 自动 `caddy reload` |
+| `docker` / `containerd` | 容器运行时 | 项目容器 `--restart unless-stopped` |
 | `chmlfrp.service`（可选） | frpc 隧道（FRP=chmlfrp 时 setup 启用） | 转发公网流量到 127.0.0.1:8080（site B） |
 
 ### systemd timers（部署单元见 `deploy/*.timer`，setup 自动启用）
@@ -47,7 +47,7 @@ systemctl list-timers 'showroom-*'          # 下次触发时间（也包含在 
 journalctl -u showroom-api -f               # 控制面日志（E_AUTH/登录限流细节只进这里）
 ```
 
-控制台「管理 → 状态」面板同源展示：`docker/containerd/caddy/showroom-api` 四服务状态、根分区与 `/srv/showroom` 磁盘、MemAvailable、容器列表、timers 下次触发（30s 自动刷新）。
+控制台「管理 → 平台状态」面板同源展示：`docker/containerd/caddy/showroom-api` 四服务状态、根分区与 `/srv/showroom` 磁盘、MemAvailable、容器列表、timers 下次触发（30s 自动刷新）。
 
 ## 3. 快照与垃圾回收
 
@@ -76,7 +76,7 @@ docker system df              # 观察回收效果
 
 ## 4. 磁盘空间管理与镜像清理
 
-**空间口径统一**（SPEC §14.1）：`GET /_api/space` → `{"available_mb","reserve_mb","total_mb"}`，可用 = 根分区可用 − policy `DISK_RESERVE_GB`（默认 20G，覆盖系统/中间件/应用运行/快照增长）。控制台上传区常显「可用空间（已扣预留）：X GB」；CLI `showroom space` 同三数。
+**空间口径统一**（SPEC §14.1）：`GET /_api/space` → `{"available_mb","reserve_mb","total_mb"}`，可用 = 根分区可用 − policy `DISK_RESERVE_GB`（默认 20G，覆盖系统/中间件/应用运行/快照增长）。控制台上传区常显「可用空间：X GB」；CLI `showroom space` 同三数（可用行含预留扣减明细）。
 
 **上传准入**（加密 import 通道，`import-begin` 处判定）：
 
@@ -89,12 +89,12 @@ docker system df              # 观察回收效果
 **镜像删除**（SPEC §14.3，删除即释放）：
 
 ```sh
-# 发布者删自己的镜像（<user>/ 前缀归属校验；admin 钥匙全量）
+# 发布者删自己的镜像（<user>/ 前缀归属校验；管理员全量）
 showroom rm-image <USER>/<PROJECT>:<TAG>
 # → 已删除 alice/demo:v1，回收约 512 MB
 ```
 
-服务端流程：registry DELETE manifest（digest 查询后删）→ **内联触发 registry-gc**（停-收-启，秒级；live-restore 保护运行中容器）→ 返回 `freed_est_mb`。闭环「上传不够 → 删除 → 立即可传」。多 tag 共享层由 `--delete-untagged` 天然保留仍被引用者。控制台镜像列表（与部署 ComboBox 同源）每行删除按钮（confirm）。
+服务端流程：registry DELETE manifest（digest 查询后删）→ **内联触发 registry-gc**（停-收-启，秒级；live-restore 保护运行中容器）→ 返回 `freed_est_mb`。闭环「上传不够 → 删除 → 立即可传」。多 tag 共享层由 `--delete-untagged` 天然保留仍被引用者。控制台镜像列表（与发布页镜像库源同源）每行删除按钮（confirm）。
 
 **policy 调节**（`/srv/showroom/state/policy.env`，每次判定即读）：
 
@@ -105,7 +105,7 @@ showroom rm-image <USER>/<PROJECT>:<TAG>
 
 ## 5. 数据库维护
 
-每个展项独立供给 PostgreSQL 库（`sr_<PROJECT>`，`-`→`_`）与 Redis 逻辑库，凭据由 publish 自动注入容器（`showroom env` 可查）。**维护入口在发布者手里**（主机侧不经手明文）：CLI `showroom db sql|tables|preview|dump|restore|reset` 或控制台「数据库」标签（表清单 → 预览表格 → SQL 编辑器 → 加密备份下载/恢复上传），全部经签名 API，公网可用。
+每个项目独立供给 PostgreSQL 库（`sr_<PROJECT>`，`-`→`_`）与 Redis 逻辑库，凭据由 publish 自动注入容器（`showroom env` 可查）。**维护入口在发布者手里**（主机侧不经手明文）：CLI `showroom db sql|tables|preview|dump|restore|reset` 或控制台「数据」标签（表清单 → 预览表格 → SQL 编辑器 → 加密备份下载/恢复上传），全部经签名 API，公网可用。
 
 | 操作 | 命令 / 入口 | 备注 |
 |---|---|---|
@@ -161,12 +161,12 @@ sudo vi /srv/showroom/state/policy.env
 
 | 症状 | 诊断命令 | 动作 |
 |---|---|---|
-| 展项 502 / 打不开 | `curl -s http://127.0.0.1:8100/`（conf 里登记的端口）；`docker ps -a \| grep sr-<PROJECT>` | 容器挂了等 autoheal（≤5min）或手动 `showroomctl start <PROJECT>`；端口连不通看 `showroomctl logs <PROJECT>` |
+| 项目 502 / 打不开 | `curl -s http://127.0.0.1:8100/`（conf 里登记的端口）；`docker ps -a \| grep sr-<PROJECT>` | 容器挂了等 autoheal（≤5min）或手动 `showroomctl start <PROJECT>`；端口连不通看 `showroomctl logs <PROJECT>` |
 | **公网页面空白/404（frp 隧道）** | `curl -s -H 'Host: x' http://127.0.0.1:8080/_console/` | site B 是 `:8080` **纯端口匹配**——frp 流量 Host 是公网 IP，按 Host 匹配会全部漏掉（实弹教训）。确认：① Caddyfile site B 为 `http://:8080`（`showroomctl setup --apply` 重渲染）；② 隧道本地目标指向 127.0.0.1:8080；③ `PUBLIC_HOST` 非空（否则不渲染 site B） |
 | **登录失败（CLI/控制台）** | `journalctl -u showroom-api \| grep -i 'login\|rate'` | 密码错与未设密码同文案（防枚举）。若提示「服务端拒绝（E_AUTH：限流或请求被拒）」：login-begin 双令牌桶超限（按账号 10 次/10 分 + 全局 120 次/10 分），等 10 分钟；服务重启会丢在途登录态与限流计数，重试即可 |
-| 展项漂移（容器/路由被误删） | `systemctl start showroom-reconcile.service` | reconcile 幂等重建；确认 timer 在跑 |
+| 项目漂移（容器/路由被误删） | `systemctl start showroom-reconcile.service` | reconcile 幂等重建；确认 timer 在跑 |
 | publish 报 `E_QUOTA`（内存） | `grep MemAvailable /proc/meminfo` | 对比 `RESERVE_MEM_MB`；扩内存或调低需求 `--mem` |
-| publish/上传报 `E_QUOTA`（磁盘） | `showroom space`（可用已扣预留） | 膨胀因子×密封体积 超出 可用−预留：`showroom rm-image` 删旧镜像（立即释放）或调 `DISK_RESERVE_GB`/`UPLOAD_SPACE_FACTOR` |
+| publish/上传报 `E_QUOTA`（磁盘） | `showroom space`（可用行含预留扣减） | 膨胀因子×密封体积 超出 可用−预留：`showroom rm-image` 删旧镜像（立即释放）或调 `DISK_RESERVE_GB`/`UPLOAD_SPACE_FACTOR` |
 | publish 报 `E_QUOTA`（no free port） | `cat /srv/showroom/state/ports.reg \| wc -l` | 端口池 8100–8199 满：`showroom rm` 清理旧项目 |
 | publish 报 `E_QUOTA`（redisdb 池耗尽） | `showroomctl middleware status` | 消息附扩容命令：`showroomctl middleware set redis databases=N --confirm`（§7 确认流） |
 | publish 报 `E_NET` | `docker pull 127.0.0.1:5000/<USER>/<PROJECT>:<TAG>` | 镜像不在本机 registry：发布者重新 push；检查 registry 容器与 htpasswd |
@@ -189,17 +189,17 @@ sudo showroomctl user-key-rm <USER> <KID>
 # 2. 疑似盗号：补发登录密码（原密码即刻失效，已绑定钥匙不受影响）
 sudo showroomctl user-passwd <USER> --gen-password
 
-# 3. 整账号失能（签名 + registry 登录全失效，展项不动）
+# 3. 整账号失能（签名 + registry 登录全失效，项目不动）
 sudo showroomctl user-revoke <USER>
 
-# 4. 管理员权限收/授
-sudo showroomctl key-admin <USER> <KID> --admin false|true
+# 4. 管理员权限收/授（账号级，对该账号全部钥匙生效）
+sudo showroomctl user-admin <USER> --admin false|true
 
 # 5. 重新发卡（登录初始密码与 registry 密码两把分开发放，均仅显示一次）
 sudo showroomctl user-add <USER> --gen-password
 
-# 管理员钥匙远程操作等价 API（任何管理员钥匙签名，公网可用）：
-#   POST /_api/admin/key-rm | user-revoke | key-admin | user-add | passwd-set ；GET /_api/admin/users
+# 管理员远程操作等价 API（任何管理员账号的钥匙签名，公网可用）：
+#   POST /_api/admin/key-rm | user-revoke | user-admin | user-add | passwd-set ；GET /_api/admin/users | admin/projects
 ```
 
 事后检查：`journalctl -u showroom-api --since "<时间>" | grep -E 'E_AUTH|admin|login'` 评估泄露窗口内的管理面与登录调用痕迹。

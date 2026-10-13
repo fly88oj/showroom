@@ -1,5 +1,7 @@
 # §14 实施方案：镜像删除 + 上传磁盘准入（v1.7）
 
+> 状态：已实施。
+
 依据 SPEC §14（573ce01）/§13.3/§10.2；行号锚定 HEAD=d5de35c。词汇按「owner→user 更名已完成」约定：
 行文用**用户**；代码符号按更名后写 `user`/`user_check`（owner→user 更名已落地），语义不变。
 纪律：ponytail——复用现有 df 解析、manifest HTTP 客户端、registry-gc 函数体，不引新依赖、不加后台任务。

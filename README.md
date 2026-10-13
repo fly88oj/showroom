@@ -1,6 +1,6 @@
 # Showroom
 
-**多租户 Demo 展示平台**：把一个 Docker 镜像变成一条 URL。内网、公网均可部署，一套平台供整个团队共享 PostgreSQL / Redis，发布者用 Web 控制台或 CLI 自助发布、更新、回滚 Demo 展项（project）——控制台账号+密码一步登录，CLI `showroom login` 一次后免密码。
+**多租户 Demo 展示平台**：把一个 Docker 镜像变成一条 URL。内网、公网均可部署，一套平台供整个团队共享 PostgreSQL / Redis，发布者用 Web 控制台或 CLI 自助发布、更新、回滚 Demo 项目（project）——控制台账号+密码一步登录，CLI `showroom login` 一次后免密码。
 
 ```sh
 showroom deploy v1          # 推镜像 + 发布 + 打印 URL，一步到位
@@ -17,13 +17,13 @@ showroom deploy v1          # 推镜像 + 发布 + 打印 URL，一步到位
 | 特性 | 说明 |
 |---|---|
 | OPAQUE 密码登录 | 控制台一步登录（账号+密码）、CLI `showroom login` 一次后全命令免密码（gh/ssh 模型）；密码经 OPRF 盲化**永不上线**（RFC 9380 / Ristretto255），登录自动绑定本机钥匙并配好 registry 凭据；密钥生成/登记全程无感 |
-| 安全模型 | 所有管理请求经 **SR-SIG1**（Ed25519 请求签名）认证；镜像与数据库备份以**加密信封**（RSA-3072-OAEP 包裹 AES-256-GCM 密钥）在明文链路上端到端加密；管理员钥匙分层（admin key）。详见 [docs/security.md](docs/security.md) |
+| 安全模型 | 所有管理请求经 **SR-SIG1**（Ed25519 请求签名）认证；镜像与数据库备份以**加密信封**（RSA-3072-OAEP 包裹 AES-256-GCM 密钥）在明文链路上端到端加密；管理员为账号级属性。详见 [docs/security.md](docs/security.md) |
 | 零信息暴露 | 未认证请求对 `/_api/*` 一律返回 `404 {"error":"E_AUTH"}`——不泄露路径存在性、项目名、版本等任何管理侧信息 |
 | 一键发布 | `showroom deploy`（push + publish --wait + URL 横幅一步到位）与控制台发布页**单表单双镜像源**（本地 tar 文件 / 镜像库下拉选已有镜像发旧版本；「仅上传」为次要按钮） |
 | 自愈 | systemd timer 驱动 `reconcile`（状态比对、幂等重建）与 `autoheal`（退出拉起、unhealthy 重启）；容器 `--restart unless-stopped` 兜底 |
 | 多通道发布 | 内网走 registry 直推（快通道），公网走加密 import 通道（大文件分片断点续传）；CLI 自动探测、失败自动回落 |
 | 磁盘准入与镜像管理 | 上传前按 `膨胀因子×密封体积 ≤ 可用−预留` 准入（`showroom space` 三数可见）；`showroom rm-image` 删除即内联 GC **立即**回收空间，闭环「上传不够→删除→立即可传」 |
-| 共享数据库维护 | 每个展项独立供给 PostgreSQL 库与 Redis 逻辑库，凭据自动注入容器；发布者经 CLI/控制台自助执行 SQL、预览表、加密备份与恢复（zstd-19 压缩、端到端加密） |
+| 共享数据库维护 | 每个项目独立供给 PostgreSQL 库与 Redis 逻辑库，凭据自动注入容器；发布者经 CLI/控制台自助执行 SQL、预览表、加密备份与恢复（zstd-19 压缩、端到端加密） |
 | 主机自举 | `showroomctl setup --apply` 一条命令幂等收敛目录/中间件/Caddy/systemd/调优（声明式 host.env）；`middleware` 子命令与 Web 主机编排面板支持两段式变更与 Redis 扩容确认流 |
 | WASM 控制台 | 纯静态单页控制台（Rust 编译 wasm32，无 wasm-bindgen 依赖），浏览器本地完成 OPAQUE 登录、签名与加解密，密钥不出本机；CLI 与 Web 走同一套密码学（showroom-common） |
 
@@ -35,10 +35,10 @@ showroom deploy v1          # 推镜像 + 发布 + 打印 URL，一步到位
  CLI ──────────────┼──▶│  │ site A（:80，内网面 LAN_HOST）                              │ │
                    │   │  │   /_api/*      → showroomctl serve (127.0.0.1:8090)        │ │
                    │   │  │   /v2          → registry (127.0.0.1:5000，推拉快通道)     │ │
-                   │   │  │   /<project>/* → 展项容器 (127.0.0.1:8100–8199)           │ │
+                   │   │  │   /<project>/* → 项目容器 (127.0.0.1:8100–8199)           │ │
                    │   │  │   /_console/*  → 静态 WASM 控制台                          │ │
                    │   │  │ site B（:8080 纯端口匹配，公网面）                          │ │
- 访客（展项页面）──┘   │  │   公网隧道（frp→127.0.0.1:8080）命中的站点；无 /v2 与 /_bootstrap │ │
+ 访客（项目页面）──┘   │  │   公网隧道（frp→127.0.0.1:8080）命中的站点；无 /v2                │ │
                        │  └───────────────────────────────────────────────────────────┘ │
                        │     ┌─ showroomctl ─┐   ┌─ sr-postgres ─┬─ sr-redis ─┐        │
                        │     │ 状态+控制面    ├──▶│ 共享中间件（docker 网络 showroom-net）│
@@ -65,7 +65,7 @@ showroom login <你的账号> --server-lan http://<your-host>
 showroom doctor                                  # 体检：密钥/配置/服务端/签名/docker
 ```
 
-密码经 OPAQUE 盲化永不上线；一次登录后全部子命令免密码。CI / 机器用户走专家路径：`showroom keygen` 生成密钥、公钥串交管理员登记（见 [docs/cli-reference.md](docs/cli-reference.md)）。
+密码经 OPAQUE 盲化永不上线；一次登录后全部子命令免密码。CI / 机器用户同样用账号密码走 `showroom login`（B7 统一账号密码认证，无公钥预登记路径；见 [docs/cli-reference.md](docs/cli-reference.md)）。
 
 ### 第三步：发布
 
@@ -78,9 +78,9 @@ showroom deploy demo v1                          # push + publish --wait + 打�
 # ══════════════════════════════
 ```
 
-不想装 CLI？打开 `http://<your-host>/_console/` 用账号+密码登录：登录即见展项列表（自动加载、中文状态、可点对外 URL），「发布」页单表单双镜像源一键发布，展项行内看实时日志（行抽屉）、管数据库、浏览 Redis——显式刷新按钮零残留，数据全部自动加载：
+不想装 CLI？打开 `http://<your-host>/_console/` 用账号+密码登录：登录即见项目列表（自动加载、中文状态、可点对外 URL），「发布」页单表单双镜像源一键发布，项目行内看实时日志（行抽屉）、管数据库、浏览 Redis——显式刷新按钮零残留，数据全部自动加载：
 
-<!-- 控制台截图位：docs/assets/console-overview.png（待补；§17 五标签布局：我的展项/发布/镜像库/数据/帮助） -->
+<!-- 控制台截图位：docs/assets/console-overview.png（待补；§17 五标签布局：我的项目/发布/镜像库/数据/帮助） -->
 
 命令逐条说明（含 `login`/`db` 全家、退出码）见 **[docs/cli-reference.md](docs/cli-reference.md)**。
 

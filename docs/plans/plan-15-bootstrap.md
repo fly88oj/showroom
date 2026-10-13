@@ -1,6 +1,6 @@
 # Plan 15：主机自举（setup）与中间件编排 — 实施方案（SPEC §15）
 
-> 状态：待实施。词汇约定：owner→user 更名已落地，本文一律用 user（符号按更名后 `user_add/user_check` 书写）。
+> 状态：已实施。词汇约定：owner→user 更名已落地，本文一律用 user（符号按更名后 `user_add/user_check` 书写）。
 > 基准：HEAD d5de35c。§13.3（policy REDIS_DBS）已实现；§14 仅 spec 提交（image-rm/space 端点未落）。
 
 ## 0. 主机现状事实（提炼自 deploy/ 与 docs/deployment.md，SSH 不通的兜底基线）

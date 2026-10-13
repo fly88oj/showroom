@@ -21,7 +21,7 @@ body= wrap || aes256gcm(k, zstd(docker_save_tar))
      # AES-GCM 流式分段：每段 [12B nonce][密文||16B tag]，段大小 4MiB 明文
 ```
 完整性：SR-SIG1 签名已覆盖 sha256(body)（EtM）。
-密钥文件：用户 `~/.showroom/id_ed25519`（PEM/PKCS8 或裸 32B seed+pub，实现自定但 CLI 与服务端经 common 互认）；平台对 `/srv/showroom/state/platform_rsa{.pub}`。
+密钥文件：用户 `~/.showroom/id_ed25519`（PEM/PKCS8 或裸 32B seed+pub，实现自定但 CLI 与服务端经 common 互认）；平台对 `/srv/showroom/state/platform_rsa{.pub}`——公钥经 whoami `platform_pem` 自动下发（§12.2）/控制台工具下载页，控制台修订见 §17。
 
 ## 3. HTTP API（server=showroomctl serve，127.0.0.1:8090，经 Caddy /_api/* 代理）
 **零信息暴露原则：/_api/* 下所有端点（含 health/projects）一律要求 SR-SIG1 签名；未认证或验签失败的任何请求（无论路径是否存在、方法是否支持）统一返回 404 + `{"error":"E_AUTH"}`——不泄露路径存在性、版本、项目名等任何管理侧信息。**
@@ -38,9 +38,9 @@ body= wrap || aes256gcm(k, zstd(docker_save_tar))
 | POST /_api/import-check | `{image_id}` | `{present:bool}` |
 
 错误统一：HTTP 4xx/5xx + `{"error":"E_CODE","msg":"..."}`；错误码 `E_AUTH/E_NAME/E_QUOTA/E_NOTFOUND/E_STATE/E_NET`（msg 不得包含未登记公钥串以外的内部信息；验签失败与路径不存在不可区分）。
-user 归属校验：签名 user 必须等于 `<project>.conf` 中归属者（磁盘键名 owner=，见 §5；publish 时 project 归属首个创建者）。
+user 归属校验：签名 user 必须等于 `<project>.conf` 中归属者（磁盘键名 owner=，见 §5；publish 时 project 归属首个创建者）。`GET /_api/projects` 恒只回签名用户本人项目（R4 裁决——跨用户项目名/账号名不对普通登录者枚举）；管理员跨用户全量走 `GET /_api/admin/projects`（§12.2）。
 
-**静态面（Caddy）**：`/{project}/*` 展项页面公开；`/_bootstrap/*`（CLI/Skill 分发）**仅 site A（内网面）提供，site B（公网面）返回 404**；未来的 `/_console` 公网面仅暴露最小登录壳（登录成功前不加载任何管理资源）。
+**静态面（Caddy）**：`/{project}/*` 项目页面公开；`_bootstrap/` 目录仅作 `/_api/tool` 工具源——CLI/Skill/公钥登录后控制台内下载（R8 裁决：无静态匿名分发面，`/_bootstrap/*` 不进任何站点）；`/_console` 仅暴露最小登录壳（登录成功前不加载任何管理资源）。
 
 ## 4. 命名与保留
 project：`^[a-zA-Z0-9][a-zA-Z0-9-]{0,30}$`（§11 放宽，大写放开），project 全局唯一，保留：`v2 _api _bootstrap _console`。
@@ -101,7 +101,7 @@ POST /_api/import-end?upload=<id>             → 拼接后走单发 import 同�
 ### 8.3 WASM 控制台（showroom-web）
 - Caddy 两站点新增 `handle_path /_console/* { root * /srv/showroom/_console; file_server }`（静态壳不含任何实例数据，登录前不暴露管理信息）。
 - 密码学层：showroom-common 增加 `crate-type=cdylib` + `#[no_mangle] extern "C"` 的 wasm32 垫片（keygen/sign_header/seal 会话式 push/finish，指针+长度进出），**不用 wasm-bindgen/wasm-pack**（零新工具链，rustup target 即可）；JS 侧直接 instantiate 调用。
-- 登录=账号+密码一步（§16，OPAQUE 已落）：页面自动生成/复用本机密钥（localStorage，页面明确告知属试验性存储）；密码登录自动绑定本机钥匙，公钥串登记降级为折叠的专家路径（CLI/机器用户）。
+- 登录=账号+密码一步（§16，OPAQUE 已落）：页面自动生成/复用本机密钥（localStorage，页面明确告知属试验性存储）；密码登录自动绑定本机钥匙。旧「钥匙登录」折叠区（本机已有/导入种子/公钥串登记）已随 B7 删除——CI/机器用户同样走账号密码 `login`。
 - 功能对齐 CLI 只读+发布：列表/发布/停止/启动/删除/回滚/env/logs；镜像上传走 8.1 分片（File.slice 流式 seal，8MB/片，进度条+断点续传）。
 
 ## 9. 数据库维护（v1.2）：发布者自助管理 Schema 与数据
@@ -120,15 +120,15 @@ CLI 对应：`showroom db sql|tables|preview|dump|restore|reset`。公网全可�
 - **展项**：列表（不含项目端口等内部细节）+ 发布（项目=Input 预填随机 8 位、带「换一个」按钮，可改为已有名；tag=Input(必填)、内存=ComboBox(128m/256m/512m/1g)、Demo 监听端口=数字 Input 默认 8080、镜像 tar 上传=文件选择；§11 起无槽位字段）。
 - **数据库**：表清单 ComboBox→预览表格；SQL 编辑器（唯一自由文本，多行）；备份下载（自动生成一次性密钥对）；恢复上传（confirm 二次确认）；重置（confirm）。
 - **状态**：展项健康列表 + 日志查看（自动刷新开关）。
-- **帮助**：镜像规范/环境变量清单（§6）/CLI 对照/常见错误表。登录前仅登录界面（零管理信息）。
-- **§17 修订**：四区重组为五标签（我的展项/发布/镜像库/数据/帮助），健康表与手动刷新由展项列表+行抽屉+事件流取代；发布表单收敛为单表单双镜像源——详见 §17。
+- **帮助**：帮助页二级菜单五面板——账号 / CLI 使用 / 镜像规范（环境变量清单 §6）/ 工具下载（CLI/Skill/公钥，`/_api/tool/*` 登录后内下载）/ 错误码；管理页五面板见 §17.1。登录前仅登录界面（零管理信息）。
+- **§17 修订**：四区重组为五标签（我的项目/发布/镜像库/数据/帮助），健康表与手动刷新由项目列表+行抽屉+事件流取代；发布表单收敛为单表单双镜像源——详见 §17。
 ### 9.2 行为修订（对 §7）
 - 根路径 `/` 与未匹配路径：一律 404，不再 302（零信息暴露）。
 - publish 供给 DB：库不存在才建（CREATE DATABASE 不存在时）；不再幂等重建。
 
 ## 10. v1.3 修订：登录向导 / 内存准入 / Redis 查看
 ### 10.1 登录向导（v1.9 起被 §16 一步登录取代，原文存档）
-原线性三步（账号→密钥选择→验证自测）自 §16 落地后不再是主路径：控制台一步登录（账号+密码，密钥生成/绑定全程无感）；旧三步流程收进「钥匙登录（CLI/机器用户）」折叠区保留（本机已有/导入种子/公钥串交管理员+重检循环），供无密码的 CI 专家账号使用。
+原线性三步（账号→密钥选择→验证自测）自 §16 落地后不再是主路径：控制台一步登录（账号+密码，密钥生成/绑定全程无感）。旧三步流程与「钥匙登录（CLI/机器用户）」折叠区均已删除（B7 统一账号密码认证）——CI/机器用户同样用账号密码走 `showroom login`。
 ### 10.2 内存需求与准入（原「内存上限」更名「内存需求」）
 - UI/CLI 文案统一为「内存需求」；语义不变（容器 --memory 硬限）。
 - publish 增加准入判断：读 /proc/meminfo 的 MemAvailable，policy 新增 RESERVE_MEM_MB（默认 1536）；`MemAvailable - RESERVE < 需求内存` → E_QUOTA，msg 给出「可用 X MB（已预留 Y MB）＜ 需求 Z MB」。policy.env 样例同步。
@@ -164,29 +164,30 @@ CLI 对应：`showroom db sql|tables|preview|dump|restore|reset`。公网全可�
 ### 12.1 上传发布一体
 - CLI：`showroom deploy [项目] <tag> [--mem --cpu --container-port]` = push（压缩上传）+ publish --wait + 打印 URL 的原子命令（任一步失败即停，报错含已完成的步骤）。
 - 控制台：发布表单「一键部署」按钮——选 tar → 前端压缩 → 分片上传 → 自动 publish → 展示 URL；分步状态条（压缩中/上传 x%/发布中/完成）。
-### 12.2 管理员（标记在 Key 上）
-- state：`tokens/<user>/<kid>.pub` 旁增加 `tokens/<user>/<kid>.admin`（空文件存在=管理员钥匙）。
-- 引导：主机 CLI `showroomctl user-add <名> --gen-password --admin` 建立首个管理员（统一账号密码认证，B7）；此后管理员可远程授权。
-- 身份接口：`GET /_api/whoami`（签名）→ `{"user","kid","admin":bool,"platform_pem":str}`——控制台据此显示/隐藏「管理」标签；`platform_pem` 为平台 RSA 公钥 PEM（读 `state/platform_rsa.pub`，缺文件=空串；公钥本就公开，经签名端点下发零信息暴露），控制台自动缓存到本地（`sr.pempub`）免手工粘贴。
-- 管理接口（全部签名+管理员钥匙校验，非管理员=404 E_AUTH 与未登记不可区分；公网可用）：
-  - `GET /_api/admin/users` → 账号/钥匙(kid,admin,登记时间)/项目数/has_password（§16 未设密码徽标）
-  - `POST /_api/admin/user-add {user,admin?,password|gen_password:true}` → 一次性返回 `{login_password,registry_password}` 两把密码分开发放（§16 §1.3；统一账号密码认证 B7：必须设初始密码，预登记公钥路径已删除）
+### 12.2 管理员（账号级，R4 裁决；原文「标记在 Key 上」模型已反转）
+- state：`users/<user>/admin`（空文件存在=管理员账号）为**唯一真相**；旧钥匙级 `tokens/<user>/<kid>.admin` 与 `users/<user>/admin.pending` 仅作存量迁移输入（serve 启动一次性迁移清除）。
+- 引导：主机 CLI `showroomctl user-add <名> --gen-password --admin` 建立首个管理员（`--admin` 即刻落账号级标记；统一账号密码认证，B7）；此后管理员可远程授权。
+- 身份接口：`GET /_api/whoami`（签名）→ `{"user","kid","admin":bool,"platform_pem":str}`——admin **按账号判定**（`users/<u>/admin` 存在即真），控制台据此显示/隐藏「管理」标签；`platform_pem` 为平台 RSA 公钥 PEM（读 `state/platform_rsa.pub`，缺文件=空串；公钥本就公开，经签名端点下发零信息暴露），控制台自动缓存到本地（`sr.pempub`）免手工粘贴。
+- 管理接口（全部签名+管理员账号校验，非管理员=404 E_AUTH 与未登记不可区分；公网可用）：
+  - `GET /_api/admin/users` → 账号（admin 账号级）/钥匙(kid,登记时间)/项目数/has_password（§16 未设密码徽标）
+  - `POST /_api/admin/user-add {user,admin?,password|gen_password:true}` → 一次性返回 `{login_password,registry_password}` 两把密码分开发放（§16 §1.3；统一账号密码认证 B7：必须设初始密码，无公钥粘贴路径）
   - `POST /_api/admin/passwd-set {user,password?|gen:true}` → `{password}` 一次性（§16 重置/补发；不动既有钥匙）
   - `POST /_api/admin/user-revoke {user}`、`POST /_api/admin/key-rm {user,kid}`
-  - `POST /_api/admin/key-admin {user,kid,admin}`（授权/收权）
+  - `POST /_api/admin/user-admin {user,admin}`（账号级授权/收权；旧钥匙级端点已移除）
   - `GET /_api/admin/status` → 服务状态(systemd is-active 四服务)、磁盘(根+@showroom)、内存(MemAvailable)、容器列表(名/状态)、timers 下次触发
-- 控制台「管理」标签（仅 admin 钥匙可见）：账号与钥匙表格（发卡对话框含公钥粘贴+是否管理员勾选）、状态面板（自动刷新 30s）、快捷动作（收权/删钥匙，confirm）。
-- 安全语义：管理员钥匙遗失=平台最高权限泄露，user-key-rm 单独吊销；whoami 用当前请求的 kid 判定。
+  - `GET /_api/admin/projects` → 跨用户全量项目（每行附 owner=user；§3 `/_api/projects` 只回本人的管理员侧补充）
+- 控制台「管理」标签（仅管理员账号可见）五面板（§17.1）：账号（账号/设备表、发卡恒设密码、账号行「设为/取消管理员」）、全部项目、平台状态、宿主配置、实时事件。
+- 安全语义：管理员收授按账号（`user-admin`，对整账号全部钥匙生效）；删钥匙不影响管理员身份；whoami 按账号判定。
 
 ## 13. v1.6：部署入口并存 + 镜像选择 + Redis 浏览隔离
 ### 13.1 发布入口三存（v1.6 原始描述；UI 现状由 §17 单表单取代，端点与 CLI 三命令不变）
 - 「一键部署」：tar→压缩→上传→立即发布（快捷路径）。
 - 「仅上传」：只入 registry，不入库部署（发布者择时部署）。
 - 「部署」：独立表单——**镜像 ComboBox**（datalist 搜索）列当前可选镜像，默认仅当前用户的（admin 可看全部）；选中后填内存需求/端口→发布（旧版本单独部署即从此入口）。
-- 新端点 `GET /_api/images`（签名）→ `{"images":["<user>/<project>:<tag>",...]}`：registry catalog+tags 合并；按签名用户 user 前缀过滤；admin 钥匙不过滤。
+- 新端点 `GET /_api/images`（签名）→ `{"images":["<user>/<project>:<tag>",...]}`：registry catalog+tags 合并；按签名用户 user 前缀过滤；管理员不过滤。
 - **§17 修订**：三入口在 UI 上收敛为发布页**单表单双镜像源**（本地 tar 文件 / 镜像库下拉；镜像库源=原「部署」入口，仅上传=提交旁次要按钮）；`GET /_api/images` 与 CLI `showroom deploy|push|publish` 三命令不变。
 ### 13.2 Redis 浏览按用户隔离（低成本实现，不动 Redis 本体）
-- 隔离单位=Redis 逻辑库：`state` 已按项目分配 redisdb（0-15）。`/_api/redis-dbs|keys|get` 增加校验：请求 db ∈ 当前用户名下项目的 redisdb 集合；admin 钥匙放开全量。控制台 DB 下拉仅列自己的（admin 全量，标注「管理员视图」）。
+- 隔离单位=Redis 逻辑库：`state` 已按项目分配 redisdb（池 REDIS_DBS，§13.3）。`/_api/redis-dbs|keys|get` 增加校验：请求 db ∈ 当前用户名下项目的 redisdb 集合；管理员放开全量。控制台 DB 下拉**显示项目名而非库号**（`/_api/redis-dbs` 附 entries=db→project 映射；管理员全池，未分配库显示占位）。
 - 诚实边界（文档注明）：容器内应用持有原始连接仍可 SELECT 任意库——这是**界面级/协作级隔离**（防误看防误操作），非安全边界；应用级强隔离需独实例或 Redis ACL+rewrite，成本过高不做。
 
 ### 13.3 Redis 逻辑库容量（修订 §13.2 的隐含 16 上限）
@@ -198,7 +199,7 @@ CLI 对应：`showroom db sql|tables|preview|dump|restore|reset`。公网全可�
 ## 14. v1.7：镜像删除 + 上传磁盘准入
 ### 14.1 空间口径（显示与判定统一）
 - 新端点 `GET /_api/space`（签名）→ `{"available_mb","reserve_mb","total_mb"}`：根分区可用 − policy `DISK_RESERVE_GB`（默认 20；覆盖系统/中间件/应用运行/快照增长）。
-- 控制台上传区常显「可用空间（已扣预留）：X GB」。
+- 控制台上传区常显「可用空间：X GB」。
 ### 14.2 上传准入（加密导入通道，import-begin 处）
 - 判定式：`sealed_size × UPLOAD_SPACE_FACTOR（默认 4）≤ available − reserve`。因子覆盖：解密临时件+解压膨胀（docker load 落 /var/lib/docker 的未压缩层，典型 2–4×）+ registry 压缩副本。
 - 不足→ E_QUOTA，消息含 可用/预留/估算需求，提示「请先删除旧镜像」。
@@ -239,7 +240,7 @@ CLI 对应：`showroom db sql|tables|preview|dump|restore|reset`。公网全可�
 
 ## 16. v1.9：认证重设计（密码为主 / 密钥无感）
 目标体验：控制台一步登录（账号+密码），密钥生成/绑定/签名全程无感；管理员发账号时设初始密码；
-CLI `showroom login` 一次后全部子命令免密码（gh/ssh 模型）。公钥登记降级为机器对机器专家路径。
+CLI `showroom login` 一次后全部子命令免密码（gh/ssh 模型）。预登记公钥路径已随 B7 删除（CI/机器用户同样走账号密码 login）。
 
 ### 16.1 登录协议：OPAQUE（RFC 9380，opaque-ke 3.x，Ristretto255 suite）
 - **选型**：OPAQUE——密码经盲化 OPRF 永不上线；服务端只存注册记录（信封），无离线可验证哈希；
@@ -262,9 +263,9 @@ S→C 200 {"bind_token":hex}   # 60s 有效、单次使用（内存）
 C→S POST /_api/auth/key-bind {"user":u,"pubkey":串}
      Authorization: SR-SIG1 …  # 用候选钥匙签名、服务端按 body 内公钥验签（非已登记钥匙）
      X-Sr-Bind: <bind_token>
-S→C 200 {"kid","admin"}   # 写 <kid>.pub+.bound；账号已有任一 admin 钥匙 → 新钥匙继承 admin
-                          #（密码即账号级最高凭证，控制台显式提示）；GC 旧 .bound 钥匙
-                          #（按 .pub mtime 保最近 BOUND_KEYS_MAX 把，无 .bound 的 CI 公钥不受 GC）；
+S→C 200 {"kid","admin"}   # 写 <kid>.pub+.bound；admin=账号级结论回传（users/<u>/admin 唯一
+                          # 真相，R4）；GC 旧 .bound 钥匙
+                          #（按 .pub mtime 保最近 BOUND_KEYS_MAX 把）；
                           # 幂等（同钥匙重绑=ok）
 # 改密码（登录态。控制台要求输入当前密码并先本地校验——复用 login-begin+本地 finish、
 #   不调 login-finish 即不产生登录态；校验通过才走下列两步。旧密码不上线，签名即会话证明）：
@@ -296,28 +297,28 @@ C→S GET  /_api/reg-cred [SR-SIG1] → {"user","registry_password"}  # 暴露�
 ## 17. v2.0：控制台信息架构重设计（plan-17 定稿）
 取代 §9.1「四区」与 §13.1「三入口并存」的控制台侧 UI 描述（两节的端点与 CLI 语义不变）；零框架/零构建/零外部资源不变，登录前零信息暴露不变（管理壳仍走 template 惰性克隆）。
 ### 17.1 导航与层级
-- 顶栏单行（≤56px sticky）：账号徽标 + 角色徽标（发布者/管理员/?，随 whoami）+「+ 发布」唯一常驻 CTA + 设置 + 退出。
-- 五标签（role=tablist 方向键）：**我的展项**（默认落地）/**发布**/**镜像库**/**数据**（DB+Redis 合并）/**帮助**；「管理」标签仅 whoami admin=true 渲染（docker events 原始流降为管理员工具并入管理页）。
-- 三级封顶：顶栏→标签→卡片；卡片=标题+状态副题（「已加载 N 项 · HH:MM:SS」整段可点重取）+内容；卡片内禁嵌 fieldset。
+- 顶栏单行（≤56px sticky）：账号徽标（管理员加「管」角标，无角色徽标——R4 去冗余）+ 设置 + 退出（无常驻 CTA，发布入口即「发布」标签）。
+- 五标签（role=tablist 方向键）：**我的项目**（默认落地）/**发布**/**镜像库**/**数据**（DB+Redis 合并）/**帮助**（二级菜单五面板：账号/CLI 使用/镜像规范/工具下载/错误码）；「管理」标签仅 whoami admin=true 渲染，内部同为五面板（账号/全部项目/平台状态/宿主配置/实时事件；docker events 原始流降为管理员工具）。
+- 三级封顶：顶栏→标签→卡片；卡片=标题+副题（纯状态文本，自动刷新兜底，无「已加载 N 项」可点重取入口）+内容；卡片内禁嵌 fieldset。
 ### 17.2 数据自动加载（显式刷新按钮全站归零）
-登录即 4 路并发 `Promise.allSettled`（projects/images/space/whoami）；进页即订阅事件流（展项页可见时；`document.hidden`/离页退订）。
+登录即 4 路并发 `Promise.allSettled`（projects/images/space/whoami）；进页即订阅事件流（项目页可见时；`document.hidden`/离页退订）。
 - projects：TTL 30s；publish/start/stop/rm/rollback 成功后与事件流 sr-* 2s 去抖强制失效；失败=表格内联「加载失败 · 原因 + 重试」+3s 自动重试 1 次，此后每 10s 慢速兜底重试直至恢复（验收 8 恢复后免刷新自动补齐；images/space 同机制）。
-- images：TTL 300s；import-end/image-rm 后失效；whoami admin 后重取（副题标注「管理员视图」）。
+- images：TTL 300s；import-end/image-rm 后失效；whoami admin 后重取（无「管理员视图」徽章——身份由顶栏「管」角标表达）。
 - space：TTL 60s；切镜像库页强制校准；失败静默「空间信息不可用」。
-- whoami（+`platform_pem`，§12.2）：失败徽标「?」60s 周期重试。
-- redis-dbs：数据页 Redis 区首次展开惰性；行抽屉日志流展开即订阅、收起/换行即断。
+- whoami（+`platform_pem`，§12.2）：失败=顶部 warn 条（「当前管理功能保持不变」）+60s 周期重试；网络失败不收回已渲染的管理功能。
+- redis-dbs：数据页 Redis 区首次展开惰性；下拉显示项目名而非库号（entries=db→project 映射；管理员全池，未分配库占位）；行抽屉日志流展开即订阅、收起/换行即断。
 - 数据库页项目下拉、发布页项目/镜像下拉直读已加载 `state.projects`/images——独立加载动作归零。
-### 17.3 展项 7 态状态机（显示层只出 7 词；「未部署」「missing」原词不进 UI）
+### 17.3 项目 7 态状态机（显示层只出 7 词；「未部署」「missing」原词不进 UI）
 | 状态 | 表现 | 可执行动作 | 来源 |
 |---|---|---|---|
-| 运行中 | 绿● | 打开·更新·日志·停止·更多▾(回滚/环境变量/数据/删除) | `status=running` |
-| 已停止 | 黄●（tooltip=后端原词 exited/paused/created） | 启动·更新·日志·更多▾ | exited/paused/created |
-| 重建中 | 黄●呼吸（reduced-motion 静止） | 日志 | restarting，或发布成功后 60s 滚动窗口 |
-| 异常 | 红●（tooltip=dead） | 日志·更新·删除 | dead，或本地发布失败终态 |
-| 待部署 | 灰●（tooltip「仅镜像无容器：从发布页选择镜像即可拉起」） | 部署（→发布页预填）·删除 | missing（conf 在、容器无） |
+| 运行中 | 绿● | 更新·停止·更多▾(回滚/环境变量/数据/删除)·日志▾ | `status=running` |
+| 已停止 | 黄●（tooltip=后端原词 exited/paused/created） | 启动·更新·更多▾·日志▾ | exited/paused/created |
+| 重建中 | 黄●呼吸（reduced-motion 静止） | 日志▾ | restarting，或发布成功后 60s 滚动窗口 |
+| 异常 | 红●（tooltip=dead） | 更新·删除·日志▾ | dead，或本地发布失败终态 |
+| 待发布 | 灰●（tooltip「仅镜像无容器：从发布页选择镜像即可拉起」） | 发布（→发布页预填）·删除 | missing（conf 在、容器无） |
 | 上传中 | 行内「上传中 x%」（dp 状态条为主显示） | 等待；失败断点续传 | 本地 deploy 在途 |
 | 发布中 | 黄●发布中… | 等待 | 本地 publish 在途 |
-状态标识=●+文字双通道（非仅颜色）；行操作固定序「打开·更新·日志·启动/停止·更多▾」行尾。
+状态标识=●+文字双通道（非仅颜色）；无「打开」按钮——URL 列即外链；行操作固定序「发布（更新）/停止(启动)/更多▾」行尾+日志列「▾」。
 ### 17.4 发布单表单与参数单源（取代三入口）
 - 发布页单表单 5 字段：项目（留空自动随机 8 位）+ 镜像源 radio（**本地 tar 文件**/**镜像库**下拉）+ 标签 + 内存需求 + 监听端口；「仅上传」为提交旁次要按钮（tar 源可用）。
 - 镜像库源=原「部署」入口：选中镜像自动带出项目/标签，①压缩②上传跳过直接 publish；tar 源=原「一键部署」。
@@ -327,6 +328,6 @@ C→S GET  /_api/reg-cred [SR-SIG1] → {"user","registry_password"}  # 暴露�
 ### 17.6 设置对话框（#dlg-settings）
 对外访问域名（校验 http(s)、去尾斜杠、清空回退）+ 平台公钥 PEM（whoami `platform_pem` 自动取+缓存 `sr.pempub`，手工粘贴兜底；未配置时发布内联引导「去设置」）+ 修改密码/忘记此设备入口聚合。
 ### 17.7 关键交互契约
-- 删除展项 confirm 必含「数据库将一并删除，如需保留请先在数据页备份下载 .dump」。
-- 登录成功焦点引导：已有展项→首行「打开」；空账号→「+ 发布」CTA；空态卡「暂无展项——点顶栏 + 发布 发布新 Demo」。
-- 视觉 token：间距 4/8/12/16/24/32；页面题 18、卡片题 15/600、正文 14、辅助 13、注释/时间 12（mono+tabular-nums，时间列右对齐）；绿=可用/黄=过渡/红=故障/灰=不存在。
+- 删除项目 confirm 必含「数据库将一并删除，如需保留请先在数据页备份下载 .dump」。
+- 登录成功焦点引导：已有项目→URL 列首链接；空账号→「发布」标签按钮；空态行实测文案「暂无项目——到「发布」页发布第一个项目。」。
+- 视觉 token：间距 4/8/12/16/24/32；页面题 18、卡片题 14/600（与正文/控件同级）、正文 14、辅助 13、注释/时间 12（mono+tabular-nums，时间列右对齐）；绿=可用/黄=过渡/红=故障/灰=不存在。

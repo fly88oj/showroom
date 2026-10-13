@@ -11,9 +11,8 @@
 │   ├─ site A（:80，内网面 LAN_HOST）                                                        │
 │   │   ├─ /_api/*        → showroomctl serve（127.0.0.1:8090）                             │
 │   │   ├─ /v2            → sr-registry（127.0.0.1:5000，basic auth，registry ∈ 集合才有）  │
-│   │   ├─ /_bootstrap/*  → CLI/Skill 分发（仅内网面）                                       │
 │   │   └─ /<project>/*   → 展项容器（127.0.0.1:8100–8199，逐项目端口）                      │
-│   ├─ site B（:8080 纯端口匹配，公网面——frp 等隧道流量命中的站点；无 /v2 与 /_bootstrap）   │
+│   ├─ site B（:8080 纯端口匹配，公网面——frp 等隧道流量命中的站点；无 /v2）                   │
 │   │   公网隧道（frpc → 127.0.0.1:8080）──┐                                                │
 │   │                                       ▼                                               │
 │   │   └─ /_api/* /_console/* /<project>/*（与 site A 同 import showroom-app 片段）        │
@@ -43,7 +42,7 @@
 | `showroom-common` | rlib + **wasm32 cdylib** | SPEC §1/§2/§16 的契约实现：SR-SIG1 签名/验签、加密信封 seal/open、OPAQUE 登录双端包装（Suite/argon2id rwd）、命名校验、一次性 RSA 密钥对。原生侧被 ctl/cli 复用；wasm 垫片（C ABI，不用 wasm-bindgen）给浏览器控制台——**CLI 与 Web 走同一 crate 同一 Suite，无互操作缝隙**。密码学依赖（ed25519-dalek / rsa / aes-gcm / opaque-ke / argon2）锁定在本 crate 并重导出，避免下游类型分裂 |
 | `showroom` | 发布者 CLI（`showroom`） | 登录/登出（`login`/`logout`，密码一次密钥常驻）、配置管理（`~/.showroom/`）、push 双通道、publish/deploy、查询与生命周期命令、db 维护子命令、镜像与磁盘（images/space/rm-image）、doctor 体检。除 `push` 需要 docker CLI 外零运行时依赖 |
 | `showroomctl` | 主机工具（`showroomctl`） | HTTP 控制面（`serve`，仅监听 127.0.0.1:8090）+ 全部运维子命令：user 管理（含密码发放）、发布内核、生命周期、reconcile/autoheal/gc、快照、导入、主机自举（`setup`/`middleware`/`upgrade`）。状态存 `/srv/showroom`，全部外部世界调用集中在 `dockerops`（docker CLI / psql / caddy / 裸 TCP registry 客户端） |
-| `showroom-web` | 静态资源（`dist/`） | 控制台单页：`index.html` + `showroom_bg.wasm`（由 showroom-common cdylib 构建产物改名）。一步登录（账号+密码，OPAQUE）、展项/数据库/状态/帮助四区、管理标签（admin 钥匙可见：账号/钥匙/主机编排/Redis 扩容）。登录页仅账号+密码；钥匙登录（CLI/机器用户）收进帮助页折叠（专家路径）。产物入库（部署通道依赖静态文件），与垫片源码同一提交内重建 |
+| `showroom-web` | 静态资源（`dist/`） | 控制台单页：`index.html` + `showroom_bg.wasm`（由 showroom-common cdylib 构建产物改名）。一步登录（账号+密码，OPAQUE）+ 五标签信息架构（**我的项目**/发布/镜像库/数据/帮助，帮助页二级菜单五面板：账号/CLI 使用/镜像规范/工具下载/错误码）+ 管理页五面板（账号/全部项目/平台状态/宿主配置/实时事件；仅管理员账号可见，admin 按账号级判定）。「管理→状态」面板与「钥匙登录」折叠区等旧结构已随五标签改版删除。产物入库（部署通道依赖静态文件），与垫片源码同一提交内重建 |
 
 内部深模块（showroomctl）：`state`（状态读写+纯函数：命名/policy/conf/端口/redisdb 分配/caddy 片段）、`dockerops`（外部世界）、`publish`（publish/import 内核，serve 与 CLI 子命令共用）、`ops`（生命周期、user/key 管理、key-bind 继承与 GC）、`serve`（axum 统一 fallback 分发、`/_api/auth/*` 免签族与限流）、`dbmaint`（db-sql/dump 三段式）、`streams`（ndjson 实时流）、`setup`（声明式期望状态引擎与 Action 体系）、`middleware`（host.env 契约与编排/扩容状态机）、`unpack`（信封解包）。
 
@@ -62,8 +61,8 @@ S→C 200 {"bind_token":hex}      # 60s 有效、单次使用（内存）
 C→S POST /_api/auth/key-bind {"user":u,"pubkey":串}
      Authorization: SR-SIG1 …   # 用候选钥匙签名（服务端按 body 内公钥验签）
      X-Sr-Bind: <bind_token>
-S→C 200 {"kid","admin"}         # 写 <kid>.pub+.bound；账号已有任一 admin 钥匙或
-                                # admin.pending → 新钥匙继承 admin；GC 旧 .bound 钥匙
+S→C 200 {"kid","admin"}         # 写 <kid>.pub+.bound；admin=账号级结论回传（users/<u>/admin
+                                # 唯一真相，R4）；GC 旧 .bound 钥匙
 C→S GET /_api/reg-cred [SR-SIG1] → registry 凭据（login 免手工 config）
 ```
 
@@ -105,7 +104,7 @@ CLI 自动探测内网可达性：优先 lan，探不通回落 public。控制�
 
 publish 内核（三条入口汇合后）：校验名/配额 → registry 镜像存在 → 内存准入（MemAvailable − RESERVE_MEM_MB ≥ 需求）→ 磁盘准入复核（registry 快通道无 begin 钩子，拉取展开发生在部署时刻，§14.2）→ 分配 host 端口（8100–8199）→ 供给 DB/Redis（**首建不重建**，数据保留）→ 起容器（滚动：`-new` 后缀起新、健康后删旧改名；健康 = TCP 可连或 60s 超时放行）→ 写路由片段 + `caddy reload` → 更新 last2。
 
-磁盘准入在两条上传路径上的位置：加密 import 通道在 `import-begin` 判定 `密封体积 × UPLOAD_SPACE_FACTOR（默认 4）≤ 可用 − DISK_RESERVE_GB 预留（默认 20G）`（因子覆盖解密临时件+解压膨胀+registry 压缩副本）；registry 直推快通道在 publish 时同式复核。不足 → `E_QUOTA`，消息含 可用/预留/估算需求，提示先删旧镜像（`showroom rm-image` 删除即内联 registry-gc 立即释放，闭环「上传不够→删除→立即可传」）。`GET /_api/space` 返回同一口径三数（可用已扣预留）。
+磁盘准入在两条上传路径上的位置：加密 import 通道在 `import-begin` 判定 `密封体积 × UPLOAD_SPACE_FACTOR（默认 4）≤ 可用 − DISK_RESERVE_GB 预留（默认 20G）`（因子覆盖解密临时件+解压膨胀+registry 压缩副本）；registry 直推快通道在 publish 时同式复核。不足 → `E_QUOTA`，消息含 可用/预留/估算需求，提示先删旧镜像（`showroom rm-image` 删除即内联 registry-gc 立即释放，闭环「上传不够→删除→立即可传」）。`GET /_api/space` 返回同一口径三数（可用/预留/总量，扣减由展示端完成）。
 
 ### 2.2 备份三段式（db dump/restore）
 
@@ -157,17 +156,16 @@ docker --restart unless-stopped：进程级兜底
 │  ├─ platform_rsa{,.pub}          # 平台 RSA-3072 对（解上行信封）
 │  ├─ registry.htpasswd            # registry basic auth（bcrypt）
 │  ├─ tokens/<user>/<kid>.pub     # Ed25519 公钥（可多把）
-│  ├─ tokens/<user>/<kid>.admin   # 空文件 = 管理员钥匙（标记在钥匙上）
-│  ├─ tokens/<user>/<kid>.bound   # 空文件 = 密码绑定钥匙（受 keep-N GC；CI 公钥无此标记不受 GC）
+│  ├─ tokens/<user>/<kid>.bound   # 空文件 = 密码绑定钥匙（登录绑定恒打此标记，受 keep-N GC）
+│  ├─ users/<user>/admin          # 空文件 = 管理员账号（R4：账号级唯一真相）
 │  ├─ users/<user>/pass.opaque    # OPAQUE 注册记录（b64 0600）
-│  ├─ users/<user>/admin.pending  # 空文件 = 纯密码发卡的管理员意图（首把绑定钥匙继承后清除）
 │  ├─ users/<user>/reg.cred      # registry basic_auth（0600 明文）
 │  ├─ projects/<project>.conf      # key=value：owner tag port cport mem cpu redisdb updated
 │  ├─ projects/<project>.env       # 注入容器的连接信息（§4 契约）
 │  ├─ projects/<project>.last2     # 上一 tag（回滚目标）
 │  └─ routes/<project>.caddy       # 展项路由片段（主 Caddyfile import）
 ├─ _middleware/{postgres,redis,registry}/   # 中间件容器数据卷（bind）
-├─ _bootstrap/                     # CLI/Skill 分发（仅内网面）
+├─ _bootstrap/public/              # /_api/tool/* 下发源（CLI/Skill/公钥；控制台登录后内下载，R8 无静态匿名分发面）
 ├─ _console/                       # WASM 控制台静态资源
 └─ _tmp/                           # import/dump 暂存（即用即删 + 24h gc）
 ```
@@ -207,15 +205,15 @@ diff = 期望 − 实际 → Action 列表（有序、可命名，幂等判定�
 | D5 | **db-dump 旧单发 base64 直接移除，不做兼容** | 未发布给外部、无存量消费者；整包进内存有 4× 放大问题（SPEC §10.4） | — |
 | D6 | **WASM 垫片不用 wasm-bindgen/wasm-pack** | 零新工具链：`rustup target add wasm32-unknown-unknown` 即可构建；JS 侧直接 instantiate 调 C ABI（指针+长度进出） | ABI 手工维护（容量不足返回负数所需字节的约定） |
 | D7 | **零信息暴露：未认证一律 404 E_AUTH** | 管理面不给枚举素材：路径存在性、项目名、版本全部不可探测（SPEC §3） | 404 同时是"没这路径"与"没权限"，排障要靠服务端 journal；本机健康检查用 `systemctl is-active` 而非 HTTP health |
-| D8 | **管理员标记在钥匙上（kid.admin）而非账号上** | 一人可同时持普通与管理员钥匙；`whoami` 按当前请求命中的 kid 判定，吊销粒度细到单钥匙（SPEC §12.2） | 管理员钥匙遗失 = 平台最高权限泄露；纯密码发卡的管理员意图经 `admin.pending` 由**首把登录绑定钥匙继承**（一次性标记，消费即清；此后账号内既有 admin 钥匙持续让新钥匙继承——密码即账号级最高凭证） |
+| D8 | **管理员标记在账号上（`users/<user>/admin`），R4 反转**——早期版本曾放在钥匙上（`tokens/<u>/<kid>.admin`） | 实证教训：清扫过期钥匙曾连带清走账号的管理员——权限挂临时钥匙上天生不稳；R4 用户裁决「管理员按用户设置，不按密钥」，账号标记为唯一真相（`user_is_admin`/`user_set_admin`），`whoami` 与管理端点一律按账号判定 | 旧钥匙级标记（kid `.admin`/`admin.pending`）仅为存量迁移输入（serve 启动一次性迁移清除）；账号凭据泄露=平台最高权限泄露，按 SECURITY.md 处置 |
 | D9 | **publish 首建不重建数据库**（v1.2 起） | 发布者重新 publish 不应意外清库；显式重置走 `db reset`（DROP+重建+凭据不变） | 迁移 schema 是发布者自己的责任（db sql/restore 工具齐备） |
 | D10 | **nonce 查重服务重启清零** | 窗口仅 ±300s，重启后旧 nonce 早已过期；避免持久化（SPEC §1 明示可接受） | — |
 | D11 | **registry v2 客户端用裸 TCP HTTP/1.0 手写** | 控制面对 localhost 单一 registry，引第三方 async HTTP 栈不划算（ctl 内部约定） | 仅覆盖本机 registry 场景 |
 | D12 | **统一 zstd 压缩（CLI 与控制台上传、dump）** | 压缩在加密之前，先压缩后加密不泄露熵；zstd-19 高压缩；服务端魔数自适应兼容原生 -Fc | — |
 | D13 | **滚动更新 = `-new` 后缀起新再删旧改名** | 同项目唯一 host 端口约束下的简单滚动 | 秒级中断（已知天花板，代码内 ponytail 注释同步） |
-| D14 | **`/_api/projects` 对任意登记发布者全量可见** | 团队内部可见性是 Demo 平台的合理默认 | 非强多租户隔离；强隔离需求在反代层收紧 |
+| D14 | **`/_api/projects` 只回本人项目（R4 反转）；管理员跨用户全量走 `/_api/admin/projects`** | 早期「全平台可见」曾使任何登录者可枚举全部账号与项目名（零信息暴露原则违规，实弹复现）；R4 用户裁决「我的项目不该有别人的内容」——跨用户项目名/账号名不再对普通登录者枚举，管理员全量视图归管理页「全部项目」面板 | CLI 无跨用户列表；管理员看全量须登录控制台管理页 |
 | D15 | **git 历史定稿窗口允许重塑** | v1 未定稿前保持重塑自由（详见 CONTRIBUTING「历史重塑政策」） | 定稿后禁止 force-push；重塑需公告并评估凭据轮换 |
-| D16 | **认证以密码为主、OPAQUE 落地（v1.9），公钥登记降级为专家路径** | 目标体验是一步登录（账号+密码）与 CLI `login` 一次免密（gh/ssh 模型），密钥生成/绑定全程无感。选 OPAQUE（RFC 9380）而非其他密码方案：密码经盲化 OPRF **永不上线**、服务端只存注册信封**无离线可验证哈希**、每次 KE 全新临时份额天然防重放——非 PAKE 的挑战/签名方案（H(pw,挑战) 上网线即可离线字典）与 HKDF(pw) 对称凭证（可重放 bearer）均被否决。argon2id 由 rwd() 在盲化前硬化；两端同 crate 同 Suite 无互操作缝隙 | 明文 HTTP 首登无信任锚——主动 MITM 可中继 login-finish 并登记自己的公钥（缓解：公网站点 B 经 Caddy TLS、LAN 不可信时走 CLI 钥匙路径）；UnknownUser 假记录存在时序统计残差；两把密码（登录/registry）必须分开发放，不能合并 |
+| D16 | **认证以密码为主、OPAQUE 落地（v1.9）；预登记公钥路径随 B7 全删** | 目标体验是一步登录（账号+密码）与 CLI `login` 一次免密（gh/ssh 模型），密钥生成/绑定全程无感。选 OPAQUE（RFC 9380）而非其他密码方案：密码经盲化 OPRF **永不上线**、服务端只存注册信封**无离线可验证哈希**、每次 KE 全新临时份额天然防重放——非 PAKE 的挑战/签名方案（H(pw,挑战) 上网线即可离线字典）与 HKDF(pw) 对称凭证（可重放 bearer）均被否决。argon2id 由 rwd() 在盲化前硬化；两端同 crate 同 Suite 无互操作缝隙 | 明文 HTTP 首登无信任锚——主动 MITM 可中继 login-finish 并登记自己的公钥（缓解：公网站点 B 经 Caddy TLS；B7 后 CI/机器用户同样走账号密码 login，无免密码的预登记公钥旁路，首登须在可信或加密链路上进行）；UnknownUser 假记录存在时序统计残差；两把密码（登录/registry）必须分开发放，不能合并 |
 | D17 | **为什么 OPAQUE 之外仍保留 SR-SIG1 钥匙签名做日常请求** | OPAQUE 解决「密码不泄露」的**登录引导**问题；登录后的每请求认证用已绑定的 Ed25519 钥匙签名（无密码参与、可离线验签、多设备多钥匙独立吊销）。两者是引导期与会话期的组合，不是替代关系 | 密码只出现在登录三步内；日常流量对密码零依赖 |
 | D18 | **site B（公网面）用 :8080 纯端口匹配，不做 Host 匹配** | frp 隧道转发来的请求 Host 是公网 IP/隧道域名，按 `PUBLIC_HOST` 做 Host 匹配会漏掉全部 frp 流量（断电重启后实弹复现）；纯端口匹配保证隧道流量恒命中。frpc 转发目标恒 127.0.0.1:8080，PUBLIC_HOST 降为元数据（是否渲染 site B 的开关 + 展示用） | :8080 与 site A 的 :80 是两个监听，公网直连 80 端口不会命中公网面 |
 | D19 | **host.env（设施形状）与 policy.env（业务限额）分层不合并** | 两类键的变更主体与风险等级不同：限额=管理员日常调节，设施=setup 幂等收敛；合并会造成双写漂移、setup diff 混入限额噪声（SPEC §15.1 勘误） | 改限额不触发 setup；改形状必须走 setup --apply |

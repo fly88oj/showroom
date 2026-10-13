@@ -22,7 +22,7 @@ showroom [--server lan|public] <子命令>
 |---|---|
 | `~/.showroom/config.toml` | user（账号）、双服务端地址、registry 凭据（`login` 自动写入） |
 | `~/.showroom/id_ed25519` | 发布者 Ed25519 私钥（裸 32B seed；`login` 自动生成绑定） |
-| `~/.showroom/platform_rsa.pub` | 平台 RSA 公钥（import 加密通道；管理员分发） |
+| `~/.showroom/platform_rsa.pub` | 平台 RSA 公钥（import 加密通道；控制台登录后自动取，或控制台帮助页「工具下载」下载） |
 
 ## 1. 登录与会话
 
@@ -59,7 +59,7 @@ showroom logout
 showroom keygen [--force]     # 生成/重置本机签名密钥；已存在拒绝覆盖（--force 强制）
 ```
 
-**日常登录走 `showroom login`，不要用本命令**——keygen 仅用于排查签名问题或强制换钥（生成后仍需 `showroom login` 绑定登记）。统一账号密码认证（B7）后不再支持预登记公钥发卡。已从 `--help` 隐藏。
+**日常登录走 `showroom login`，不要用本命令**——keygen 仅用于排查签名问题或强制换钥（生成后仍需 `showroom login` 绑定登记）。统一账号密码认证（B7）后不再支持预登记公钥发卡，CI/机器用户与日常登录一致走账号密码 `login`。已从 `--help` 隐藏。
 
 ### showroom config
 
@@ -79,7 +79,7 @@ showroom config --user <USER> \
 showroom doctor
 ```
 
-体检并逐项打印：密钥可读（不可读 → 提示 `showroom login`，机器用户提示 keygen）/ user 已配置 / server_lan 与 server_public 可达（签名探测）/ 签名自测（用不存在的项目名验证：返回 `E_NOTFOUND` = 验签通过且密钥已登记；`E_AUTH` = 未登记或时钟偏差——提示重新 login 重绑）/ registry 凭据有效（非关键项）/ docker 可用（仅 push 需要）。任一关键项失败 → 非零退出。
+体检并逐项打印：密钥可读（不可读 → 提示 `showroom login`）/ user 已配置 / server_lan 与 server_public 可达（签名探测）/ 签名自测（用不存在的项目名验证：返回 `E_NOTFOUND` = 验签通过且密钥已登记；`E_AUTH` = 未登记或时钟偏差——提示重新 login 重绑）/ registry 凭据有效（非关键项）/ docker 可用（仅 push 需要）。任一关键项失败 → 非零退出。
 
 ## 2. 推送与发布
 
@@ -103,7 +103,7 @@ import 通道需要 `~/.showroom/platform_rsa.pub`。仓库名规则：`<host>/<
 showroom publish [<PROJECT>] <TAG> [--mem 256m] [--cpu 0.5] [--container-port 8080] [--wait]
 ```
 
-发布/更新展项。**单参数 = tag，项目名自动生成随机 8 位并醒目打印**；两参数 = `<PROJECT> <TAG>`。
+发布/更新项目。**单参数 = tag，项目名自动生成随机 8 位并醒目打印**；两参数 = `<PROJECT> <TAG>`。
 
 - `--mem`：内存需求（docker `--memory` 硬限），缺省取平台 `DEFAULT_MEM`，上限 `MAX_MEM`；受内存准入约束（`MemAvailable − RESERVE_MEM_MB < 需求` → `E_QUOTA`）；
 - `--cpu`：CPU 配额（核数，正数如 `0.5`、`2`）；
@@ -128,11 +128,11 @@ deploy: 第 1 步(push) 失败：docker push 失败
 
 | 命令 | 说明 |
 |---|---|
-| `showroom ps [--json]` | 全平台展项列表（PROJECT/STATUS/TAG/USER）；`--json` 机读 |
-| `showroom images [--json]` | 列出自己的镜像 `<USER>/<PROJECT>:<TAG>`（admin 钥匙全量）；`--json` 机读 |
-| `showroom space [--json]` | 服务端磁盘空间三数（可用/预留/总量；可用行含已扣预留值，MB）；`--json` 机读 |
+| `showroom ps [--json]` | 本人项目列表（PROJECT/STATUS/TAG/USER；跨用户全量为管理员控制台「全部项目」面板，走 `GET /_api/admin/projects`）；`--json` 机读 |
+| `showroom images [--json]` | 列出自己的镜像 `<USER>/<PROJECT>:<TAG>`（管理员全量）；`--json` 机读 |
+| `showroom space [--json]` | 服务端磁盘空间三数（可用/预留/总量；可用行含预留扣减明细，MB）；`--json` 机读 |
 | `showroom rm-image <USER/PROJECT:TAG>` | 删除自己的镜像并内联 registry-gc 立即回收空间，打印「已删除 …，回收约 N MB」 |
-| `showroom url <PROJECT>` | 打印展项 URL（`http://<server>/<PROJECT>/`），不开浏览器 |
+| `showroom url <PROJECT>` | 打印项目 URL（`http://<server>/<PROJECT>/`），不开浏览器 |
 | `showroom logs <PROJECT> [--tail 100] [-f]` | 查看容器日志；`-f` 跟随（2s 轮询追加式打印） |
 | `showroom env <PROJECT>` | 打印注入容器的环境变量（DB/Redis 连接信息一目了然） |
 | `showroom rollback <PROJECT>` | 回滚到上一 tag（`last2` 记录），旧 tag 写回 `last2` |
@@ -206,12 +206,12 @@ showroom skill [install]     # install 为缺省动作，当前唯一动作（�
 
 | 命令 | 说明 |
 |---|---|
-| `showroomctl user-add <USER> (--password '<初始密码>'\|--gen-password) [--admin]` | 发账号：设初始登录密码（必填其一）+ 生成 registry 凭据（bcrypt）。`--gen-password` 自动生成初始密码一次性返回；`--admin` 授管理员（账号属性，经 `admin.pending` 由首把登录绑定钥匙继承）。统一账号密码认证（B7）：预登记公钥路径已删除 |
+| `showroomctl user-add <USER> (--password '<初始密码>'\|--gen-password) [--admin]` | 发账号：设初始登录密码（必填其一）+ 生成 registry 凭据（bcrypt）。`--gen-password` 自动生成初始密码一次性返回；`--admin` 授管理员（账号级，即刻落 `users/<u>/admin` 生效——对整账号全部钥匙生效；旧 `admin.pending` 仅作存量迁移输入）。统一账号密码认证（B7）：预登记公钥路径已删除 |
 | `showroomctl user-passwd <USER> [--password '<新密码>'\|--gen-password]` | 重置/补发登录密码（替换 `pass.opaque`，**不动既有钥匙**）；一次性返回新密码 |
-| `showroomctl user-key-rm <USER> <KID>` | 删除某把公钥（admin 标记随之消失） |
-| `showroomctl key-admin <USER> <KID> --admin true\|false` | 授/收管理员权限 |
-| `showroomctl user-revoke <USER>` | 吊销账号（签名与 registry 登录全失效，展项不动；users 目录整删） |
-| `showroomctl admin users\|status` | 管理员视图：账号/钥匙清单（含「未设密码」徽标）；服务/磁盘/内存/容器/timers 面板 |
+| `showroomctl user-key-rm <USER> <KID>` | 删除某把公钥（admin 是账号级属性，删钥匙**不影响**该账号的管理员身份） |
+| `showroomctl user-admin <USER> --admin true\|false` | 授/收管理员权限（账号级） |
+| `showroomctl user-revoke <USER>` | 吊销账号（签名与 registry 登录全失效，项目不动；users 目录整删） |
+| `showroomctl admin users\|status` | 管理员视图：账号与设备清单（含「未设密码」徽标）；服务/磁盘/内存/容器/timers 面板 |
 
 ### 主机自举与编排
 

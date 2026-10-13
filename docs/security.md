@@ -60,7 +60,7 @@ C→S GET  /_api/reg-cred [SR-SIG1] → {"user","registry_password"}  # 暴露�
 
 **风险边界（如实声明）**：
 
-1. **明文 HTTP 首登无信任锚**：PAKE 只保证密码不泄露，主动 MITM 可中继 login-finish 并在 key-bind 登记自己的公钥接管账号。缓解：公网站点 B 经 Caddy 上 TLS；LAN 不可信时用 CLI 钥匙路径（keygen + 管理员登记）。
+1. **明文 HTTP 首登无信任锚**：PAKE 只保证密码不泄露，主动 MITM 可中继 login-finish 并在 key-bind 登记自己的公钥接管账号。缓解：公网站点 B 经 Caddy 上 TLS；B7 统一账号密码认证后无免密码的预登记公钥旁路（CI/机器用户同样走 `login`），首登须在可信或加密链路上进行。
 2. **UnknownUser 假记录的统计残差**：响应长度/时序上存在残差，枚举成本从一次请求升到时序分析。
 3. **限流按 user 计**：代理后取不到可信 IP，全局桶 + rwd 计算成本抬高单价。
 4. 服务重启丢在途登录态与限流计数（内存）——用户重试即可，攻击者窗口也被重置（接受）。
@@ -108,8 +108,8 @@ sig = Ed25519_sign(user_priv, canonical.utf8)
 
 - 发布者密钥：Ed25519，`~/.showroom/id_ed25519`（裸 32B seed，权限 0600；`showroom login` 自动生成绑定）；公钥串格式 `ed25519:<base64(pubkey)>`；
 - 一个 user 可登记多把公钥（`state/tokens/<user>/<kid>.pub`），`kid` = 公钥 sha256 前 8 hex；
-- 验签时对 user 名下**全部**公钥尝试匹配，命中哪把即以哪把的 `kid` 记录身份（`GET /_api/whoami` 据此判定 admin）；
-- `showroom keygen`（隐藏命令）是 CI/机器用户专家路径：公钥交管理员登记，无 `.bound` 标记不受 GC；日常登录用 `showroom login`。
+- 验签时对 user 名下**全部**公钥尝试匹配，命中哪把即以哪把的 `kid` 记录身份（admin 按账号级 `users/<u>/admin` 判定，见 §4）；
+- `showroom keygen`（隐藏命令）仅用于排查签名问题或强制换钥（生成后仍需 `showroom login` 绑定登记）；CI/机器用户与日常登录一致走账号密码 `showroom login`（绑定钥匙受 keep-N GC）。
 
 ---
 
@@ -157,31 +157,26 @@ SR-SIG1 签名已覆盖 `sha256(body)`（整个信封的哈希）——Encrypt-t
 
 ## 4. 管理员体系
 
-### 4.1 标记与能力分层
+### 4.1 标记与能力分层（账号级，R4 裁决）
 
-- 标记在**钥匙**上而非账号上：`state/tokens/<user>/<kid>.admin`（空文件存在即管理员钥匙）；
-- 引导：首个管理员由主机 CLI `showroomctl user-add <名> --gen-password --admin` 建立（统一账号密码认证，B7）；此后管理员可经签名 API 远程发卡与授权；
+- 标记在**账号**上：`state/users/<user>/admin`（空文件存在即管理员账号）是**唯一真相**；旧钥匙级 `tokens/<user>/<kid>.admin` 与 `users/<user>/admin.pending` 仅作存量迁移输入（serve 启动时一次性迁移清除）；
+- 引导：首个管理员由主机 CLI `showroomctl user-add <名> --gen-password --admin` 建立（`--admin` 即刻落账号级标记；统一账号密码认证，B7）；此后管理员可经签名 API 远程发卡与授权；
 
-| 能力 | 发布者钥匙 | 管理员钥匙 |
+| 能力 | 发布者账号 | 管理员账号 |
 |---|---|---|
-| 操作自己归属的展项（发布/停止/删除/回滚/日志/env/db 维护） | ✓ | ✓ |
-| `GET /_api/projects` 全平台列表 | ✓（明文含 user 名） | ✓ |
+| 操作自己归属的项目（发布/停止/删除/回滚/日志/env/db 维护） | ✓ | ✓ |
+| `GET /_api/projects` 项目列表 | 仅本人项目 | 仅本人项目（跨用户全量走 `GET /_api/admin/projects`，每行附 owner） |
 | 镜像列表 `/_api/images` | 仅自己命名空间 | 全量 |
-| Redis 浏览 | 仅自己项目的逻辑库（协作级隔离） | 全量（标注「管理员视图」） |
+| Redis 浏览 | 仅自己项目的逻辑库（协作级隔离） | 全量（下拉显示项目名，未分配库占位） |
 | 发卡 / 补发密码 / 吊销 / 收权 / 主机状态与编排面板 | ✗ | ✓ |
 | 管理员直发任意项目（`showroomctl publish <user> …`，仅主机 CLI） | — | 仅主机 |
 
-- 管理员钥匙遗失 = 平台最高权限泄露，须按 [SECURITY.md](../SECURITY.md) 处置流程吊销。
+- 授权/收权：`showroomctl user-admin <USER> --admin true|false` / `POST /_api/admin/user-admin {user,admin}`（账号级，对该账号**全部钥匙**生效；旧钥匙级端点已移除）；
+- 管理员账号凭据泄露 = 平台最高权限泄露，须按 [SECURITY.md](../SECURITY.md) 处置流程吊销；删单把钥匙（`key-rm`/`key-selfrm`）**不影响**账号的管理员身份。
 
-### 4.2 继承语义（pending-admin）
+### 4.2 whoami 与登录绑定的 admin 回传
 
-`key-bind`（密码登录绑定新钥匙）时的 admin 判定：**密码即账号级最高凭证**——
-
-- 账号已有**任一** admin 钥匙 → 新绑定钥匙继承 admin（持续继承，控制台显式提示）；
-- 纯密码发卡（无公钥）时若带 `--admin`，意图落在一次性标记 `state/users/<u>/admin.pending` → 该账号**首把**登录绑定钥匙继承 admin，标记消费即清；
-- 此后按上一条持续继承——账号从此是管理员账号。
-
-吊销粒度：`user-key-rm` 删单把钥匙（admin 标记随之消失）；`user-revoke` 连 `users` 目录整删（pass.opaque、registry 凭据一并失效）。`whoami` 永远按**当前请求命中的 kid** 判定，不缓存。
+`key-bind`（密码登录绑定新钥匙）与 `GET /_api/whoami` 回传的 `admin` 均为**账号级结论**（读 `users/<u>/admin`，不缓存）：管理员账号绑定的任何新钥匙登录即具管理权限，控制台据此显隐「管理」标签。吊销粒度：`user-key-rm` 删单把钥匙；`user-revoke` 连 `users` 目录整删（pass.opaque、registry 凭据一并失效）。
 
 ---
 
@@ -194,9 +189,9 @@ SR-SIG1 签名已覆盖 `sha256(body)`（整个信封的哈希）——Encrypt-t
 - **路径存在性不泄露**：探测 `/_api/health` 与探测 `/_api/不存在的` 得到同一响应；
 - **版本与项目名不泄露**：`GET /` 与未匹配路径一律 404，不做 302 跳转；
 - **错误码语义最小化**：业务错误 `E_NAME/E_QUOTA/E_NOTFOUND/E_STATE/E_NET` 的 msg 不得包含内部信息；`E_AUTH` 恒无 msg；
-- **公网控制台**登录成功前不加载任何管理资源，只有登录壳；`/_bootstrap/*`（CLI/Skill 分发）仅内网面提供，公网面 404。
+- **公网控制台**登录成功前不加载任何管理资源，只有登录壳；CLI/Skill/平台公钥经 `/_api/tool/*`（签名）登录后控制台内下载——`_bootstrap/` 目录仅为工具源，**无静态匿名分发面**（R8 裁决）。
 
-注意：`/_api/projects` 等已认证端点对**任意已登记发布者**返回全平台项目清单（含 user 名）——这是设计取舍（Demo 展示平台的团队内部可见性），不是漏洞；如需强隔离请自行在 Caddy 层收紧。Redis 浏览的按用户隔离（请求 db ∈ 本人项目 redisdb 集合）是**界面级/协作级**隔离（防误看防误操作），非安全边界——容器内应用持有原始连接仍可 SELECT 任意库。
+注意：`/_api/projects` 只返回本人项目（管理员经 `/_api/admin/projects` 取跨用户全量）——跨用户项目名/账号名不对普通登录者枚举。Redis 浏览的按用户隔离（请求 db ∈ 本人项目 redisdb 集合）是**界面级/协作级**隔离（防误看防误操作），非安全边界——容器内应用持有原始连接仍可 SELECT 任意库。
 
 ---
 
@@ -212,7 +207,7 @@ SR-SIG1 签名已覆盖 `sha256(body)`（整个信封的哈希）——Encrypt-t
 | 6 | 枚举端点/项目名/版本/账号 | 零信息暴露（§5）：未认证一律 404 E_AUTH；项目名默认随机 8 位；登录防枚举：未知用户 dummy 记录同构响应（残差见 §1.3） |
 | 7 | 越权操作他人展项 | user 归属校验（user_check）：签名 user ≠ 项目 user → E_NOTFOUND；镜像删除 `<user>/` 前缀归属校验 |
 | 8 | 发布者钥匙泄露 | 多钥匙 + 单钥匙吊销（`key-rm`/`key-selfrm`），不影响同 user 其他钥匙；keep-N GC 自动收尾遗忘设备 |
-| 9 | 管理员钥匙泄露 | 分层授权面小；可用另一管理员钥匙远程吊销；吊销即失效（无令牌缓存） |
+| 9 | 管理员账号凭据泄露 | 分层授权面小；可用另一管理员账号远程吊销/收权；吊销即失效（无令牌缓存）；删单把钥匙不影响账号级判定，须 `user-admin --admin false` 或 `user-revoke` |
 | 10 | 平台私钥泄露（历史信封解密） | 轮换平台 RSA 对即可切断；下行备份客户端公钥封装，不受影响 |
 | 11 | registry 凭据泄露 | bcrypt（cost 10）入 htpasswd；`user-revoke` 同步使 registry 登录失效；registry 仅经 Caddy `/v2` 暴露（内网面）；与登录密码独立发放、独立轮换（§1.4） |
 | 12 | 恶意镜像攻击平台 | 镜像以受限资源跑（--memory/--cpus、host 端口仅 127.0.0.1）；但展项容器对共享网络内的 sr-postgres/sr-redis 可达——发布者凭证隔离，非网络隔离（已知边界） |
@@ -230,7 +225,7 @@ SR-SIG1 签名已覆盖 `sha256(body)`（整个信封的哈希）——Encrypt-t
 
 | 密钥 | 位置 | 用途 | 轮换方式 |
 |---|---|---|---|
-| 发布者 Ed25519 私钥 | `~/.showroom/id_ed25519`（0600） | SR-SIG1 签名 | 重新 `showroom login` 落新钥匙自动重绑；CI：`keygen --force` + 重新登记 |
+| 发布者 Ed25519 私钥 | `~/.showroom/id_ed25519`（0600） | SR-SIG1 签名 | 重新 `showroom login` 落新钥匙自动重绑（CI/机器用户同款） |
 | 发布者公钥 | 服务端 `state/tokens/<user>/<kid>.pub` | 验签 | `key-rm` 删旧 / `user-add` 加新；`.bound` 钥匙 keep-N GC |
 | 服务端 OPRF key | `state/opaque.key`（0600） | OPAQUE 登录 | 删除后重启 serve 自动重生成（**会使全部登录密码失效**，需全员补发——仅灾备用） |
 | OPAQUE 注册记录 | `state/users/<u>/pass.opaque`（0600） | 校验登录密码（无离线可验证哈希） | `user-passwd` / `passwd-set` 补发（不动既有钥匙） |

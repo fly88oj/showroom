@@ -64,9 +64,9 @@ sudo showroomctl user-add <USER> --gen-password --admin
 # 一次性返回两把密码：登录初始密码（OPAQUE 保护）与 registry 密码——分开发放，均仅显示一次
 ```
 
-机器用户（CI）专家路径：`--pubkey 'ed25519:<公钥串>'` 替代密码（发布者机器 `showroom keygen` 生成）。
+CI / 机器用户与日常登录一致：用账号密码走 `showroom login`（B7 统一账号密码认证，无公钥预登记路径）。
 
-把三样东西交给发布者：**登录初始密码**（控制台一步登录 / CLI `showroom login` 用）、**registry 密码**（快通道 push 备用；`login` 会自动拉取）、`/srv/showroom/state/platform_rsa.pub`（发布者存为 `~/.showroom/platform_rsa.pub`，import 加密通道用——公钥文件仍需手工分发）。
+把三样东西交给发布者：**登录初始密码**（控制台一步登录 / CLI `showroom login` 用）、**registry 密码**（快通道 push 备用；`login` 会自动拉取）、`/srv/showroom/state/platform_rsa.pub`（发布者存为 `~/.showroom/platform_rsa.pub`，import 加密通道用）。平台公钥无需手工分发文件：控制台登录后自动配置（浏览器端 whoami 自动取并缓存），CLI 侧在控制台帮助页「工具下载」下载后放入 `~/.showroom/` 即可。
 
 ## 4. 验证
 
@@ -213,12 +213,14 @@ sudo systemctl enable --now showroom-reconcile.timer showroom-autoheal.timer \
 	handle_path /_console/* {
 		root * /srv/showroom/_console
 		file_server {
-			precompressed zstd
+			precompressed zstd gzip
 		}
 	}
 	# 展项路由（showroomctl 按项目生成到 state/routes/<project>.caddy 并 reload）
 	import /srv/showroom/state/routes/*.caddy
 	# 根路径与未匹配路径一律 404（零信息暴露：不重定向、不暴露站点信息）
+	# （R8 裁决：_bootstrap/ 目录仅作 /_api/tool 工具源——CLI/Skill/公钥登录后控制台内
+	#   下载，无静态匿名分发面，不进任何站点）
 }
 
 # ————— site A：内网面 —————
@@ -228,23 +230,16 @@ http://showroom-lan.your-host {
 	handle /v2/* {
 		reverse_proxy 127.0.0.1:5000
 	}
-	# /_bootstrap：CLI / Skill 分发（仅内网面提供，公网面 404）
-	handle_path /_bootstrap/* {
-		root * /srv/showroom/_bootstrap
-		file_server
-	}
 }
 
-# ————— site B：公网面 —————
-# 恒听 :8080 纯端口匹配（frp 等公网隧道流量命中的站点——隧道流量 Host 是公网 IP，
-# 按 Host 匹配会漏；frpc 转发目标 = 127.0.0.1:8080）。
-# 公网发布走加密 import 通道，不放 /v2；/_bootstrap 返回 404。
-http://:8080 {
+# ————— site B：公网面（frp 等公网隧道流量命中的站点）—————
+# 公网发布走加密 import 通道，不放 /v2。
+http://:8080, :8081 {
 	import showroom-app
 }
 ```
 
-控制台静态资源与预压缩：控制台 wasm 产物必须与 `showroom-common` 垫片源码同提交更新（贡献纪律，见 [CONTRIBUTING.md](../CONTRIBUTING.md)）；`_console/` 更新后重跑 `/usr/local/bin/showroom-precompress`（setup 已安装并首跑）。
+控制台静态资源与预压缩：控制台 wasm 产物必须与 `showroom-common` 垫片源码同提交更新（贡献纪律，见 [CONTRIBUTING.md](../CONTRIBUTING.md)）；`_console/` 更新后重跑 `/usr/local/bin/showroom-precompress`（setup 已安装并首跑；zstd+gzip 双格式预压缩——代理链路 Accept-Encoding 常被收敛为 gzip）。
 
 ## 附录 B：调优参数表
 
