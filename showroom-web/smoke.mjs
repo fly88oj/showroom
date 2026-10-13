@@ -22,7 +22,7 @@ import {
   generateKeyPairSync, privateDecrypt, constants as rc, verify as edVerify,
 } from 'node:crypto';
 
-const wasmUrl = new URL('./dist/showroom_bg.wasm', import.meta.url);
+const wasmUrl = new URL('./console/public/showroom_bg.wasm', import.meta.url);
 const ex = (await WebAssembly.instantiate(readFileSync(wasmUrl), {})).instance.exports;
 const enc = new TextEncoder(), dec = new TextDecoder();
 // wasm memory 可能随内部分配增长而换代：任何 wasm 调用之后都要重取 view

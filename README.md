@@ -25,7 +25,7 @@ showroom deploy v1          # 推镜像 + 发布 + 打印 URL，一步到位
 | 磁盘准入与镜像管理 | 上传前按 `膨胀因子×密封体积 ≤ 可用−预留` 准入（`showroom space` 三数可见）；`showroom rm-image` 删除即内联 GC **立即**回收空间，闭环「上传不够→删除→立即可传」 |
 | 共享数据库维护 | 每个项目独立供给 PostgreSQL 库与 Redis 逻辑库，凭据自动注入容器；发布者经 CLI/控制台自助执行 SQL、预览表、加密备份与恢复（zstd-19 压缩、端到端加密） |
 | 主机自举 | `showroomctl setup --apply` 一条命令幂等收敛目录/中间件/Caddy/systemd/调优（声明式 host.env）；`middleware` 子命令与 Web 主机编排面板支持两段式变更与 Redis 扩容确认流 |
-| WASM 控制台 | 纯静态单页控制台（Rust 编译 wasm32，无 wasm-bindgen 依赖），浏览器本地完成 OPAQUE 登录、签名与加解密，密钥不出本机；CLI 与 Web 走同一套密码学（showroom-common） |
+| WASM 控制台 | 纯静态单页控制台（React + shadcn/ui，Vite 构建；密码学层为 Rust 编译 wasm32，无 wasm-bindgen 依赖），浏览器本地完成 OPAQUE 登录、签名与加解密，密钥不出本机；CLI 与 Web 走同一套密码学（showroom-common） |
 
 ## 架构一览
 
@@ -78,7 +78,7 @@ showroom deploy demo v1                          # push + publish --wait + 打�
 # ══════════════════════════════
 ```
 
-不想装 CLI？打开 `http://<your-host>/_console/` 用账号+密码登录：登录即见项目列表（自动加载、中文状态、可点对外 URL），「发布」页单表单双镜像源一键发布，项目行内看实时日志（行抽屉）、管数据库、浏览 Redis——显式刷新按钮零残留，数据全部自动加载：
+不想装 CLI？打开 `http://<your-host>/_console/` 用账号+密码登录：登录即见项目列表（自动加载、中文状态、可点对外 URL），「发布」页单表单双镜像源一键发布，项目行内看实时日志（弹窗）、管数据库、浏览 Redis——显式刷新按钮零残留，数据全部自动加载：
 
 <!-- 控制台截图位：docs/assets/console-overview.png（待补；§17 五标签布局：我的项目/发布/镜像库/数据/帮助） -->
 

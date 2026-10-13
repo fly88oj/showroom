@@ -34,7 +34,7 @@
    - `target/`、`*.zst`（预压缩产物）、`dist/` 之外的生成物、临时脚本；
    - **任何密钥/密码/令牌/凭据**（提交前对 diff 执行敏感词扫描，见检查单）；
    - 调试残留（`eprintln!` 调试输出、注释掉的死代码）。
-4. **例外**：`showroom-web/dist/showroom_bg.wasm` 与 `index.html` 允许入库（部署通道依赖静态产物），但**必须与 shim/页面源码同一提交内重新构建**，正文注明"产物已重建"。
+4. **例外**：`showroom-web/console/dist/`（Vite 构建产物，含 `showroom_bg.wasm`）允许入库（部署通道依赖静态产物），但**必须与 shim/前端源码同一提交内重新构建**（`cd showroom-web/console && npm run build`），正文注明"产物已重建"。wasm 从 `console/public/showroom_bg.wasm` 复制，随垫片源码同提交更新。
 5. 提交粒度以"可独立 revert 且不破坏其余功能"为准绳。
 
 ## 提交前检查单（缺一不可）
