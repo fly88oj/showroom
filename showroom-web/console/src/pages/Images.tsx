@@ -13,7 +13,8 @@ import { toast } from "sonner";
 import { useApp, apiFailToast } from "@/lib/app";
 import { api } from "@/lib/api";
 import { pemReady } from "@/lib/state";
-import { freshUpload, latestUpId, loadUpSession, resumeUploadCore, sealedTotal, uploadPayload } from "@/lib/upload";
+import { freshUpload, latestUpId, loadUpSession, resumeUploadCore } from "@/lib/upload";
+import { sealedTotal, uploadPayload } from "@/lib/envelope";
 import { dataInvalidate } from "@/lib/state";
 
 /** 镜像库：清单删除（内联 GC）+ 上传入库（真加密信封分片链路）+ 断点续传 + 空间条。
@@ -121,9 +122,6 @@ export function Images() {
     }
   }
 
-  const pct = space.totalGb > 0
-    ? Math.min(99, ((space.totalGb - space.availGb) / space.totalGb) * 100)
-    : 0;
 
   return (
     <div className="flex flex-col gap-4">
@@ -209,7 +207,6 @@ export function Images() {
         <div className="text-xs text-muted-foreground" aria-live="polite">
           可用空间：{space.availGb > 0 ? `${space.availGb.toFixed(1)} GB（预留 ${space.reserveGb} GB）` : "空间信息不可用"}
         </div>
-        {space.totalGb > 0 && <Progress value={pct} />}
       </div>
 
       <Confirm

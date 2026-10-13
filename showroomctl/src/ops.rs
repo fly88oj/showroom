@@ -1246,7 +1246,7 @@ mod tests {
     fn user_list_aggregation() {
         let root = troot("list");
         let a_admin = put_key(&root, "alice", true);
-        let a_plain = put_key(&root, "alice", false);
+        let _a_plain = put_key(&root, "alice", false);
         put_key(&root, "bob", false);
         fs::create_dir_all(state::tokens_dir(&root, "empty")).unwrap(); // 钥匙删光的账号
         // 两个项目归 alice、一个归 bob（user_list 只读 conf，不碰 docker）

@@ -82,7 +82,7 @@ export function Data({ onOpenSettings }: { onOpenSettings: () => void }) {
   const [sql, setSql] = useState("");
   const [sqlBusy, setSqlBusy] = useState(false);
   const [sqlResult, setSqlResult] = useState<SqlPanel | null>(null);
-  const [dangerSql, setDangerSql] = useState<string[] | null>(null);
+  const [dangerSql, setDangerSql] = useState<{ stmts: string[]; from: number } | null>(null); // 确认后从 from 续发（前序已执行不重放）
 
   // —— 备份/恢复/重置 ——
   const [restoreConfirm, setRestoreConfirm] = useState(false);
@@ -163,8 +163,9 @@ export function Data({ onOpenSettings }: { onOpenSettings: () => void }) {
     await execSql(stmts);
   }
 
-  async function execSql(stmts: string[], confirmed = false) {
-    setSqlBusy(true); setSqlResult(null);
+  async function execSql(stmtsIn: string[], from = 0, confirmed = false) {
+    setSqlBusy(true); setSqlResult(null); setDangerSql(null);
+    const stmts = stmtsIn.slice(from); // 确认重放只发未执行的剩余语句（P1：前序不双执行）
     const info: string[] = [];
     const tbs: SqlPanel["tables"] = [];
     for (let i = 0; i < stmts.length; i++) {
@@ -180,10 +181,10 @@ export function Data({ onOpenSettings }: { onOpenSettings: () => void }) {
         }
       } catch (e) {
         const err = e as { error?: string; msg?: string };
-        // 谓词单源：服务端 sql_needs_confirm 判定危险（E_STATE）→ 弹层确认后 confirm:true 重发
-        if (err.error === "E_STATE" && (err.msg || "").includes("confirm") && !confirmed) {
+        // 谓词单源：服务端 sql_needs_confirm 判定危险（E_CONFIRM）→ 弹层确认后从断点续发
+        if (err.error === "E_CONFIRM" && !confirmed) {
           setSqlBusy(false);
-          setDangerSql(stmts);
+          setDangerSql({ stmts: stmtsIn, from: from + i });
           return;
         }
         info.push(`语句 ${i + 1} 失败：${err.msg ?? err.error ?? "网络异常"}`);
@@ -602,7 +603,7 @@ export function Data({ onOpenSettings }: { onOpenSettings: () => void }) {
       <Confirm
         open={!!dangerSql} onOpenChange={(v) => !v && setDangerSql(null)}
         title="确认执行危险 SQL？" confirmText="执行" busy={sqlBusy}
-        onConfirm={() => { if (dangerSql) void execSql(dangerSql, true); }}
+        onConfirm={() => { if (dangerSql) void execSql(dangerSql.stmts, dangerSql.from, true); }}
       >
         本次执行包含 DROP / DELETE / TRUNCATE / ALTER 语句，数据变更不可自动回滚（E_STATE：危险 SQL 需确认）；如需保留现况请先「备份下载」。
       </Confirm>

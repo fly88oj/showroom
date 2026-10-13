@@ -187,7 +187,7 @@ fn main() {
         match execute(&cli) {
             Ok(()) => break,
             Err(e) => {
-                let err_str = format!("{e}");
+                let err_str = e.to_string();
                 if !retried_reauth && crate::api::is_key_expired(&err_str) {
                     retried_reauth = true;
                     eprintln!("\n━━━ 本机密钥已过期（30 分钟无活动自动过期）━━━");
@@ -310,7 +310,7 @@ showroom rm <项目> --yes             # 删除（破坏性：必须先向用户
 ## 4. 数据库维护（演示数据/Schema 自助管理）
 
 ```bash
-showroom db sql <项目> [--file f.sql] [--confirm]     # DROP/TRUNCATE/DELETE 需 --confirm
+showroom db sql <项目> [--file f.sql] [--confirm]     # DROP/TRUNCATE/DELETE/ALTER 需 --confirm
 showroom db tables <项目>
 showroom db preview <项目> <表> [--limit 50]
 showroom db dump <项目> -o x.dump                     # zstd-19 高压缩加密备份

@@ -1,7 +1,7 @@
 // —— auth.ts：OPAQUE 客户端（登录/改密）+ 密钥无感生成 + 60s 心跳（移植自 dist/js/auth.mjs）——
-import { Buffer_fromHex, dec, enc, toHex } from "@/lib/bytes";
+import { Buffer_fromHex, enc, toHex } from "@/lib/bytes";
 import { api, checkResp, signHeaderPtr } from "@/lib/api";
-import { ex, mem, put, shimCStr, unput } from "@/lib/wasm";
+import { ex, mem, put, readCStr, shimCStr, unput } from "@/lib/wasm";
 import { state } from "@/lib/state";
 
 function loadSeed() {
@@ -54,22 +54,12 @@ export function opaqueFinish(sid: number, pass: string, ke2: string): string {
     const cap = 2048, out = (ex.sr_alloc as (n: number) => number)(cap);
     const r = (ex.sr_login_finish as (a: number, b: number, c: number, d: number, e: number, f: number, g: number) => number)(sid, pp, pl, kp, kl, out, cap);
     unput(pp, pl); unput(kp, kl);
-    const ke3 = r > 0 ? (require_readCStr())(out, r) : null;
+    const ke3 = r > 0 ? readCStr(out, r) : null;
     unput(out, cap);
     if (r === -7) throw { error: "E_PW_LOCAL", msg: "" };
     if (!ke3) throw { error: "E_NET", msg: `login_finish 失败（${r}）` };
     return ke3;
   }
-}
-
-// readCStr 延迟取用（wasm.ts 的 mem 视图需在调用后重取；直接 import readCStr 亦可，此处保持同构）
-function require_readCStr() {
-  return (p: number, written: number) => {
-    const m = mem();
-    let e = p;
-    while (e < p + written && m[e] !== 0) e++;
-    return dec.decode(m.subarray(p, e));
-  };
 }
 
 export function opaqueEnd(_sid: number) { /* 真垫片会话在 finish 时一次性自弃 */ }
@@ -94,7 +84,7 @@ export function opaqueRegFinish(sid: number, pass: string, m2: string): string {
     const cap = 4096, out = (ex.sr_alloc as (n: number) => number)(cap);
     const r = (ex.sr_reg_finish as (a: number, b: number, c: number, d: number, e: number, f: number, g: number) => number)(sid, pp, pl, mp, ml, out, cap);
     unput(pp, pl); unput(mp, ml);
-    const record = r > 0 ? require_readCStr()(out, r) : null;
+    const record = r > 0 ? readCStr(out, r) : null;
     unput(out, cap);
     if (!record) throw { error: "E_NET", msg: `reg_finish 失败（${r}）` };
     return record;

@@ -31,20 +31,9 @@ const dataAt: Record<string, number> = { projects: 0, images: 0, space: 0 };
 export const dataFresh = (k: string) => Date.now() - dataAt[k] < DATA_TTL[k];
 export const dataMark = (k: string) => {
   dataAt[k] = Date.now();
-  retryCounts[k] = 0;
 };
 export const dataInvalidate = (...ks: string[]) => ks.forEach((k) => { dataAt[k] = 0; });
 
-// 失败 3 秒自动重试 1 次；此后每 10s 慢速兜底重试（≤7 次）直至恢复
-const retryCounts: Record<string, number> = {};
-export function retryOnce(key: string, fn: () => void, delay = 3000) {
-  const n = retryCounts[key] || 0;
-  if (n >= 7) return;
-  retryCounts[key] = n + 1;
-  setTimeout(() => {
-    if (state.loggedIn) fn();
-  }, n === 0 ? delay : 10000);
-}
 
 // —— 密钥状态（localStorage：sr.seed hex64 / sr.user / sr.pempub）——
 export const state = {

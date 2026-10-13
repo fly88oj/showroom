@@ -70,27 +70,11 @@ interface UserRow {
   keys?: { kid: string; since: number }[];
 }
 
-function UsersPanel() {
-  const [users, setUsers] = useState<UserRow[] | null>(null);
-  const [addOpen, setAddOpen] = useState(false);
-  const [psTarget, setPsTarget] = useState<string | null>(null);
-  const [resetConfirm, setResetConfirm] = useState<string | null>(null); // 重置确认目标账号
-  const [psPw, setPsPw] = useState("");
+/** 确认动作三件套（账号/全部项目两面板共用）。 */
+function useConfirmAct(load: () => Promise<void>) {
   const [confirmAct, setConfirmAct] = useState<{ title: string; body: string; run: () => Promise<void> } | null>(null);
   const [busy, setBusy] = useState(false);
-
-  const load = useCallback(async () => {
-    try {
-      const j = (await api("GET", "/_api/admin/users")) as { users?: UserRow[] };
-      setUsers(j.users || []);
-    } catch {
-      setUsers([]);
-    }
-  }, []);
-
-  useEffect(() => { void load(); }, [load]);
-
-  async function runConfirm() {
+  const runConfirm = useCallback(async () => {
     if (!confirmAct) return;
     setBusy(true);
     try {
@@ -102,7 +86,27 @@ function UsersPanel() {
     } finally {
       setBusy(false);
     }
-  }
+  }, [confirmAct, load]);
+  return { confirmAct, setConfirmAct, busy, runConfirm };
+}
+
+function UsersPanel() {
+  const [users, setUsers] = useState<UserRow[] | null>(null);
+  const [addOpen, setAddOpen] = useState(false);
+  const [psTarget, setPsTarget] = useState<string | null>(null);
+  const [resetConfirm, setResetConfirm] = useState<string | null>(null); // 重置确认目标账号
+  const [psPw, setPsPw] = useState("");
+  const load = useCallback(async () => {
+    try {
+      const j = (await api("GET", "/_api/admin/users")) as { users?: UserRow[] };
+      setUsers(j.users || []);
+    } catch {
+      setUsers([]);
+    }
+  }, []);
+  const { confirmAct, setConfirmAct, busy, runConfirm } = useConfirmAct(load);
+
+  useEffect(() => { void load(); }, [load]);
 
   function adminAction(u: UserRow, act: "useradmin" | "userunadmin" | "revoke" | "keyrm", kid?: string) {
     const defs = {
@@ -346,8 +350,6 @@ function PasswdSetDialog({ user, pw, onClose }: { user: string | null; pw: strin
 
 function AllProjectsPanel() {
   const [rows, setRows] = useState<{ project: string; user: string; status: string; updated: number }[] | null>(null);
-  const [confirmAct, setConfirmAct] = useState<{ title: string; body: string; run: () => Promise<void> } | null>(null);
-  const [busy, setBusy] = useState(false);
 
   const load = useCallback(async () => {
     try {
@@ -355,19 +357,8 @@ function AllProjectsPanel() {
       setRows((j.projects || []).map((p) => ({ project: p.project, user: p.user || "—", status: p.status || "", updated: Number(p.updated) || 0 })));
     } catch { setRows([]); }
   }, []);
+  const { confirmAct, setConfirmAct, busy, runConfirm } = useConfirmAct(load);
   useEffect(() => { void load(); }, [load]);
-
-  async function runConfirm() {
-    if (!confirmAct) return;
-    setBusy(true);
-    try {
-      await confirmAct.run();
-      setConfirmAct(null);
-      await load();
-    } catch (e) {
-      toast.error(`操作失败：${(e as { msg?: string }).msg ?? ""}`);
-    } finally { setBusy(false); }
-  }
 
   function act(owner: string, project: string, kind: "start" | "stop" | "rm") {
     const CN = { start: "启动", stop: "停止", rm: "删除" } as const;
@@ -597,11 +588,8 @@ function HostPanel() {
     if (!host) return;
     setApplyBusy(true);
     try {
-      const j = (await api("POST", "/_api/admin/host", postBody(false))) as { actions?: HostState2[]; impact?: { removed_middleware?: string[]; affected_projects?: string[] } };
-      setReview({
-        actions: (j.actions || []) as never,
-        impact: j.impact || {},
-      });
+      const j = (await api("POST", "/_api/admin/host", postBody(false))) as NonNullable<typeof review>;
+      setReview({ actions: j.actions || [], impact: j.impact || {} });
       setReport(null);
     } catch (e) {
       toast.error(`查看变更（预演）失败：${(e as { msg?: string }).msg ?? ""}`);
@@ -624,8 +612,6 @@ function HostPanel() {
       toast.error(`确认执行失败：${(e as { msg?: string }).msg ?? ""}`);
     } finally { setApplyBusy(false); }
   }
-
-  interface HostState2 { kind?: string; target?: string; detail?: string; needed?: boolean }
 
   const pool = host?.redis_pool;
   const poolWarn = !!(pool && pool.total && pool.suggest_expand);

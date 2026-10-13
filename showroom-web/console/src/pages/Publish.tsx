@@ -19,7 +19,8 @@ import { api } from "@/lib/api";
 import { useApp, apiFailToast, externalUrl } from "@/lib/app";
 import { checkProj, pemReady } from "@/lib/state";
 import { randAlnum } from "@/lib/bytes";
-import { freshUpload, resumeUploadCore, uploadPayload } from "@/lib/upload";
+import { freshUpload, resumeUploadCore } from "@/lib/upload";
+import { uploadPayload } from "@/lib/envelope";
 
 type Phase = "idle" | "compress" | "upload" | "publish" | "done" | "fail";
 type StepState = "wait" | "run" | "ok" | "skip" | "fail";

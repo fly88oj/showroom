@@ -134,7 +134,7 @@ mod sql_csv_tests {
         assert!(sql_needs_confirm("TRUNCATE t"));
         assert!(sql_needs_confirm("alter table t add c int")); // 用户裁决追加
         assert!(!sql_needs_confirm("SELECT * FROM t"));
-        assert!(!sql_needs_confirm("SELECT 'delete' FROM t") == false); // 字面量保守触发（文档化行为）
+        assert!(sql_needs_confirm("SELECT 'delete' FROM t")); // 字面量保守触发（文档化行为）
     }
 
     #[test]
@@ -152,8 +152,8 @@ mod sql_csv_tests {
 pub fn sql(root: &Path, p: &str, sql: &str, confirm: bool) -> R<SqlResult> {
     if !confirm && sql_needs_confirm(sql) {
         return Err(ApiError::new(
-            "E_STATE",
-            "语句含 DROP/TRUNCATE/DELETE：需 confirm=true 二次确认后重发",
+            "E_CONFIRM", // 专用码：控制台据此弹确认层（勿用文案匹配——文案会漂移）
+            "语句含 DROP/TRUNCATE/DELETE/ALTER：需确认后重发（CLI 加 --confirm）",
         ));
     }
     let db = resolve_db(p, legacyslot_of(root, p).as_deref())?.0;
@@ -576,6 +576,7 @@ mod tests {
             "delete from t",
             "  DELETE\nFROM t",
             "ALTER TABLE t DROP CONSTRAINT c",
+            "ALTER TABLE t ADD COLUMN c int", // 用户裁决：裸 ALTER 亦需确认
             "-- c\nDROP SCHEMA x CASCADE",
             "SELECT 'x'; DELETE FROM t",
         ] {
@@ -587,10 +588,10 @@ mod tests {
             "INSERT INTO t VALUES (1)",
             "UPDATE t SET a = 1",
             "CREATE TABLE t2 (id int)",
-            "ALTER TABLE t ADD COLUMN dropped_at int",
             "SELECT dropped_at, deleted_flag FROM t",
             "GRANT SELECT ON t TO u",
             "explain delete_plan(t)",
+            "SELECT alter_plan(t)", // 标识词缀不误报（alter_plan 是函数名）
         ] {
             assert!(!sql_needs_confirm(no), "{no:?} 不应触发");
         }

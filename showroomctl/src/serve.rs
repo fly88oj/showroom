@@ -1614,7 +1614,7 @@ mod tests {
         assert_eq!(redis_db_guard(&s, &qq("3"), "nobody").unwrap_err().code, "E_AUTH");
 
         // admin 钥匙放开全量（含别人的 2 与池内任意 255）；超池/非数字仍 E_NAME
-        let (admin_kid, _) = mk_key_user(&root, "root", true);
+        let (_admin_kid, _) = mk_key_user(&root, "root", true);
         assert_eq!(redis_db_guard(&s, &qq("2"), "root").unwrap(), 2);
         assert_eq!(redis_db_guard(&s, &qq("255"), "root").unwrap(), 255);
         assert_eq!(redis_db_guard(&s, &qq("256"), "root").unwrap_err().code, "E_NAME");
@@ -1622,7 +1622,7 @@ mod tests {
         assert_eq!(redis_db_guard(&s, &HashMap::new(), "root").unwrap_err().code, "E_NAME");
 
         // 非管理员账号的钥匙不越权（无 E_AUTH 与 404 之外的信息差）
-        let (plain_kid, _) = mk_key_user(&root, "carl", false);
+        let (_plain_kid, _) = mk_key_user(&root, "carl", false);
         assert_eq!(redis_db_guard(&s, &qq("3"), "carl").unwrap_err().code, "E_AUTH");
 
         // 小池（REDIS_DBS=8）：池内 7 放行、池外 15 → E_NAME（alice 名下 db 7 < 8 仍可用）
@@ -1654,7 +1654,7 @@ mod tests {
         assert_eq!(image_guard(&s, "alice/demo:v1", "nobody").unwrap_err().code, "E_AUTH");
 
         // admin 钥匙放行他人命名空间
-        let (admin_kid, _) = mk_key_user(&root, "root", true);
+        let (_admin_kid, _) = mk_key_user(&root, "root", true);
         assert_eq!(
             image_guard(&s, "bob/demo:v1", "root").unwrap(),
             ("bob/demo".into(), "v1".into())

@@ -869,10 +869,6 @@ pub fn plan_bound_gc(keys: &[(String, u64)], keep: usize) -> Vec<String> {
     v.into_iter().take(del).map(|(kid, _)| kid).collect()
 }
 
-/// 密码绑定钥匙 GC（plan-16 §2.2 key-bind 步骤）：全部 .bound 钥匙（含刚绑的新钥匙）
-/// 按 .pub mtime 保留最近 keep 把，超出的旧钥匙整组清除（.pub/.bound/.admin）。
-/// 幂等；无 .bound 标记的公钥不受影响；exclude（当前刚绑的 kid）从删除名单摘除。
-
 /// 心跳续期：whoami 等显式心跳调用时 touch .bound 文件（mtime=now）。
 /// 30 分钟无心跳 → auth 时检测到过期 → 吊销（删 .pub + .bound）→ E_AUTH。
 pub const BOUND_KEY_TTL_SECS: u64 = 1800;

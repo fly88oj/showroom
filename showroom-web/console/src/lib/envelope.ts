@@ -2,11 +2,13 @@
 // 上一轮评审（design#3/#4）：seal/open/zstd 的 wasm 内存手动协议（put/unput/容量扩容）
 // 只在本模块出现，调用方（upload/Data）只见 Blob/Uint8Array 深接口。
 import { enc } from "@/lib/bytes";
-import { alloc, ex, mem, put, unput } from "@/lib/wasm";
+import { alloc, ex, mem, put, shimCStr, unput } from "@/lib/wasm";
 import { CHUNK, NONCE, TAG, WRAP, SEG } from "@/lib/state";
 
 export const sealedTotal = (n: number) => WRAP + n + Math.ceil(n / SEG) * (NONCE + TAG);
-export const ZSTD_LEVEL = 19;
+/** 尾段输出量（重放计数用；SEG 整除时无尾段明文 → 0）。 */
+export const flushLen = (plainBytes: number) => (plainBytes % SEG) ? (plainBytes % SEG) + NONCE + TAG : 0;
+const ZSTD_LEVEL = 19;
 
 /** seal 会话：begin（PEM+种子）→ pushSlice/pushFlush → end。 */
 export function sealBegin(pem: string, seedBytes: Uint8Array): number {
@@ -41,6 +43,31 @@ export function sealEnd(sid: number) {
   (ex.sr_seal_end as (s: number) => number)(sid);
 }
 
+/** seal 会话深接口（与 openSession 对称）：push/flush 返回已拷贝密文，调用方零 wasm 义务。 */
+export function sealSession(pem: string, seedBytes: Uint8Array) {
+  const sid = sealBegin(pem, seedBytes);
+  return {
+    /** 推入明文分片 → 密文段（可能 null：未跨段界）。 */
+    push(bytes: Uint8Array): Uint8Array | null {
+      const [w, ob, cap] = pushSlice(sid, bytes);
+      const out = w > 0 ? new Uint8Array(mem().subarray(ob, ob + w)) : null;
+      unput(ob, cap);
+      return out;
+    },
+    /** 流结束尾段（可能 null）。 */
+    flush(): Uint8Array | null {
+      const [w, ob, cap] = pushFlush(sid);
+      const out = w > 0 ? new Uint8Array(mem().subarray(ob, ob + w)) : null;
+      unput(ob, cap);
+      return out;
+    },
+    /** 会话始终收尾（异常路径也须调用——内部 sr_seal_end 幂等）。 */
+    end() { sealEnd(sid); },
+    /** 原始句柄（分片签名上传的零拷贝路径专用：postChunk 直读 wasm 内存）。 */
+    raw: sid,
+  };
+}
+
 /** 信封流式解封会话（§2）：分片任意边界，内部按段缓冲；每段输出立即拷贝脱离 wasm 内存。 */
 export function openSession(privPem: string) {
   const [pp, pl] = put(enc.encode(privPem));
@@ -63,19 +90,21 @@ export function openSession(privPem: string) {
   };
 }
 
-/** 把任意 Blob 密封为完整信封字节（db-restore 上行用；不联网）。 */
+/** 把任意 Blob 密封为完整信封字节（db-restore 上行用；不联网；异常也收尾防会话泄漏）。 */
 export async function sealToEnvelope(pem: string, payload: Blob): Promise<Uint8Array> {
-  const sid = sealBegin(pem, crypto.getRandomValues(new Uint8Array(32)));
+  const sess = sealSession(pem, crypto.getRandomValues(new Uint8Array(32)));
   const parts: Uint8Array[] = [];
-  const C = 4 * 1024 * 1024;
-  for (let o = 0; o < payload.size; o += C) {
-    const bytes = new Uint8Array(await payload.slice(o, Math.min(o + C, payload.size)).arrayBuffer());
-    const [w, ob, cap] = pushSlice(sid, bytes);
-    parts.push(new Uint8Array(mem().subarray(ob, ob + w)));
-    unput(ob, cap);
+  try {
+    for (let o = 0; o < payload.size; o += SEG) {
+      const bytes = new Uint8Array(await payload.slice(o, Math.min(o + SEG, payload.size)).arrayBuffer());
+      const out = sess.push(bytes);
+      if (out) parts.push(out);
+    }
+    const tail = sess.flush();
+    if (tail) parts.push(tail);
+  } finally {
+    sess.end();
   }
-  { const [w, ob, cap] = pushFlush(sid); parts.push(new Uint8Array(mem().subarray(ob, ob + w))); unput(ob, cap); }
-  sealEnd(sid);
   const envelope = new Uint8Array(parts.reduce((n, p) => n + p.length, 0));
   let off = 0;
   for (const p of parts) { envelope.set(p, off); off += p.length; }
@@ -122,7 +151,7 @@ export async function uploadPayload(file: File, note?: (done: number, raw: numbe
 
 /** 一次性 RSA-3072 密钥对（备份下载用）：WebCrypto 优先；非安全上下文（局域网 HTTP）回落 wasm 垫片。 */
 import { derToPem } from "@/lib/bytes";
-import { shimCStr, ex as _ex } from "@/lib/wasm";
+
 export async function oneTimeRsaPemPair(): Promise<{ pub: string; priv: string }> {
   if (crypto.subtle) {
     try {
@@ -135,10 +164,10 @@ export async function oneTimeRsaPemPair(): Promise<{ pub: string; priv: string }
       return { pub: derToPem(spki, "PUBLIC KEY"), priv: derToPem(pkcs8, "PRIVATE KEY") };
     } catch { /* 落到 wasm 垫片路径 */ }
   }
-  const sid = (_ex.sr_keygen_rsa as () => number)();
+  const sid = (ex.sr_keygen_rsa as () => number)();
   if (sid <= 0) throw { error: "E_NET", msg: `下载准备失败（${sid}）` };
   return {
-    pub: shimCStr((p, c) => (_ex.sr_rsa_pub_pem as (a: number, b: number, c: number) => number)(sid, p, c), 1024),
-    priv: shimCStr((p, c) => (_ex.sr_rsa_priv_pem as (a: number, b: number, c: number) => number)(sid, p, c), 4096),
+    pub: shimCStr((p, c) => (ex.sr_rsa_pub_pem as (a: number, b: number, c: number) => number)(sid, p, c), 1024),
+    priv: shimCStr((p, c) => (ex.sr_rsa_priv_pem as (a: number, b: number, c: number) => number)(sid, p, c), 4096),
   };
 }

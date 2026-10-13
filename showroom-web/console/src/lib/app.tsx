@@ -24,9 +24,12 @@ export interface Project {
 }
 
 export interface ImageItem { name: string }
-export interface SpaceInfo { availGb: number; totalGb: number; reserveGb: number }
+export interface SpaceInfo { availGb: number; reserveGb: number }
 
 export interface Session { user: string; admin: boolean }
+
+/** 行内在途标记类型（§4）：发布中/上传中/60s 重建中·异常滚动窗口。 */
+export type MarkKind = "publishing" | "uploading" | "rebuilding" | "failed";
 
 // —— 三层 context 接口（useApp 聚合成既有 AppState 形状，页面零改动）——
 interface SessionState {
@@ -52,8 +55,8 @@ interface DataState {
   rmImage: (name: string) => Promise<void>;
   space: SpaceInfo;
   refreshSpace: (force?: boolean) => Promise<void>;
-  marks: Record<string, { kind: "publishing" | "uploading" | "rebuilding" | "failed"; until: number }>;
-  markRow: (project: string, kind: "publishing" | "uploading" | "rebuilding" | "failed", ms: number) => void;
+  marks: Record<string, { kind: MarkKind; until: number }>;
+  markRow: (project: string, kind: MarkKind, ms: number) => void;
 }
 interface EventsState {
   events: string[];
@@ -93,15 +96,17 @@ const mapProject = (p: Record<string, unknown>): Project => {
 
 export function AppProvider({ children }: { children: ReactNode }) {
   return (
-    <DataProvider>
-      <SessionProvider>
+    <SessionProvider>
+      <DataProvider>
         <EventsProvider>{children}</EventsProvider>
-      </SessionProvider>
-    </DataProvider>
+      </DataProvider>
+    </SessionProvider>
   );
 }
 
-/** 会话层→数据层桥：DataProvider 挂载时填充（登录四路并发/登出清数据由会话层触发，层间无循环依赖）。 */
+/** 会话层→数据层桥（单向，仅 DataProvider 挂载后由会话层调用：登录四路并发/登出清数据）。
+ *  拓扑 Session ⊃ Data ⊃ Events：Data/Events 均可消费 SessionCtx（boot 响应式），桥只解决
+ *  外层 Session 触发内层 Data 的唯一缺口。 */
 const dataBridge: {
   refreshProjects?: (f?: boolean) => Promise<void>;
   ensureImages?: (f?: boolean) => Promise<void>;
@@ -159,10 +164,16 @@ function SessionProvider({ children }: { children: ReactNode }) {
     setBoot("login");
   }, []);
 
+  // 改密收口（设备不增终案）：远程吊销本机旧钥匙（旧记录删除）+ 清种子（重登生成新钥匙=新记录，
+  // 净计数不变；刷新后无钥匙走密码表单）+ 停心跳（会话真结束，钥匙不再被后台续期）。
   const onPwChanged = useCallback(() => {
-    // 改密=结束当前会话回登录框（提示行写明用新密码重登）；不刷新页面。
-    // 保留 sr.seed：重登时同一把候选钥匙幂等重绑（服务端不动钥匙）——同机改密不新增设备记录。
+    stopHeartbeat();
+    if (state.seed && state.user && state.kid) {
+      api("POST", "/_api/key-selfrm", { kid: state.kid }).catch(() => {});
+    }
     state.loggedIn = false;
+    localStorage.removeItem("sr.seed");
+    localStorage.removeItem("sr.user");
     setLoginNotice("密码已修改：请输入新密码重新登录。");
     setSession(null);
     setBoot("login");
@@ -200,8 +211,9 @@ function DataProvider({ children }: { children: ReactNode }) {
   const [pubPrefill, setPubPrefill] = useState<string | null>(null);
   const [projects, setProjects] = useState<Project[]>([]);
   const [images, setImages] = useState<ImageItem[]>([]);
-  const [space, setSpace] = useState<SpaceInfo>({ availGb: 0, totalGb: 0, reserveGb: 0 });
-  const [marks, setMarks] = useState<Record<string, { kind: "publishing" | "uploading" | "rebuilding" | "failed"; until: number }>>({});
+  const [space, setSpace] = useState<SpaceInfo>({ availGb: 0, reserveGb: 0 });
+  const [marks, setMarks] = useState<Record<string, { kind: MarkKind; until: number }>>({});
+  const { boot } = useContext(SessionCtx)!; // 30s 轮询/断网钩子的登录响应性（boot 响应式）
 
   const setTab = useCallback((t: Tab) => {
     setTabRaw(t);
@@ -221,7 +233,7 @@ function DataProvider({ children }: { children: ReactNode }) {
     const j = (await api("GET", "/_api/space")) as { available_mb?: number; reserve_mb?: number };
     const avail = (Number(j.available_mb) - Number(j.reserve_mb)) / 1024; // 显示口径＝可用−预留（§14.1）
     if (Number.isFinite(avail)) {
-      setSpace({ availGb: +(avail).toFixed(1), totalGb: 0, reserveGb: +(Number(j.reserve_mb) / 1024).toFixed(0) });
+      setSpace({ availGb: +(avail).toFixed(1), reserveGb: +(Number(j.reserve_mb) / 1024).toFixed(0) });
       dataMark("space");
     }
   }, []);
@@ -233,7 +245,7 @@ function DataProvider({ children }: { children: ReactNode }) {
     dataMark("images");
   }, []);
 
-  const markRow = useCallback((project: string, kind: "publishing" | "uploading" | "rebuilding" | "failed", ms: number) => {
+  const markRow = useCallback((project: string, kind: MarkKind, ms: number) => {
     setMarks((m) => ({ ...m, [project]: { kind, until: Date.now() + ms } }));
   }, []);
 
@@ -268,9 +280,9 @@ function DataProvider({ children }: { children: ReactNode }) {
     dataBridge.reset = () => { setProjects([]); setImages([]); setMarks({}); };
   });
 
-  // 30s 恒实时（plan-17 §3）：按当前标签只刷新对应数据源
+  // 30s 恒实时（plan-17 §3）：按当前标签只刷新对应数据源（boot 响应式：登录即启、登出即停）
   useEffect(() => {
-    if (!state.loggedIn) return;
+    if (boot !== "app") return;
     const id = window.setInterval(() => {
       switch (tab) {
         case "proj": void refreshProjects(true).catch(() => {}); break;
@@ -279,7 +291,7 @@ function DataProvider({ children }: { children: ReactNode }) {
       }
     }, 30000);
     return () => clearInterval(id);
-  }, [tab, refreshProjects, ensureImages, refreshSpace]);
+  }, [boot, tab, refreshProjects, ensureImages, refreshSpace]);
 
   // 断网恢复（§3/验收 8）：连网即强制重取项目与空间
   useEffect(() => {
@@ -308,9 +320,17 @@ function EventsProvider({ children }: { children: ReactNode }) {
   const evAc = useRef<AbortController | null>(null);
   const tab = useContext(DataCtx)!.tab;
   const refreshProjects = useContext(DataCtx)!.refreshProjects;
+  const boot = useContext(SessionCtx)!.boot;
 
   useEffect(() => {
-    if (!state.loggedIn) return;
+    if (boot !== "app") {
+      // 登出/改密收口：退订并清面板（跨账号不残留）
+      evAc.current?.abort();
+      evAc.current = null;
+      setEvents([]);
+      setEvConnected(false);
+      return;
+    }
     const want = !document.hidden && (tab === "proj" || tab === "admin");
     if (!want) {
       evAc.current?.abort();
@@ -359,7 +379,7 @@ function EventsProvider({ children }: { children: ReactNode }) {
       evAc.current?.abort();
       evAc.current = null;
     };
-  }, [tab, refreshProjects]);
+  }, [boot, tab, refreshProjects]);
 
   const value = useMemo<EventsState>(() => ({ events, evConnected }), [events, evConnected]);
   return <EventsCtx.Provider value={value}>{children}</EventsCtx.Provider>;

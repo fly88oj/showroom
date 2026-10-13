@@ -1040,8 +1040,9 @@ fn is_active_api() -> bool {
 
 /// _bootstrap/public 刷新（/_api/tool/* 下发源，控制台内下载）：幂等拷贝两件——
 /// - platform_rsa.pub：state/ → _bootstrap/public/（公钥本就公开，whoami 亦随发）
-/// - showroom-publisher.md：宿主 ~/.agents/skills/showroom-publisher/SKILL.md（Agent Skill；
-///   缺源静默跳过——部署脚本可直拷，serve 启动 / setup upgrade 时再收敛）
+/// - showroom-publisher.md：宿主 ~/.agents/skills/showroom-publisher/SKILL.md（Agent
+///   Skill；缺源静默跳过——部署脚本可直拷，serve 启动 / setup upgrade 时再收敛）
+///
 /// 返回备注行（upgrade notes / serve 启动日志各取所需）。
 pub fn refresh_bootstrap_public(root: &Path) -> Vec<String> {
     let dir = root.join("_bootstrap/public");

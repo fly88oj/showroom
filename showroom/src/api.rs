@@ -311,6 +311,12 @@ pub fn load_platform_pub() -> Result<showroom_common::rsa::RsaPublicKey, String>
         .map_err(|e| format!("平台公钥解析失败：{e}"))
 }
 
+/// E_AUTH 检测：密钥过期/吊销时返回特殊错误码供 main.rs 触发 reauth
+pub fn is_key_expired(err: &str) -> bool {
+    // 零信息暴露下过期/吊销与普通验签失败不可区分——有本地密钥时的 E_AUTH 一律视为需要重登
+    err.contains("E_AUTH")
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -387,10 +393,4 @@ mod tests {
             format!("/_api/db-dump-chunk?dump={}&offset=4096&len={}", "b".repeat(32), DUMP_CHUNK_LEN)
         );
     }
-}
-
-/// E_AUTH 检测：密钥过期/吊销时返回特殊错误码供 main.rs 触发 reauth
-pub fn is_key_expired(err: &str) -> bool {
-    // 零信息暴露下过期/吊销与普通验签失败不可区分——有本地密钥时的 E_AUTH 一律视为需要重登
-    err.contains("E_AUTH")
 }

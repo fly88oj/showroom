@@ -7,7 +7,8 @@ import {
 import { DownloadIcon } from "lucide-react";
 import { toast } from "sonner";
 import { apiDo, respErr } from "@/lib/api";
-import { CLI_TABLE, ERROR_TABLE, HELP_ENV_TABLE, TOOLS_TABLE } from "@/lib/help";
+import { CLI_TABLE, ERROR_TABLE, TOOLS_TABLE } from "@/lib/help";
+import { ENV_DESC } from "@/lib/state";
 import { useApp } from "@/lib/app";
 
 /** 帮助：账号 / CLI / 镜像规范 / 工具下载 / 错误码（子导航小一档，对齐原版 help-subnav） */
@@ -86,10 +87,10 @@ export function Help() {
                 <TableRow className="bg-muted/30"><TableHead className="w-56">键</TableHead><TableHead>用途</TableHead></TableRow>
               </TableHeader>
               <TableBody>
-                {HELP_ENV_TABLE.map((r) => (
-                  <TableRow key={r.key}>
-                    <TableCell className="font-mono text-xs">{r.key}</TableCell>
-                    <TableCell className="text-xs text-muted-foreground">{r.desc}</TableCell>
+                {Object.entries(ENV_DESC).map(([k, d]) => (
+                  <TableRow key={k}>
+                    <TableCell className="font-mono text-xs">{k}</TableCell>
+                    <TableCell className="text-xs text-muted-foreground">{d}</TableCell>
                   </TableRow>
                 ))}
               </TableBody>

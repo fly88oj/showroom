@@ -2,17 +2,14 @@
 // 信封/压缩原语在 lib/envelope.ts（本模块只做传输与续传协议）。
 import { toHex, Buffer_fromHex } from "@/lib/bytes";
 import { api, checkResp, signHeaderPtr } from "@/lib/api";
+import { CHUNK, dataInvalidate, pemReady, platformPem } from "@/lib/state";
+import { flushLen, sealBegin, sealEnd, sealedTotal, uploadPayload } from "@/lib/envelope";
+import { pushSlice, pushFlush } from "@/lib/envelope";
 import { mem, unput } from "@/lib/wasm";
-import { dataInvalidate, pemReady, platformPem } from "@/lib/state";
-import {
-  pushSlice, pushFlush, sealBegin, sealEnd, sealedTotal, uploadPayload,
-} from "@/lib/envelope";
 
-export { sealedTotal, uploadPayload };
-
+/** 分片签名上传：签名与 body 均须覆盖 wasm 内存 [ptr, ptr+len) 的确切密文字节。 */
 async function postChunk(uploadId: string, seq: number, ptr: number, len: number, attempt = 1): Promise<Record<string, unknown>> {
   const pathQ = `/_api/import-chunk?upload=${encodeURIComponent(uploadId)}&seq=${seq}`;
-  // 签名必须覆盖上传的确切字节：body 直读 wasm 内存 [ptr, ptr+len)
   const auth = signHeaderPtr("POST", pathQ, ptr, len);
   const body = len ? new Uint8Array(mem().buffer, ptr, len).slice() : new Uint8Array(0);
   try {
@@ -50,25 +47,27 @@ export async function uploadRest(
   sent0: number, total: number, note?: (sent: number, total: number) => void,
   onSpaceInvalidate?: () => void,
 ): Promise<void> {
-  const CH = 8 * 1024 * 1024;
-  const slices = Math.ceil(blob.size / CH) || 1;
+  const slices = Math.ceil(blob.size / CHUNK) || 1;
   let sent = sent0;
-  for (let i = startSeq; i < slices; i++) {
-    const part = blob.slice(i * CH, Math.min((i + 1) * CH, blob.size));
-    const bytes = new Uint8Array(await part.arrayBuffer());
-    const [w, ob, cap] = pushSlice(sid, bytes);
-    try { await postChunk(uploadId, i, ob, w); } finally { unput(ob, cap); }
-    sent += w;
-    note?.(sent, total);
+  try {
+    for (let i = startSeq; i < slices; i++) {
+      const part = blob.slice(i * CHUNK, Math.min((i + 1) * CHUNK, blob.size));
+      const bytes = new Uint8Array(await part.arrayBuffer());
+      const [w, ob, cap] = pushSlice(sid, bytes);
+      try { await postChunk(uploadId, i, ob, w); } finally { unput(ob, cap); }
+      sent += w;
+      note?.(sent, total);
+    }
+    { // flush（len=0 尾段）也作为一个分片（seq 与 push 一一对应）
+      const [w, ob, cap] = pushFlush(sid);
+      try { await postChunk(uploadId, slices, ob, w); } finally { unput(ob, cap); }
+      sent += w;
+      note?.(sent, total);
+    }
+    if (sent !== total) throw { error: "E_STATE", msg: `信封总长校验失败：本地 ${sent} ≠ 预计 ${total}（不上传收尾，请重试）` };
+  } finally {
+    sealEnd(sid); // 异常路径也收尾（幂等），防 wasm 会话泄漏
   }
-  { // flush（len=0 尾段）也作为一个分片（seq 与 push 一一对应）
-    const [w, ob, cap] = pushFlush(sid);
-    try { await postChunk(uploadId, slices, ob, w); } finally { unput(ob, cap); }
-    sent += w;
-    note?.(sent, total);
-  }
-  if (sent !== total) throw { error: "E_STATE", msg: `信封总长校验失败：本地 ${sent} ≠ 预计 ${total}（不上传收尾，请重试）` };
-  sealEnd(sid);
   await api("POST", `/_api/import-end?upload=${encodeURIComponent(uploadId)}`, null);
   localStorage.removeItem("sr.up." + uploadId);
   dataInvalidate("space");
@@ -122,32 +121,33 @@ export async function resumeUploadCore(
     throw { error: "E_STATE", msg: `压缩产物长度与上次不符（${zb.size} ≠ ${saved.zsize}），请确认选择的是同一文件` };
   }
   const total = sealedTotal(zb.size);
-  const CH = 8 * 1024 * 1024;
-  const slices = Math.ceil(zb.size / CH) || 1;
+  const slices = Math.ceil(zb.size / CHUNK) || 1;
   const sid = sealBegin(pem, Buffer_fromHex(saved.seed));
-  let sent = 0;
-  for (let i = 0; i < Math.min(rec, slices); i++) { // 重放已收分片（同 seed+同产物 ⇒ 密文一致，只推进会话状态）
-    const part = zb.slice(i * CH, Math.min((i + 1) * CH, zb.size));
-    const bytes = new Uint8Array(await part.arrayBuffer());
-    const [w, ob, cap] = pushSlice(sid, bytes);
-    sent += w;
-    unput(ob, cap);
+  try {
+    let sent = 0;
+    for (let i = 0; i < Math.min(rec, slices); i++) { // 重放已收分片（同 seed+同产物 ⇒ 密文一致，只推进会话状态）
+      const part = zb.slice(i * CHUNK, Math.min((i + 1) * CHUNK, zb.size));
+      const bytes = new Uint8Array(await part.arrayBuffer());
+      const [w, ob, cap] = pushSlice(sid, bytes);
+      sent += w;
+      unput(ob, cap);
+    }
+    opts.upNote?.(sent, total);
+    if (rec < slices) {
+      await uploadRest(id, sid, zb, rec, sent, total, opts.upNote, opts.onSpaceInvalidate);
+      return { zstd: pre, zsize: zb.size };
+    }
+    if (rec === slices) { // 数据片齐，仅缺收尾片
+      const [w, ob, cap] = pushFlush(sid);
+      try { await postChunk(id, slices, ob, w); } finally { unput(ob, cap); }
+      sent += w;
+    } else {
+      sent += flushLen(zb.size); // 收尾片也已收到，只补计数（长度核算单源 flushLen）
+    }
+    if (sent !== total) throw { error: "E_STATE", msg: `重放长度不符（${sent}/${total}），请重新发起` };
+  } finally {
+    sealEnd(sid); // 重放/补传任何路径都收尾
   }
-  opts.upNote?.(sent, total);
-  const flushBytes = (zb.size % (4 * 1024 * 1024)) ? (zb.size % (4 * 1024 * 1024)) + 12 + 16 : 0;
-  if (rec < slices) {
-    await uploadRest(id, sid, zb, rec, sent, total, opts.upNote, opts.onSpaceInvalidate);
-    return { zstd: pre, zsize: zb.size };
-  }
-  if (rec === slices) { // 数据片齐，仅缺收尾片
-    const [w, ob, cap] = pushFlush(sid);
-    try { await postChunk(id, slices, ob, w); } finally { unput(ob, cap); }
-    sent += w;
-  } else {
-    sent += flushBytes; // 收尾片也已收到，只补计数
-  }
-  if (sent !== total) throw { error: "E_STATE", msg: `重放长度不符（${sent}/${total}），请重新发起` };
-  sealEnd(sid);
   await api("POST", `/_api/import-end?upload=${encodeURIComponent(id)}`, null);
   localStorage.removeItem("sr.up." + id);
   dataInvalidate("space");

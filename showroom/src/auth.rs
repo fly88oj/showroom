@@ -253,6 +253,15 @@ pub fn logout(cfg: &Config) -> Result<(), String> {
     Ok(())
 }
 
+/// 密钥过期自动重登（§密钥生命周期）：E_AUTH 时提示输入密码 → OPAQUE 新钥匙 → 重试原操作。
+/// 由 Api::connect / 各命令的错误路径调用。返回 true=已重新登录可重试。
+pub fn reauth_on_expired(cfg: &crate::config::Config, server_lan: Option<String>) -> Result<bool, String> {
+    eprintln!("\n本机密钥已过期或被吊销（30 分钟无活动自动过期）。请重新输入密码获取新密钥。\n");
+    // 复用 login 流程（密码 → OPAQUE → key-bind → seed 覆盖写入）
+    login(cfg, None, server_lan, false)?;
+    Ok(true)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -264,13 +273,4 @@ mod tests {
         let vk = showroom_common::UserKey::from_pub_string(&k.pub_string()).unwrap();
         assert_eq!(kid_of(&k), showroom_common::sha256_hex(&vk.to_bytes())[..8].to_string());
     }
-}
-
-/// 密钥过期自动重登（§密钥生命周期）：E_AUTH 时提示输入密码 → OPAQUE 新钥匙 → 重试原操作。
-/// 由 Api::connect / 各命令的错误路径调用。返回 true=已重新登录可重试。
-pub fn reauth_on_expired(cfg: &crate::config::Config, server_lan: Option<String>) -> Result<bool, String> {
-    eprintln!("\n本机密钥已过期或被吊销（30 分钟无活动自动过期）。请重新输入密码获取新密钥。\n");
-    // 复用 login 流程（密码 → OPAQUE → key-bind → seed 覆盖写入）
-    login(cfg, None, server_lan, false)?;
-    Ok(true)
 }
