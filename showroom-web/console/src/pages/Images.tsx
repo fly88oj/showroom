@@ -136,14 +136,14 @@ export function Images() {
           <TableHeader>
             <TableRow className="bg-muted/30">
               <TableHead>镜像</TableHead>
-              <TableHead className="w-24">操作</TableHead>
+              <TableHead className="w-24 text-right">操作</TableHead>
             </TableRow>
           </TableHeader>
           <TableBody>
             {images.map((im) => (
               <TableRow key={im.name}>
                 <TableCell className="font-mono text-xs">{im.name}</TableCell>
-                <TableCell>
+                <TableCell className="text-right">
                   <Button size="sm" variant="destructive" onClick={() => setDelTarget(im.name)}>删除</Button>
                 </TableCell>
               </TableRow>

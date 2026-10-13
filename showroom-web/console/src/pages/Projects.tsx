@@ -85,8 +85,8 @@ export function Projects({ base, onOpenSettings }: { base: string; onOpenSetting
               <TableHead>对外 URL</TableHead>
               <TableHead className="w-20">版本</TableHead>
               <TableHead className="w-24 text-right">更新</TableHead>
-              <TableHead className="w-56">操作</TableHead>
               <TableHead className="w-12">日志</TableHead>
+              <TableHead className="w-56 text-right">操作</TableHead>
             </TableRow>
           </TableHeader>
           <TableBody>
@@ -123,7 +123,16 @@ export function Projects({ base, onOpenSettings }: { base: string; onOpenSetting
                     </TableCell>
                     <TableCell className="text-right text-xs text-muted-foreground">{p.updated}</TableCell>
                     <TableCell>
-                      <div className="flex flex-wrap items-center gap-1">
+                      <Button
+                        size="sm" variant="ghost"
+                        aria-label={`查看 ${p.project} 日志`}
+                        onClick={() => setLogsFor(p.project)}
+                      >
+                        <ScrollTextIcon />
+                      </Button>
+                    </TableCell>
+                    <TableCell>
+                      <div className="flex flex-wrap items-center justify-end gap-1">
                         {missing ? (
                           <Tooltip>
                             <TooltipTrigger asChild>
@@ -171,15 +180,6 @@ export function Projects({ base, onOpenSettings }: { base: string; onOpenSetting
                           </Button>
                         )}
                       </div>
-                    </TableCell>
-                    <TableCell>
-                      <Button
-                        size="sm" variant="ghost"
-                        aria-label={`查看 ${p.project} 日志`}
-                        onClick={() => setLogsFor(p.project)}
-                      >
-                        <ScrollTextIcon />
-                      </Button>
                     </TableCell>
                   </TableRow>
               );
@@ -318,7 +318,7 @@ function RollbackDialog({
                   <TableHead className="w-20">版本</TableHead>
                   <TableHead>镜像</TableHead>
                   <TableHead className="w-36 text-right">发布时间</TableHead>
-                  <TableHead className="w-28">操作</TableHead>
+                  <TableHead className="w-28 text-right">操作</TableHead>
                 </TableRow>
               </TableHeader>
               <TableBody>

@@ -146,7 +146,7 @@ function UsersPanel() {
             <TableRow className="bg-muted/30">
               <TableHead className="w-40">设备</TableHead>
               <TableHead className="w-40">登录时间</TableHead>
-              <TableHead>操作</TableHead>
+              <TableHead className="text-right">操作</TableHead>
             </TableRow>
           </TableHeader>
           <TableBody>
@@ -179,7 +179,7 @@ function UsersPanel() {
                   <TableRow key={k.kid}>
                     <TableCell className="font-mono text-xs">{k.kid}</TableCell>
                     <TableCell className="font-mono text-xs text-muted-foreground">{fmtTime(k.since)}</TableCell>
-                    <TableCell>
+                    <TableCell className="text-right">
                       <Button size="sm" variant="destructive" onClick={() => adminAction(u, "keyrm", k.kid)}>
                         移除此设备
                       </Button>
@@ -380,7 +380,7 @@ function AllProjectsPanel() {
               <TableHead className="w-24">所属账号</TableHead>
               <TableHead className="w-24">状态</TableHead>
               <TableHead className="w-36 text-right">更新</TableHead>
-              <TableHead>操作</TableHead>
+              <TableHead className="text-right">操作</TableHead>
             </TableRow>
           </TableHeader>
           <TableBody>
@@ -392,8 +392,8 @@ function AllProjectsPanel() {
                 <TableCell className="font-mono text-xs">{p.user}</TableCell>
                 <TableCell><StatusCell status={p.status} /></TableCell>
                 <TableCell className="text-right font-mono text-xs text-muted-foreground">{fmtTime(p.updated)}</TableCell>
-                <TableCell>
-                  <div className="flex flex-wrap gap-1">
+                <TableCell className="text-right">
+                  <div className="flex flex-wrap justify-end gap-1">
                     {p.status === "running"
                       ? <Button size="sm" variant="destructive" onClick={() => act(p.user, p.project, "stop")}>停止</Button>
                       : p.status !== "missing" && <Button size="sm" variant="secondary" onClick={() => act(p.user, p.project, "start")}>启动</Button>}
