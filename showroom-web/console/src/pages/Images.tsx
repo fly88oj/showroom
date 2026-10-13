@@ -10,7 +10,7 @@ import {
 } from "@/components/ui/table";
 import { FolderOpenIcon, RotateCcwIcon } from "lucide-react";
 import { toast } from "sonner";
-import { useApp } from "@/lib/app";
+import { useApp, apiFailToast } from "@/lib/app";
 import { platformPem } from "@/lib/state";
 import { freshUpload, latestUpId, loadUpSession, resumeUploadCore, sealedTotal, uploadPayload } from "@/lib/upload";
 import { dataInvalidate } from "@/lib/state";
@@ -48,7 +48,7 @@ export function Images() {
       setDelTarget(null);
       await refreshAll();
     } catch (e) {
-      toast.error(`删除镜像失败：${(e as { msg?: string }).msg ?? "请稍后重试"}`);
+      apiFailToast(e, `删除镜像 ${delTarget}`, refreshSpace);
     } finally {
       setBusy(false);
     }
@@ -84,11 +84,10 @@ export function Images() {
       setFile(null);
       await refreshAll();
     } catch (e) {
-      const err = e as { msg?: string; error?: string };
       setProg(null);
       setUpText("");
       setResumeId(latestUpId());
-      toast.error(`上传入库失败：${err.msg || err.error || "网络异常"}`);
+      apiFailToast(e, "上传入库", refreshSpace);
     } finally {
       setUpBusy(false);
     }
@@ -115,9 +114,8 @@ export function Images() {
       setProg(null); setFile(null); setResumeId(null);
       await refreshAll();
     } catch (e) {
-      const err = e as { msg?: string; error?: string };
       setProg(null); setUpText("");
-      toast.error(`恢复上传失败：${err.msg || err.error || "网络异常"}`);
+      apiFailToast(e, "恢复上传", refreshSpace);
     } finally {
       setUpBusy(false);
     }

@@ -50,6 +50,9 @@ interface AppState {
   refreshSpace: (force?: boolean) => Promise<void>;
   events: string[];
   evConnected: boolean;
+  /** 行内在途标记（§4）：发布中…/上传中/重建中(60s)/异常(60s)——服务端 status 收敛前的本地过渡 */
+  marks: Record<string, { kind: "publishing" | "uploading" | "rebuilding" | "failed"; until: number }>;
+  markRow: (project: string, kind: "publishing" | "uploading" | "rebuilding" | "failed", ms: number) => void;
 }
 
 const Ctx = createContext<AppState | null>(null);
@@ -88,6 +91,7 @@ export function AppProvider({ children }: { children: ReactNode }) {
   const [images, setImages] = useState<ImageItem[]>([]);
   const [space, setSpace] = useState<SpaceInfo>({ availGb: 0, totalGb: 0, reserveGb: 0 });
   const [events, setEvents] = useState<string[]>([]);
+  const [marks, setMarks] = useState<Record<string, { kind: "publishing" | "uploading" | "rebuilding" | "failed"; until: number }>>({});
   const [evConnected, setEvConnected] = useState(false);
   const evAc = useRef<AbortController | null>(null);
 
@@ -163,6 +167,10 @@ export function AppProvider({ children }: { children: ReactNode }) {
     setBoot("login");
   }, []);
 
+  const markRow = useCallback((project: string, kind: "publishing" | "uploading" | "rebuilding" | "failed", ms: number) => {
+    setMarks((m) => ({ ...m, [project]: { kind, until: Date.now() + ms } }));
+  }, []);
+
   const projOp = useCallback(async (name: string, op: "start" | "stop" | "rm") => {
     await api("POST", `/_api/${op}`, { project: name });
     dataInvalidate("projects");
@@ -221,8 +229,12 @@ export function AppProvider({ children }: { children: ReactNode }) {
     const ac = new AbortController();
     evAc.current = ac;
     setEvConnected(true);
+    let evDebounce: ReturnType<typeof setTimeout> | null = null;
     consumeNdjson("/_api/events", (j) => {
       setEvents((evs) => [...evs.slice(-19), new Date().toLocaleTimeString("sv-SE") + "  " + JSON.stringify(j)]);
+      // 恒实时（§3）：事件 2s 去抖 → 项目列表即时收敛（容器启停/发布完成等）
+      if (evDebounce) clearTimeout(evDebounce);
+      evDebounce = setTimeout(() => { void refreshProjects(true); }, 2000);
     }, ac.signal).catch(() => {
       if (evAc.current === ac) { evAc.current = null; setEvConnected(false); }
     });
@@ -235,7 +247,18 @@ export function AppProvider({ children }: { children: ReactNode }) {
       ac.abort();
       if (evAc.current === ac) evAc.current = null;
     };
-  }, [boot, tab]);
+  }, [boot, tab, refreshProjects]);
+
+  // 断网恢复（§3/验收 8）：连网即强制重取项目与空间（免刷新自动补齐）
+  useEffect(() => {
+    const onOnline = () => {
+      if (!state.loggedIn) return;
+      void refreshProjects(true);
+      void refreshSpace(true);
+    };
+    window.addEventListener("online", onOnline);
+    return () => window.removeEventListener("online", onOnline);
+  }, [refreshProjects, refreshSpace]);
 
   // 30s 恒实时（plan-17 §3）：按当前标签只刷新对应数据源
   useEffect(() => {
@@ -254,11 +277,36 @@ export function AppProvider({ children }: { children: ReactNode }) {
     boot, session, login, logout, tab, setTab, pubPrefill, setPubPrefill,
     projects, refreshProjects, projOp, rollback, publishDone,
     images, ensureImages, rmImage, space, refreshSpace,
-    events, evConnected,
+    events, evConnected, marks, markRow,
   }), [boot, session, login, logout, tab, pubPrefill, projects, refreshProjects,
     projOp, rollback, publishDone, images, ensureImages, rmImage, space, refreshSpace, events, evConnected]);
 
   return <Ctx.Provider value={value}>{children}</Ctx.Provider>;
+}
+
+// —— 对外 URL 展示策略（plan-17 §6，对齐原版 proj.mjs）：① sr.publicBase → ② location.origin
+//    （公网访问即公网地址）→ ③ 内网 origin 兜底 + 列表上方提示条 ——
+const PRIV_HOST_RE = /^(localhost|127\.|0\.0\.0\.0|::1|\[::1\]|10\.|192\.168\.|172\.(1[6-9]|2\d|3[01])\.)/i;
+
+export function publicBase(saved: string): string {
+  return saved.trim().replace(/\/+$/, "") || window.location.origin;
+}
+export function isPrivateHost(): boolean {
+  return PRIV_HOST_RE.test(window.location.hostname);
+}
+export function externalUrl(saved: string, project: string): string {
+  return `${publicBase(saved)}/${project}/`;
+}
+
+/** 原版 apiFail 语义：E_QUOTA 且磁盘空间不足 → 追加「到镜像库删除旧镜像」引导并刷新空间。 */
+export function apiFailToast(e: unknown, what: string, refreshSpace?: (f?: boolean) => Promise<void>) {
+  const err = e as { error?: string; msg?: string };
+  if (err?.error === "E_QUOTA" && (err.msg || "").includes("磁盘空间不足")) {
+    void refreshSpace?.(true);
+    toast.error(`${what} 失败：${err.msg}；可到镜像库删除旧镜像后重试`);
+    return;
+  }
+  toast.error(`${what} 失败：${err?.msg || err?.error || "网络异常或服务不可用"}`);
 }
 
 export function useApp(): AppState {

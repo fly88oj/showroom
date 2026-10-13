@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
@@ -22,11 +22,11 @@ import { cn } from "cn";
 import { toast } from "sonner";
 import { consumeNdjson, api } from "@/lib/api";
 import { ENV_VARS } from "@/lib/mock";
-import { useApp, fmtTime, type Project } from "@/lib/app";
+import { useApp, fmtTime, externalUrl, isPrivateHost, type Project } from "@/lib/app";
 
 /** 我的项目：状态机行操作 + 更多菜单 + 日志抽屉 + 回滚/环境变量（对齐原版 proj.mjs） */
 export function Projects({ base, onOpenSettings }: { base: string; onOpenSettings: () => void }) {
-  const { projects, projOp, rollback, setTab, setPubPrefill, refreshProjects } = useApp();
+  const { projects, projOp, rollback, setTab, setPubPrefill, refreshProjects, marks } = useApp();
   const [confirm, setConfirm] = useState<{ kind: "stop" | "rm"; p: Project } | null>(null);
   const [rb, setRb] = useState<Project | null>(null); // 回滚对话框
   const [env, setEnv] = useState<Project | null>(null);
@@ -64,7 +64,7 @@ export function Projects({ base, onOpenSettings }: { base: string; onOpenSetting
     <div className="flex flex-col gap-4">
       <h2 className="text-sm font-semibold text-info">项目列表</h2>
 
-      {!base && (
+      {isPrivateHost() && !base && (
         <Alert>
           <InfoIcon />
           <AlertTitle>正在用内网地址展示 URL</AlertTitle>
@@ -93,16 +93,22 @@ export function Projects({ base, onOpenSettings }: { base: string; onOpenSetting
             {firstLoad ? (
               <TableRow><TableCell colSpan={7} className="py-6 text-center text-xs text-muted-foreground">正在加载…</TableCell></TableRow>
             ) : projects.map((p) => {
-              const running = p.status === "running";
-              const dead = p.status === "dead";
-              const missing = p.status === "missing";
-              const mid = p.status === "exited";
-              const inFlight = p.status === "restarting";
-              const fullUrl = (base || "http://192.168.4.55") + p.url;
+              // §4 本地在途标记优先（发布中/上传中/60s 重建中·异常滚动窗口），过期回落服务端 status
+              const mk = marks[p.project];
+              const effStatus = mk && mk.until > Date.now()
+                ? (mk.kind === "rebuilding" ? "restarting" : mk.kind === "failed" ? "dead"
+                  : mk.kind === "uploading" ? "uploading" : "publishing")
+                : p.status;
+              const running = effStatus === "running";
+              const dead = effStatus === "dead";
+              const missing = effStatus === "missing";
+              const mid = effStatus === "exited" || effStatus === "paused" || effStatus === "created";
+              const inFlight = effStatus === "restarting" || effStatus === "publishing" || effStatus === "uploading";
+              const fullUrl = externalUrl(base, p.project);
               return (
                   <TableRow key={p.project}>
                     <TableCell className="font-mono">{p.project}</TableCell>
-                    <TableCell><StatusBadge status={p.status} /></TableCell>
+                    <TableCell><StatusBadge status={effStatus} /></TableCell>
                     <TableCell>
                       <a
                         href={fullUrl} target="_blank" rel="noopener"
@@ -205,19 +211,30 @@ export function Projects({ base, onOpenSettings }: { base: string; onOpenSetting
 /** 日志弹窗（居中 Modal + 明确关闭按钮）：§10.4 ndjson 实时流（tail 100 起），1000 行环形。 */
 function LogsDialog({ project, onClose }: { project: string | null; onClose: () => void }) {
   const [lines, setLines] = useState<string[]>([]);
+  const streamAc = useRef<AbortController | null>(null);
   useEffect(() => {
     if (!project) return;
     setLines([]);
-    const ac = new AbortController();
-    consumeNdjson(
-      `/_api/logs-stream?project=${encodeURIComponent(project)}&tail=100`,
-      (j) => {
-        const line = typeof j.line === "string" ? j.line : JSON.stringify(j);
-        setLines((ls) => [...ls.slice(-999), line]);
-      },
-      ac.signal,
-    ).catch(() => { /* 断流静默：关闭重开即重连 */ });
-    return () => ac.abort();
+    let alive = true;
+    let timer: ReturnType<typeof setTimeout> | null = null;
+    const start = () => {
+      if (!alive) return;
+      const ac = new AbortController();
+      streamAc.current = ac;
+      consumeNdjson(
+        `/_api/logs-stream?project=${encodeURIComponent(project)}&tail=100`,
+        (j) => {
+          const line = typeof j.line === "string" ? j.line : JSON.stringify(j);
+          setLines((ls) => [...ls.slice(-999), line]);
+        },
+        ac.signal,
+      ).catch(() => {
+        if (!alive) return;
+        timer = setTimeout(start, 5000); // §10.4 断开 5 秒重连（弹窗关闭即停）
+      });
+    };
+    start();
+    return () => { alive = false; streamAc.current?.abort(); if (timer) clearTimeout(timer); };
   }, [project]);
   return (
     <Dialog open={!!project} onOpenChange={(v) => !v && onClose()}>

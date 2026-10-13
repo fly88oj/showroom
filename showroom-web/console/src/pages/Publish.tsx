@@ -16,7 +16,7 @@ import {
 import { cn } from "cn";
 import { toast } from "sonner";
 import { api } from "@/lib/api";
-import { useApp } from "@/lib/app";
+import { useApp, apiFailToast, externalUrl } from "@/lib/app";
 import { platformPem, PROJ_RE, RESERVED } from "@/lib/state";
 import { freshUpload, resumeUploadCore, uploadPayload } from "@/lib/upload";
 
@@ -30,7 +30,7 @@ export function Publish({
 }: {
   base: string; prefill: string | null; onConsumed: () => void; onOpenSettings: () => void;
 }) {
-  const { projects, images, session, publishDone, space, refreshSpace } = useApp();
+  const { projects, images, session, publishDone, space, refreshSpace, markRow } = useApp();
   const [project, setProject] = useState("");
   const [projErr, setProjErr] = useState("");
   const [projOpen, setProjOpen] = useState(false);
@@ -64,7 +64,7 @@ export function Publish({
 
   const existing = useMemo(() => projects.find((p) => p.project === project.trim()), [projects, project]);
   const name = project.trim();
-  const urlChip = name ? `${base || window.location.origin}/${name}/` : "（清空则自动生成随机名）";
+  const urlChip = name ? externalUrl(base, name) : "（清空则自动生成随机名）";
   const nextV = existing ? (parseInt(String(existing.version).replace(/^v/, ""), 10) || 0) + 1 : 1;
   const memChanged = !!existing?.mem && String(existing.mem) !== mem;
   const cportChanged = !!existing?.cport && String(existing.cport) !== cport;
@@ -96,6 +96,7 @@ export function Publish({
   async function deployRun(mode: "fresh" | "resume" | "publish") {
     const d = deployRef.current;
     let phaseNow: keyof typeof PHASE_CN = "compress";
+    if (name) markRow(name, "uploading", 10 * 60 * 1000); // 在途兜底标记（成功/失败各按终态改写）
     try {
       if (mode === "fresh") {
         if (d.file) {
@@ -116,6 +117,7 @@ export function Publish({
       }
       if (d.file && mode !== "publish") {
         phaseNow = "upload";
+        if (name) markRow(name, "uploading", 10 * 60 * 1000);
         setPhase("upload"); setStep(1, "run");
         const upNote = (sent: number, total: number) => {
           setProg({ cur: sent, total });
@@ -139,13 +141,15 @@ export function Publish({
         setText("上传完成：镜像已导入镜像库。");
       }
       phaseNow = "publish";
+      if (name) markRow(name, "publishing", 10 * 60 * 1000);
       await doPublish(name, d.tag);
       setStep(2, "ok"); setStep(3, "ok");
       setProg({ cur: 1, total: 1 });
-      const eurl = `${base || window.location.origin}/${name}/`;
+      const eurl = externalUrl(base, name);
       setDoneUrl(eurl);
       setText("④ 完成：发布成功。");
       setPhase("done");
+      if (name) markRow(name, "rebuilding", 60 * 1000); // §4 「重建中」60s 滚动窗口
       deployRef.current = { file: null, blob: null, tag: "", uploadId: null };
       setFile(null);
       await publishDone(name);
@@ -153,12 +157,13 @@ export function Publish({
       const err = e as { error?: string; msg?: string };
       setFailAt(phaseNow);
       setPhase("fail");
+      if (name && phaseNow !== "compress") markRow(name, "failed", 60 * 1000); // §4 「异常」滚动窗口
       setStep(phaseNow === "compress" ? 0 : phaseNow === "upload" ? 1 : 2, "fail");
       setText(
         `「${PHASE_CN[phaseNow]}」步骤失败：${err.msg || err.error || "网络异常"}`
         + (phaseNow === "upload" && deployRef.current.uploadId ? "；点「重试」将从断点继续。" : "；可点「重试」再次执行。"),
       );
-      toast.error(`发布（${PHASE_CN[phaseNow]}）失败`, { description: err.msg || err.error });
+      apiFailToast(e, `发布（${PHASE_CN[phaseNow]}）`, refreshSpace);
     }
   }
 

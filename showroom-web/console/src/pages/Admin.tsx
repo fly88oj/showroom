@@ -595,6 +595,8 @@ function HostPanel() {
   }
 
   async function apply() {
+    const aff = review?.impact.affected_projects || [];
+    if (aff.length && !window.confirm(`此变更将影响 ${aff.length} 个在用项目（${aff.join("、")}）：相关项目的重启/回滚/新发布将失去该中间件支持。确认继续执行？`)) return;
     setApplyBusy(true);
     try {
       const j = (await api("POST", "/_api/admin/host", postBody(true))) as { ok?: boolean; report?: { actions?: { ok?: boolean; kind?: string; target?: string; result?: string; detail?: string }[]; changed?: number; warnings?: string[] } };

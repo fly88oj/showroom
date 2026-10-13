@@ -26,17 +26,15 @@ export function SettingsDialog({
 
   useEffect(() => { if (open) { setDraft(base); setPem(state.pem); setErr(""); } }, [open, base]);
 
-  function save() {
-    setErr("");
-    if (draft && !/^https?:\/\/.+/.test(draft)) {
-      setErr("需以 http:// 或 https:// 开头");
-      return;
+  /** 原版行为：base 输入即存（无保存按钮）；校验错就地上呈。 */
+  function onBaseInput(v: string) {
+    setDraft(v);
+    setErr(v && !/^https?:\/\/.+/.test(v) ? "需以 http:// 或 https:// 开头" : "");
+    if (!v || /^https?:\/\/.+/.test(v)) {
+      const cleaned = v.trim().replace(/\/+$/, "");
+      localStorage.setItem("sr.publicBase", cleaned);
+      onBaseChange(cleaned);
     }
-    const v = draft.trim().replace(/\/+$/, "");
-    localStorage.setItem("sr.publicBase", v);
-    onBaseChange(v);
-    toast.success("设置已保存");
-    onOpenChange(false);
   }
 
   return (
@@ -54,7 +52,7 @@ export function SettingsDialog({
               <FieldLabel htmlFor="set-base">对外访问域名</FieldLabel>
               <Input
                 id="set-base" className="font-mono" placeholder="http://…:…"
-                value={draft} onChange={(e) => setDraft(e.target.value)} aria-invalid={!!err}
+                value={draft} onChange={(e) => onBaseInput(e.target.value)} aria-invalid={!!err}
               />
               {err ? <FieldError>{err}</FieldError> : null}
             </Field>
@@ -80,7 +78,6 @@ export function SettingsDialog({
             <Button variant="outline" onClick={() => setPwOpen(true)}>
               修改密码…
             </Button>
-            <Button onClick={save}>保存</Button>
           </DialogFooter>
         </DialogContent>
       </Dialog>

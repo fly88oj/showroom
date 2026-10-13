@@ -1,4 +1,4 @@
-import { lazy, Suspense, useState } from "react";
+import { lazy, Suspense, useEffect, useRef, useState } from "react";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent } from "@/components/ui/card";
@@ -31,7 +31,7 @@ import { LogOutIcon, SettingsIcon } from "lucide-react";
 
 /** 壳：登录门 → 顶栏（品牌/账号徽标菜单）+ NavigationMenu 主导航 + 1200px 居中内容卡（三层层级对齐原版） */
 export function Shell() {
-  const { boot, session, logout, tab, setTab, pubPrefill, setPubPrefill } = useApp();
+  const { boot, session, logout, tab, setTab, pubPrefill, setPubPrefill, projects } = useApp();
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [base, setBase] = useState(() => localStorage.getItem("sr.publicBase") || ""); // 对外访问域名（sr.publicBase）：空且 origin 为私网 → 项目列表出内网提示条
 
@@ -55,6 +55,7 @@ export function Shell() {
 
   return (
     <div className="min-h-svh pb-12">
+      <FocusGuide projectsLen={projects.length} pubName="发布" />
       <header className="sticky top-0 z-30 border-b bg-background">
         <div className="mx-auto flex min-h-14 w-full max-w-[1200px] flex-wrap items-center justify-between gap-3 py-2">
           <div className="flex min-w-0 flex-wrap items-center gap-3">
@@ -136,6 +137,23 @@ export function Shell() {
       <SettingsDialog open={settingsOpen} onOpenChange={setSettingsOpen} base={base} onBaseChange={setBase} />
     </div>
   );
+}
+
+/** 登录焦点引导（验收 16，一次性）：已有项目 → URL 列首链接；空账号 → 「发布」导航。 */
+function FocusGuide({ projectsLen, pubName }: { projectsLen: number; pubName: string }) {
+  const done = useRef(false);
+  useEffect(() => {
+    if (done.current) return;
+    const id = setTimeout(() => { // 4 路并发拉数完成后
+      done.current = true;
+      const first = document.querySelector<HTMLAnchorElement>("table a[target=_blank]");
+      if (projectsLen && first) { first.focus(); return; }
+      const links = [...document.querySelectorAll<HTMLAnchorElement>("nav a")];
+      links.find((a) => a.textContent?.trim() === pubName)?.focus();
+    }, 2500);
+    return () => clearTimeout(id);
+  }, [projectsLen, pubName]);
+  return null;
 }
 
 export default function App() {

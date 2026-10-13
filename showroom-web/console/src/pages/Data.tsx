@@ -22,7 +22,7 @@ import { Textarea } from "@/components/ui/textarea";
 import { cn } from "cn";
 import { toast } from "sonner";
 import { api, apiDo, respErr } from "@/lib/api";
-import { useApp } from "@/lib/app";
+import { useApp, apiFailToast } from "@/lib/app";
 import { derToPem, enc } from "@/lib/bytes";
 import { checkProj, DUMP_CHUNK, platformPem, SEG } from "@/lib/state";
 import { ex, mem, put, shimCStr, unput, alloc } from "@/lib/wasm";
@@ -230,7 +230,7 @@ export function Data({ onOpenSettings }: { onOpenSettings: () => void }) {
     } catch (e) {
       setProg(null);
       setProgTxt("备份失败或中断（可重新发起）");
-      toast.error(`备份下载失败：${(e as Error).message ?? ""}`);
+      apiFailToast(e, "备份下载");
     }
   }
 
@@ -270,7 +270,7 @@ export function Data({ onOpenSettings }: { onOpenSettings: () => void }) {
       setOut(j.out || `pg_restore --clean --if-exists 完成：信封 ${envelope.length} 字节。`);
     } catch (e) {
       setProg(null); setProgTxt("");
-      toast.error(`恢复上传失败：${(e as { msg?: string }).msg ?? ""}`);
+      apiFailToast(e, "恢复上传");
     } finally {
       setDangerBusy(false);
       setRestoreConfirm(false);
@@ -302,13 +302,15 @@ export function Data({ onOpenSettings }: { onOpenSettings: () => void }) {
     return list;
   }
 
-  async function queryRd() {
+  async function queryRdFor(dbVal?: string) {
     const bad = checkProj(dbProject);
     if (bad) { setProjErr(bad); return; }
+    let db = dbVal ?? rdDb;
     try {
       const dbs = await loadRdDbs();
       if (!dbs.length) { setRdCount("您名下暂无可浏览的项目（发布项目后自动出现）"); return; }
-      const j = (await api("GET", `/_api/redis-keys?db=${encodeURIComponent(rdDb)}&q=${encodeURIComponent(rdQ.trim())}&limit=200`)) as { keys?: string[] };
+      if (!db) { db = String(dbs[0].db); setRdDb(db); } // 原版行为：select 载入即默认首项
+      const j = (await api("GET", `/_api/redis-keys?db=${encodeURIComponent(db)}&q=${encodeURIComponent(rdQ.trim())}&limit=200`)) as { keys?: string[] };
       setRdKeys(j.keys || []);
       setRdCount(`共 ${(j.keys || []).length} 个键`);
     } catch (e) {
@@ -316,6 +318,7 @@ export function Data({ onOpenSettings }: { onOpenSettings: () => void }) {
       toast.error(`Redis 键列表获取失败：${(e as { msg?: string }).msg ?? ""}`);
     }
   }
+  const queryRd = () => queryRdFor();
 
   async function pickKey(key: string) {
     try {
@@ -524,7 +527,10 @@ export function Data({ onOpenSettings }: { onOpenSettings: () => void }) {
               <FieldLabel>项目</FieldLabel>
               <Select
                 value={rdDb}
-                onValueChange={(v) => { setRdDb(v); setRdKeys(null); setRdSel(null); setRdCount(""); }}
+                onValueChange={(v) => {
+                  setRdDb(v); setRdKeys(null); setRdSel(null); setRdCount("");
+                  if (v) void queryRdFor(v); // C2：选库即自动加载键列表
+                }}
               >
                 <SelectTrigger className="w-44 font-mono">
                   <SelectValue placeholder={rdDbs?.length ? "选择项目…" : "查询后载入…"} />
