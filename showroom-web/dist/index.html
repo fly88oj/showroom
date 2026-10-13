@@ -294,7 +294,7 @@
       <button data-hp="account" class="on" aria-selected="true">账号</button>
       <button data-hp="cli">CLI 使用</button>
       <button data-hp="mirror">镜像规范</button>
-      <button data-hp="tools">工具与命令</button>
+      <button data-hp="tools">工具下载</button>
       <button data-hp="errors">错误码</button>
     </nav>
     <div class="hpanel" id="hp-account">
@@ -310,8 +310,29 @@
     <ul class="note help-list">
       <li>CLI 与控制台同一模型（统一账号密码认证）：<span class="mono">showroom login &lt;账号&gt;</span> 输一次密码即自动配置本机（含镜像库凭据），此后全部子命令免密码（gh/ssh 模型）；<span class="mono">showroom logout</span> 退出（清本机并远程吊销钥匙）。</li>
       <li>无账号 / 忘记密码：联系管理员发放或重置（<span class="mono">showroomctl user-add &lt;名&gt; --gen-password</span>）。</li>
+      <li>镜像上传与备份加密需要平台公钥：登录控制台，在本页「工具下载」下载 <span class="mono">platform_rsa.pub</span>，放入 <span class="mono">~/.showroom/platform_rsa.pub</span>（一次性；缺失时 push/publish 会明确提示）。</li>
     </ul>
 
+
+
+    <h2>CLI 命令对照</h2>
+    <div class="tbl-wrap"><table>
+      <thead><tr><th>控制台功能</th><th>CLI 等价命令</th></tr></thead>
+      <tbody>
+        <tr><td>账号密码登录（自动绑定本机）</td><td class="mono">showroom login &lt;账号&gt;</td></tr>
+        <tr><td>退出登录</td><td class="mono">showroom logout</td></tr>
+        <tr><td>修改密码（登录态自助）</td><td class="wrap">控制台「设置 → 修改密码」入口（CLI 暂无；管理员可代为重置，见下）</td></tr>
+        <tr><td>生成/重置本机签名密钥（调试用）</td><td class="mono">showroom keygen</td></tr>
+        <tr class="admin-only hidden"><td>发放新账号（初始密码 / 管理员）</td><td class="mono">showroomctl user-add &lt;账号&gt; --gen-password [--admin]</td></tr>
+        <tr class="admin-only hidden"><td>补发 / 重置密码（管理员）</td><td class="mono">showroomctl user-passwd &lt;账号&gt; --gen-password</td></tr>
+        <tr><td>项目列表</td><td class="mono">showroom ps</td></tr>
+        <tr><td>发布（单表单：本地 tar / 镜像库）/ 仅上传</td><td class="mono">showroom deploy / push / publish</td></tr>
+        <tr><td>启动 / 停止 / 回滚 / 删除</td><td class="mono">showroom start / stop / rollback / rm</td></tr>
+        <tr><td>日志 / 环境变量</td><td class="mono">showroom logs / showroom env</td></tr>
+        <tr><td>SQL 执行 / 表清单 / 预览</td><td class="mono">showroom db sql / tables / preview</td></tr>
+        <tr><td>备份下载 / 恢复上传 / 重置</td><td class="mono">showroom db dump / restore / reset</td></tr>
+      </tbody>
+    </table></div>
     </div>
     <div class="hpanel hidden" id="hp-mirror">
     <h2>镜像规范</h2>
@@ -355,26 +376,9 @@
         </tr>
       </tbody>
     </table></div>
-    <p class="note">文件大小在首次下载后显示。CLI 首次配置见上「CLI 使用」一节。</p>
+    <p class="note">文件大小在首次下载后显示。CLI 首次配置见「CLI 使用」栏目。</p>
 
-    <h2>CLI 命令对照</h2>
-    <div class="tbl-wrap"><table>
-      <thead><tr><th>控制台功能</th><th>CLI 等价命令</th></tr></thead>
-      <tbody>
-        <tr><td>账号密码登录（自动绑定本机）</td><td class="mono">showroom login &lt;账号&gt;</td></tr>
-        <tr><td>退出登录</td><td class="mono">showroom logout</td></tr>
-        <tr><td>修改密码（登录态自助）</td><td class="wrap">控制台「设置 → 修改密码」入口（CLI 暂无；管理员可代为重置，见下）</td></tr>
-        <tr><td>生成/重置本机签名密钥（调试用）</td><td class="mono">showroom keygen</td></tr>
-        <tr class="admin-only hidden"><td>发放新账号（初始密码 / 管理员）</td><td class="mono">showroomctl user-add &lt;账号&gt; --gen-password [--admin]</td></tr>
-        <tr class="admin-only hidden"><td>补发 / 重置密码（管理员）</td><td class="mono">showroomctl user-passwd &lt;账号&gt; --gen-password</td></tr>
-        <tr><td>项目列表</td><td class="mono">showroom ps</td></tr>
-        <tr><td>发布（单表单：本地 tar / 镜像库）/ 仅上传</td><td class="mono">showroom deploy / push / publish</td></tr>
-        <tr><td>启动 / 停止 / 回滚 / 删除</td><td class="mono">showroom start / stop / rollback / rm</td></tr>
-        <tr><td>日志 / 环境变量</td><td class="mono">showroom logs / showroom env</td></tr>
-        <tr><td>SQL 执行 / 表清单 / 预览</td><td class="mono">showroom db sql / tables / preview</td></tr>
-        <tr><td>备份下载 / 恢复上传 / 重置</td><td class="mono">showroom db dump / restore / reset</td></tr>
-      </tbody>
-    </table></div>
+
 
     </div>
     <div class="hpanel hidden" id="hp-errors">
