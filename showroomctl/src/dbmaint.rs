@@ -22,11 +22,12 @@ pub const DUMP_MAX_BYTES: usize = 256 << 20;
 
 // —— 纯校验 / 解析（单测覆盖，不碰 docker）——
 
-/// 危险语句检测（SPEC §9）：词边界 + 大小写不敏感匹配 DROP/TRUNCATE/DELETE。
+/// 危险语句检测（SPEC §9；谓词单源——控制台/CLI 的确认弹层都由本判定经 E_STATE 触发）：
+/// 词边界 + 大小写不敏感匹配 DROP/TRUNCATE/DELETE/ALTER（ALTER 为用户裁决追加）。
 /// 字符串字面量里的裸词会保守触发（宁可多要一次 confirm）；dropped_at 这类标识符不误报。
 pub fn sql_needs_confirm(sql: &str) -> bool {
     let lower = sql.to_ascii_lowercase();
-    ["drop", "truncate", "delete"].iter().any(|w| has_word(&lower, w))
+    ["drop", "truncate", "delete", "alter"].iter().any(|w| has_word(&lower, w))
 }
 
 /// 大小写不敏感的 `\bword\b` 匹配（词字符 = [A-Za-z0-9_]，免引 regex 依赖）。
@@ -123,6 +124,17 @@ mod sql_csv_tests {
         assert!(is_plain_select("select * from t"));
         assert!(is_plain_select("  \n SELECT x")); // 前导空白
         assert!(is_plain_select("SeLeCt 1")); // 大小写不敏感
+    }
+
+    #[test]
+    fn needs_confirm_word_list() {
+        use super::sql_needs_confirm;
+        assert!(sql_needs_confirm("DROP TABLE t"));
+        assert!(sql_needs_confirm("delete from t"));
+        assert!(sql_needs_confirm("TRUNCATE t"));
+        assert!(sql_needs_confirm("alter table t add c int")); // 用户裁决追加
+        assert!(!sql_needs_confirm("SELECT * FROM t"));
+        assert!(!sql_needs_confirm("SELECT 'delete' FROM t") == false); // 字面量保守触发（文档化行为）
     }
 
     #[test]

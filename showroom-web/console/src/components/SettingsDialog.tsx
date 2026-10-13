@@ -133,7 +133,6 @@ export function PasswordDialog({ open, onOpenChange, onDone }: { open: boolean; 
       await api("POST", "/_api/auth/pw-commit", { user: state.user, record });
       setCur(""); setNw(""); setNw2("");
       onOpenChange(false);
-      toast.success("密码修改成功：请使用新密码重新登录。");
       onDone?.(); // 页内登出回登录框（提示行写明请用新密码重登），不刷新页面
     } catch (err2) {
       const e2 = err2 as { error?: string; msg?: string };

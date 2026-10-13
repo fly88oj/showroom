@@ -74,6 +74,7 @@ function UsersPanel() {
   const [users, setUsers] = useState<UserRow[] | null>(null);
   const [addOpen, setAddOpen] = useState(false);
   const [psTarget, setPsTarget] = useState<string | null>(null);
+  const [resetConfirm, setResetConfirm] = useState<string | null>(null); // 重置确认目标账号
   const [psPw, setPsPw] = useState("");
   const [confirmAct, setConfirmAct] = useState<{ title: string; body: string; run: () => Promise<void> } | null>(null);
   const [busy, setBusy] = useState(false);
@@ -121,15 +122,17 @@ function UsersPanel() {
     });
   }
 
+  /** 重置密码：先确认（modal 二次确认，用户裁决），确认后生成+passwd-set+一次性展示。 */
   async function passwdSet(user: string) {
     const pw = randAlnum(16);
+    setResetConfirm(null);
     try {
       const j = (await api("POST", "/_api/admin/passwd-set", { user, password: pw })) as { password?: string };
       setPsPw(j.password || pw);
       setPsTarget(user);
       await load();
     } catch (e) {
-      toast.error(`补发密码失败：${(e as { msg?: string }).msg ?? ""}`);
+      toast.error(`重置密码失败：${(e as { msg?: string }).msg ?? ""}`);
     }
   }
 
@@ -162,8 +165,8 @@ function UsersPanel() {
                       {u.admin && <Badge variant="success">管理员</Badge>}
                       <span className="text-xs text-muted-foreground">· 项目数 {u.projects ?? "—"} · 设备 {u.keys?.length ?? 0} 台</span>
                       <span className="flex-1" />
-                      <Button size="sm" variant="outline" onClick={() => passwdSet(u.user)}>
-                        补发密码
+                      <Button size="sm" variant="outline" onClick={() => setResetConfirm(u.user)}>
+                        重置密码
                       </Button>
                       {u.admin
                         ? <Button size="sm" variant="outline" onClick={() => adminAction(u, "userunadmin")}>取消管理员</Button>
@@ -200,6 +203,13 @@ function UsersPanel() {
 
       <UserAddDialog open={addOpen} onOpenChange={setAddOpen} onDone={load} />
       <PasswdSetDialog user={psTarget} pw={psPw} onClose={() => setPsTarget(null)} />
+      <Confirm
+        open={!!resetConfirm} onOpenChange={(v) => !v && setResetConfirm(null)}
+        title={`重置账号 ${resetConfirm} 的密码？`} confirmText="重置"
+        onConfirm={() => { if (resetConfirm) void passwdSet(resetConfirm); }}
+      >
+        将生成新的登录初始密码，原密码即刻失效；其他设备不受影响。新密码仅显示一次，请立即交予发布者妥善保存。
+      </Confirm>
       <Confirm
         open={!!confirmAct} onOpenChange={(v) => !v && setConfirmAct(null)}
         title={confirmAct?.title ?? ""} confirmText="确认执行" busy={busy} onConfirm={runConfirm}
@@ -314,7 +324,7 @@ function PasswdSetDialog({ user, pw, onClose }: { user: string | null; pw: strin
   return (
     <Dialog open={!!user} onOpenChange={(v) => !v && onClose()}>
       <DialogContent className="sm:max-w-md">
-        <DialogHeader><DialogTitle>补发密码</DialogTitle></DialogHeader>
+        <DialogHeader><DialogTitle>重置密码</DialogTitle></DialogHeader>
         <Alert variant="destructive">
           <ShieldAlertIcon />
           <AlertTitle>已为账号 <span className="font-mono">{user}</span> 生成新的登录初始密码</AlertTitle>

@@ -23,15 +23,11 @@ import { cn } from "cn";
 import { toast } from "sonner";
 import { api, apiDo, respErr } from "@/lib/api";
 import { useApp, apiFailToast } from "@/lib/app";
-import { derToPem, enc } from "@/lib/bytes";
-import { checkProj, DUMP_CHUNK, pemReady, platformPem, SEG } from "@/lib/state";
-import { ex, mem, put, shimCStr, unput, alloc } from "@/lib/wasm";
-import { sealBegin, pushSlice, pushFlush, uploadPayload } from "@/lib/upload";
+import { checkProj, DUMP_CHUNK, pemReady, platformPem } from "@/lib/state";
+import { openSession, oneTimeRsaPemPair, sealToEnvelope, uploadPayload } from "@/lib/envelope";
 
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 const PREVIEW_MAX = 200; // 服务端 db-preview 上限（本地分页基于全量 ≤200 行）
-const DANGEROUS_SQL = /\b(drop|truncate|delete|alter)\b/i;
-
 /** 按分号拆分多语句：单引号（含 '' 转义）/双引号/$$ 美元引用内的分号不拆（psql 语义）。 */
 export function splitSql(text: string): string[] {
   const out: string[] = [];
@@ -164,18 +160,17 @@ export function Data({ onOpenSettings }: { onOpenSettings: () => void }) {
     if (bad) { setProjErr(bad); return; }
     const stmts = splitSql(sql);
     if (stmts.length === 0) { setSqlResult({ info: ["请输入要执行的 SQL 语句"], tables: [] }); return; }
-    if (stmts.some((st) => DANGEROUS_SQL.test(st))) { setDangerSql(stmts); return; }
     await execSql(stmts);
   }
 
-  async function execSql(stmts: string[]) {
-    setSqlBusy(true); setSqlResult(null); setDangerSql(null);
+  async function execSql(stmts: string[], confirmed = false) {
+    setSqlBusy(true); setSqlResult(null);
     const info: string[] = [];
     const tbs: SqlPanel["tables"] = [];
     for (let i = 0; i < stmts.length; i++) {
       const st = stmts[i];
       try {
-        const j = (await api("POST", "/_api/db-sql", { project: dbProject, sql: st, confirm: true })) as { out?: string; csv?: string };
+        const j = (await api("POST", "/_api/db-sql", { project: dbProject, sql: st, confirm: confirmed })) as { out?: string; csv?: string };
         if (j.csv) {
           const t = parseCsv(j.csv);
           if (t.cols.length) tbs.push({ title: `结果 ${tbs.length + 1}`, cols: t.cols, rows: t.rows, total: t.rows.length });
@@ -184,7 +179,14 @@ export function Data({ onOpenSettings }: { onOpenSettings: () => void }) {
           info.push(`语句 ${i + 1}：${(j.out ?? "OK").trim().split("\n").slice(0, 3).join(" ⏎ ")}`);
         }
       } catch (e) {
-        info.push(`语句 ${i + 1} 失败：${(e as { msg?: string; error?: string }).msg ?? (e as { error?: string }).error ?? "网络异常"}`);
+        const err = e as { error?: string; msg?: string };
+        // 谓词单源：服务端 sql_needs_confirm 判定危险（E_STATE）→ 弹层确认后 confirm:true 重发
+        if (err.error === "E_STATE" && (err.msg || "").includes("confirm") && !confirmed) {
+          setSqlBusy(false);
+          setDangerSql(stmts);
+          return;
+        }
+        info.push(`语句 ${i + 1} 失败：${err.msg ?? err.error ?? "网络异常"}`);
       }
     }
     setSqlResult({ info, tables: tbs });
@@ -196,24 +198,7 @@ export function Data({ onOpenSettings }: { onOpenSettings: () => void }) {
     if (bad) { setProjErr(bad); return; }
     setProg({ cur: 0, total: 1 }); setProgTxt("正在准备下载…");
     try {
-      // 一次性 RSA-3072（WebCrypto；非安全上下文回落 wasm 垫片）
-      let pair: { pub: string; priv: string };
-      try {
-        const kp = await crypto.subtle.generateKey(
-          { name: "RSA-OAEP", modulusLength: 3072, publicExponent: new Uint8Array([1, 0, 1]), hash: "SHA-256" } as Algorithm & RsaHashedKeyGenParams,
-          true, ["encrypt", "decrypt"],
-        );
-        const spki = new Uint8Array(await crypto.subtle.exportKey("spki", kp.publicKey));
-        const pkcs8 = new Uint8Array(await crypto.subtle.exportKey("pkcs8", kp.privateKey));
-        pair = { pub: derToPem(spki, "PUBLIC KEY"), priv: derToPem(pkcs8, "PRIVATE KEY") };
-      } catch {
-        const sid = (ex.sr_keygen_rsa as () => number)();
-        if (sid <= 0) throw new Error("下载准备失败");
-        pair = {
-          pub: shimCStr((p, c) => (ex.sr_rsa_pub_pem as (a: number, b: number, c: number) => number)(sid, p, c), 1024),
-          priv: shimCStr((p, c) => (ex.sr_rsa_priv_pem as (a: number, b: number, c: number) => number)(sid, p, c), 4096),
-        };
-      }
+      const pair = await oneTimeRsaPemPair();
       setProgTxt("已发起备份（服务端后台 pg_dump 加密导出）…");
       const j = (await api("POST", "/_api/db-dump-begin", { project: dbProject, client_pub_pem: pair.pub })) as { dump_id: string };
       const dumpId = j.dump_id;
@@ -279,19 +264,7 @@ export function Data({ onOpenSettings }: { onOpenSettings: () => void }) {
         setProg({ cur: done, total: raw });
         setProgTxt(`压缩中 ${done} / ${raw} 字节…`);
       });
-      const sid = sealBegin(platformPem(), crypto.getRandomValues(new Uint8Array(32)));
-      const parts: Uint8Array[] = [];
-      const C2 = 4 * 1024 * 1024;
-      for (let o = 0; o < payload.size; o += C2) {
-        const bytes = new Uint8Array(await payload.slice(o, Math.min(o + C2, payload.size)).arrayBuffer());
-        const [w, ob, cap] = pushSlice(sid, bytes);
-        parts.push(new Uint8Array(mem().subarray(ob, ob + w)));
-        unput(ob, cap);
-      }
-      { const [w, ob, cap] = pushFlush(sid); parts.push(new Uint8Array(mem().subarray(ob, ob + w))); unput(ob, cap); }
-      (ex.sr_seal_end as (s: number) => number)(sid);
-      const envelope = new Uint8Array(parts.reduce((n, p) => n + p.length, 0));
-      { let off = 0; for (const p of parts) { envelope.set(p, off); off += p.length; } }
+      const envelope = await sealToEnvelope(platformPem(), payload);
       setProgTxt("正在上传恢复（服务端解密并 pg_restore）…");
       const j = (await api("POST", `/_api/db-restore?project=${encodeURIComponent(dbProject)}&confirm=true`, envelope)) as { out?: string };
       setProg(null); setProgTxt("");
@@ -629,7 +602,7 @@ export function Data({ onOpenSettings }: { onOpenSettings: () => void }) {
       <Confirm
         open={!!dangerSql} onOpenChange={(v) => !v && setDangerSql(null)}
         title="确认执行危险 SQL？" confirmText="执行" busy={sqlBusy}
-        onConfirm={() => { if (dangerSql) void execSql(dangerSql); }}
+        onConfirm={() => { if (dangerSql) void execSql(dangerSql, true); }}
       >
         本次执行包含 DROP / DELETE / TRUNCATE / ALTER 语句，数据变更不可自动回滚（E_STATE：危险 SQL 需确认）；如需保留现况请先「备份下载」。
       </Confirm>
@@ -695,23 +668,3 @@ function parseCsv(text: string): { cols: string[]; rows: string[][] } {
   return { cols: out[0] ?? [], rows: out.slice(1) };
 }
 
-/** 信封流式解封会话（§2）：分片任意边界，内部按段缓冲；每段输出立即拷贝脱离 wasm 内存。 */
-function openSession(privPem: string) {
-  const [pp, pl] = put(enc.encode(privPem));
-  const sid = (ex.sr_open_begin as (p: number, l: number) => number)(pp, pl);
-  unput(pp, pl);
-  if (sid <= 0) throw new Error("解封会话创建失败：私钥 PEM 无效");
-  return {
-    push(bytes: Uint8Array): Uint8Array | null {
-      const [ip, il] = bytes.length ? put(bytes) : [0, 0];
-      let cap = bytes.length + SEG + 64, ob = alloc(cap);
-      let w = (ex.sr_open_push as (a: number, b: number, c: number, d: number, e: number) => number)(sid, ip, il, ob, cap);
-      if (w < 0 && w <= -40) { unput(ob, cap); cap = -w; ob = alloc(cap); w = (ex.sr_open_push as (a: number, b: number, c: number, d: number, e: number) => number)(sid, ip, il, ob, cap); }
-      const o = w > 0 ? new Uint8Array(mem().subarray(ob, ob + w)) : null;
-      unput(ip, il); unput(ob, cap);
-      if (w < 0) throw new Error(`解封失败（${w}）：数据损坏或私钥不匹配`);
-      return o;
-    },
-    end() { (ex.sr_open_end as (s: number) => number)(sid); },
-  };
-}

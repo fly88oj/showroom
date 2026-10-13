@@ -1,40 +1,14 @@
-// —— upload.ts：加密信封分片上传链路（移植自 dist/js/img.mjs，协议零改动）——
-// zstd 全量压缩（两遍法第一遍）→ import-begin → seal 逐 8MB 片（octet-stream 签名）→ flush → 总长校验 → import-end。
-// 断点续传：sr.up.<id> 记录会话 seed；压缩确定性 ⇒ 重放已收分片密文一致。
-import { Buffer_fromHex, enc, toHex } from "@/lib/bytes";
+// —— upload.ts：分片上传编排（import-begin → 逐片签名 POST → import-end；断点续传重放）——
+// 信封/压缩原语在 lib/envelope.ts（本模块只做传输与续传协议）。
+import { toHex, Buffer_fromHex } from "@/lib/bytes";
 import { api, checkResp, signHeaderPtr } from "@/lib/api";
-import { ex, mem, put, unput, alloc } from "@/lib/wasm";
-import { CHUNK, SEG, NONCE, TAG, WRAP, platformPem, pemReady, dataInvalidate } from "@/lib/state";
+import { mem, unput } from "@/lib/wasm";
+import { dataInvalidate, pemReady, platformPem } from "@/lib/state";
+import {
+  pushSlice, pushFlush, sealBegin, sealEnd, sealedTotal, uploadPayload,
+} from "@/lib/envelope";
 
-export const sealedTotal = (n: number) => WRAP + n + Math.ceil(n / SEG) * (NONCE + TAG);
-
-export function sealBegin(pem: string, seedBytes: Uint8Array): number {
-  const [pemp, peml] = put(enc.encode(pem));
-  const [ssp, ssl] = put(seedBytes);
-  const sid = (ex.sr_seal_begin_seed as (a: number, b: number, c: number) => number)(pemp, peml, ssp);
-  unput(pemp, peml);
-  unput(ssp, ssl);
-  if (sid <= 0) throw { error: "E_NET", msg: `加密会话创建失败（${sid}）：请检查平台公钥 PEM` };
-  return sid;
-}
-
-export function pushSlice(sid: number, bytes: Uint8Array): [number, number, number] {
-  const [ip, il] = put(bytes);
-  const cap = WRAP + NONCE + TAG + bytes.length + (Math.ceil(bytes.length / SEG) + 2) * (NONCE + TAG) + 64;
-  const ob = alloc(cap);
-  const w = (ex.sr_seal_push as (a: number, b: number, c: number, d: number, e: number) => number)(sid, ip, il, ob, cap);
-  unput(ip, il);
-  if (w < 0) { unput(ob, cap); throw { error: "E_NET", msg: `本地加密失败（${w}）` }; }
-  return [w, ob, cap];
-}
-
-export function pushFlush(sid: number): [number, number, number] {
-  const cap = WRAP + SEG + NONCE + TAG + 64;
-  const ob = alloc(cap);
-  const w = (ex.sr_seal_push as (a: number, b: number, c: number, d: number, e: number) => number)(sid, 0, 0, ob, cap);
-  if (w < 0) { unput(ob, cap); throw { error: "E_NET", msg: `本地加密收尾失败（${w}）` }; }
-  return [w, ob, cap];
-}
+export { sealedTotal, uploadPayload };
 
 async function postChunk(uploadId: string, seq: number, ptr: number, len: number, attempt = 1): Promise<Record<string, unknown>> {
   const pathQ = `/_api/import-chunk?upload=${encodeURIComponent(uploadId)}&seq=${seq}`;
@@ -57,47 +31,6 @@ async function postChunk(uploadId: string, seq: number, ptr: number, len: number
   }
 }
 
-// —— 上传压缩（全链路 zstd 统一）：逐 8MB 片压成独立完整 zstd 帧 ——
-export const ZSTD_LEVEL = 19;
-const isZstdHead = (b: Uint8Array) => b && b.length >= 4 && b[0] === 0x28 && b[1] === 0xb5 && b[2] === 0x2f && b[3] === 0xfd;
-
-function zPush(sid: number, bytes: Uint8Array): [number, number, number] {
-  const [ip, il] = put(bytes);
-  const cap = bytes.length + (bytes.length >> 3) + 4096;
-  const ob = alloc(cap);
-  const w = (ex.sr_zstd_push as (a: number, b: number, c: number, d: number, e: number) => number)(sid, ip, il, ob, cap);
-  unput(ip, il);
-  if (w < 0) { unput(ob, cap); throw { error: "E_NET", msg: `本地压缩失败（${w}）` }; }
-  return [w, ob, cap];
-}
-
-/** 全量压缩为 Blob：压缩确定性（同输入+同 level ⇒ 逐字节相同）是断点续传重放的前提。 */
-async function compressToBlob(file: File, note?: (done: number, raw: number) => void): Promise<Blob> {
-  const sid = (ex.sr_zstd_begin as (l: number) => number)(ZSTD_LEVEL);
-  if (sid <= 0) throw { error: "E_NET", msg: `压缩会话创建失败（${sid}）` };
-  const parts: BlobPart[] = [];
-  try {
-    for (let o = 0; o < file.size; o += CHUNK) {
-      const end = Math.min(o + CHUNK, file.size);
-      const bytes = new Uint8Array(await file.slice(o, end).arrayBuffer());
-      const [w, ob, cap] = zPush(sid, bytes);
-      if (w > 0) parts.push(new Uint8Array(mem().subarray(ob, ob + w)));
-      unput(ob, cap);
-      if (note) note(end, file.size);
-    }
-  } finally {
-    (ex.sr_zstd_end as (s: number) => number)(sid);
-  }
-  return new Blob(parts);
-}
-
-/** 上传载荷统一入口：文件头已是 zstd 魔数 → 原样；否则压缩后上传。 */
-export async function uploadPayload(file: File, note?: (done: number, raw: number) => void): Promise<{ blob: Blob; zstd: boolean }> {
-  const head = new Uint8Array(await file.slice(0, 4).arrayBuffer());
-  if (isZstdHead(head)) return { blob: file, zstd: true };
-  return { blob: await compressToBlob(file, note), zstd: false };
-}
-
 export interface UpRecord { seed: string; project: string; tag: string; size: number; zsize: number; name: string }
 
 export function saveUpSession(uploadId: string, rec: UpRecord) {
@@ -117,10 +50,11 @@ export async function uploadRest(
   sent0: number, total: number, note?: (sent: number, total: number) => void,
   onSpaceInvalidate?: () => void,
 ): Promise<void> {
-  const slices = Math.ceil(blob.size / CHUNK) || 1;
+  const CH = 8 * 1024 * 1024;
+  const slices = Math.ceil(blob.size / CH) || 1;
   let sent = sent0;
   for (let i = startSeq; i < slices; i++) {
-    const part = blob.slice(i * CHUNK, Math.min((i + 1) * CHUNK, blob.size));
+    const part = blob.slice(i * CH, Math.min((i + 1) * CH, blob.size));
     const bytes = new Uint8Array(await part.arrayBuffer());
     const [w, ob, cap] = pushSlice(sid, bytes);
     try { await postChunk(uploadId, i, ob, w); } finally { unput(ob, cap); }
@@ -134,7 +68,7 @@ export async function uploadRest(
     note?.(sent, total);
   }
   if (sent !== total) throw { error: "E_STATE", msg: `信封总长校验失败：本地 ${sent} ≠ 预计 ${total}（不上传收尾，请重试）` };
-  (ex.sr_seal_end as (s: number) => number)(sid);
+  sealEnd(sid);
   await api("POST", `/_api/import-end?upload=${encodeURIComponent(uploadId)}`, null);
   localStorage.removeItem("sr.up." + uploadId);
   dataInvalidate("space");
@@ -188,18 +122,19 @@ export async function resumeUploadCore(
     throw { error: "E_STATE", msg: `压缩产物长度与上次不符（${zb.size} ≠ ${saved.zsize}），请确认选择的是同一文件` };
   }
   const total = sealedTotal(zb.size);
-  const slices = Math.ceil(zb.size / CHUNK) || 1;
+  const CH = 8 * 1024 * 1024;
+  const slices = Math.ceil(zb.size / CH) || 1;
   const sid = sealBegin(pem, Buffer_fromHex(saved.seed));
   let sent = 0;
   for (let i = 0; i < Math.min(rec, slices); i++) { // 重放已收分片（同 seed+同产物 ⇒ 密文一致，只推进会话状态）
-    const part = zb.slice(i * CHUNK, Math.min((i + 1) * CHUNK, zb.size));
+    const part = zb.slice(i * CH, Math.min((i + 1) * CH, zb.size));
     const bytes = new Uint8Array(await part.arrayBuffer());
     const [w, ob, cap] = pushSlice(sid, bytes);
     sent += w;
     unput(ob, cap);
   }
-  (opts.upNote || (() => {}))(sent, total);
-  const flushBytes = (zb.size % SEG) ? (zb.size % SEG) + NONCE + TAG : 0;
+  opts.upNote?.(sent, total);
+  const flushBytes = (zb.size % (4 * 1024 * 1024)) ? (zb.size % (4 * 1024 * 1024)) + 12 + 16 : 0;
   if (rec < slices) {
     await uploadRest(id, sid, zb, rec, sent, total, opts.upNote, opts.onSpaceInvalidate);
     return { zstd: pre, zsize: zb.size };
@@ -212,11 +147,10 @@ export async function resumeUploadCore(
     sent += flushBytes; // 收尾片也已收到，只补计数
   }
   if (sent !== total) throw { error: "E_STATE", msg: `重放长度不符（${sent}/${total}），请重新发起` };
-  (ex.sr_seal_end as (s: number) => number)(sid);
+  sealEnd(sid);
   await api("POST", `/_api/import-end?upload=${encodeURIComponent(id)}`, null);
   localStorage.removeItem("sr.up." + id);
   dataInvalidate("space");
   opts.onSpaceInvalidate?.();
   return { zstd: pre, zsize: zb.size };
 }
-

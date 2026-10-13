@@ -28,11 +28,16 @@ export interface SpaceInfo { availGb: number; totalGb: number; reserveGb: number
 
 export interface Session { user: string; admin: boolean }
 
-interface AppState {
+// —— 三层 context 接口（useApp 聚合成既有 AppState 形状，页面零改动）——
+interface SessionState {
   boot: "loading" | "login" | "app"; // wasm 装载中 / 登录窗 / 控制台
   session: Session | null;
   login: (user: string, pass: string) => Promise<void>;
   logout: () => void;
+  onPwChanged: () => void;
+  loginNotice: string;
+}
+interface DataState {
   tab: Tab;
   setTab: (t: Tab) => void;
   pubPrefill: string | null;
@@ -47,18 +52,19 @@ interface AppState {
   rmImage: (name: string) => Promise<void>;
   space: SpaceInfo;
   refreshSpace: (force?: boolean) => Promise<void>;
-  events: string[];
-  evConnected: boolean;
-  /** 行内在途标记（§4）：发布中…/上传中/重建中(60s)/异常(60s)——服务端 status 收敛前的本地过渡 */
   marks: Record<string, { kind: "publishing" | "uploading" | "rebuilding" | "failed"; until: number }>;
   markRow: (project: string, kind: "publishing" | "uploading" | "rebuilding" | "failed", ms: number) => void;
-  /** 改密成功收口：页内登出（清本机钥匙）+ 登录框提示行（原版 shell.mjs 语义，不 reload） */
-  onPwChanged: () => void;
-  /** 登录框一次性提示（改密成功后由 onPwChanged 写入） */
-  loginNotice: string;
 }
+interface EventsState {
+  events: string[];
+  evConnected: boolean;
+}
+type AppState = SessionState & DataState & EventsState;
 
-const Ctx = createContext<AppState | null>(null);
+
+const SessionCtx = createContext<SessionState | null>(null);
+const DataCtx = createContext<DataState | null>(null);
+const EventsCtx = createContext<EventsState | null>(null);
 
 /** D1：更新列 YYYY/MM/DD HH:MM（unix 秒 → 本地时区）。 */
 export const fmtTime = (unixSec: number) => {
@@ -86,18 +92,116 @@ const mapProject = (p: Record<string, unknown>): Project => {
 };
 
 export function AppProvider({ children }: { children: ReactNode }) {
+  return (
+    <DataProvider>
+      <SessionProvider>
+        <EventsProvider>{children}</EventsProvider>
+      </SessionProvider>
+    </DataProvider>
+  );
+}
+
+/** 会话层→数据层桥：DataProvider 挂载时填充（登录四路并发/登出清数据由会话层触发，层间无循环依赖）。 */
+const dataBridge: {
+  refreshProjects?: (f?: boolean) => Promise<void>;
+  ensureImages?: (f?: boolean) => Promise<void>;
+  refreshSpace?: (f?: boolean) => Promise<void>;
+  reset?: () => void;
+} = {};
+
+// —— 会话层：boot/登录/退出/心跳/改密收口/登录框提示 ——
+function SessionProvider({ children }: { children: ReactNode }) {
   const [boot, setBoot] = useState<"loading" | "login" | "app">("loading");
   const [session, setSession] = useState<Session | null>(null);
   const [loginNotice, setLoginNotice] = useState("");
+
+  const syncAdmin = useCallback(async () => {
+    const j = (await api("GET", "/_api/whoami")) as { admin?: boolean; platform_pem?: string };
+    state.admin = !!j.admin;
+    if (j.platform_pem && !state.pem) hydratePem(j.platform_pem);
+    setSession((s) => (s ? { ...s, admin: !!j.admin } : s));
+  }, []);
+
+  const enterApp = useCallback(async () => {
+    state.loggedIn = true;
+    setBoot("app");
+    setSession({ user: state.user, admin: state.admin });
+    startHeartbeat(() => { // E_AUTH：钥匙过期/吊销 → 踢回登录窗
+      state.loggedIn = false;
+      setSession(null);
+      setBoot("login");
+    });
+    // plan-17 §3：登录即 4 路并发（projects/images/space/whoami），任一路失败不阻断
+    await Promise.allSettled([
+      dataBridge.refreshProjects?.(true), dataBridge.ensureImages?.(true),
+      dataBridge.refreshSpace?.(true), syncAdmin(),
+    ]);
+  }, [syncAdmin]);
+
+  const login = useCallback(async (user: string, pass: string) => {
+    setLoginNotice("");
+    await passwordLogin(user.trim(), pass);
+    await enterApp();
+  }, [enterApp]);
+
+  const logout = useCallback(() => {
+    stopHeartbeat();
+    if (state.seed && state.user && state.kid) {
+      api("POST", "/_api/key-selfrm", { kid: state.kid }).catch(() => {});
+    }
+    state.loggedIn = false;
+    state.admin = false;
+    state.boundAdmin = false;
+    localStorage.removeItem("sr.seed");
+    localStorage.removeItem("sr.user");
+    dataBridge.reset?.();
+    setSession(null);
+    setBoot("login");
+  }, []);
+
+  const onPwChanged = useCallback(() => {
+    // 改密=结束当前会话回登录框（提示行写明用新密码重登）；不刷新页面。
+    // 保留 sr.seed：重登时同一把候选钥匙幂等重绑（服务端不动钥匙）——同机改密不新增设备记录。
+    state.loggedIn = false;
+    setLoginNotice("密码已修改：请输入新密码重新登录。");
+    setSession(null);
+    setBoot("login");
+  }, []);
+
+  // —— 启动：wasm 装载 → 密钥无感 → 有「钥匙+账号」签名自测直达；E_AUTH 回落密码表单 ——
+  useEffect(() => {
+    (async () => {
+      await initWasm();
+      state.user = localStorage.getItem("sr.user") || "";
+      ensureSeed();
+      if (state.seed && NAME_RE.test(state.user)) {
+        try {
+          await api("GET", "/_api/health");
+          await enterApp();
+          return;
+        } catch {
+          state.user = localStorage.getItem("sr.user") || "";
+        }
+      }
+      setBoot("login");
+    })().catch(() => setBoot("login"));
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  const value = useMemo<SessionState>(() => ({ boot, session, login, logout, onPwChanged, loginNotice }),
+    [boot, session, login, logout, onPwChanged, loginNotice]);
+  return <SessionCtx.Provider value={value}>{children}</SessionCtx.Provider>;
+}
+
+// —— 数据层：四路资源（TTL 缓存）+ 导航/预填 + 行内在途标记 + 30s 轮询（最外层，无会话依赖）——
+
+function DataProvider({ children }: { children: ReactNode }) {
   const [tab, setTabRaw] = useState<Tab>("proj");
   const [pubPrefill, setPubPrefill] = useState<string | null>(null);
   const [projects, setProjects] = useState<Project[]>([]);
   const [images, setImages] = useState<ImageItem[]>([]);
   const [space, setSpace] = useState<SpaceInfo>({ availGb: 0, totalGb: 0, reserveGb: 0 });
-  const [events, setEvents] = useState<string[]>([]);
   const [marks, setMarks] = useState<Record<string, { kind: "publishing" | "uploading" | "rebuilding" | "failed"; until: number }>>({});
-  const [evConnected, setEvConnected] = useState(false);
-  const evAc = useRef<AbortController | null>(null);
 
   const setTab = useCallback((t: Tab) => {
     setTabRaw(t);
@@ -108,8 +212,7 @@ export function AppProvider({ children }: { children: ReactNode }) {
   const refreshProjects = useCallback(async (force = false) => {
     if (!state.loggedIn || (!force && dataFresh("projects"))) return;
     const j = (await api("GET", "/_api/projects")) as { projects?: Record<string, unknown>[] };
-    const list = (j.projects || []).map(mapProject);
-    setProjects(list);
+    setProjects((j.projects || []).map(mapProject));
     dataMark("projects");
   }, []);
 
@@ -130,57 +233,6 @@ export function AppProvider({ children }: { children: ReactNode }) {
     dataMark("images");
   }, []);
 
-  const syncAdmin = useCallback(async () => {
-    const j = (await api("GET", "/_api/whoami")) as { admin?: boolean; platform_pem?: string };
-    state.admin = !!j.admin;
-    if (j.platform_pem && !state.pem) hydratePem(j.platform_pem); // whoami 自动水合（守卫：不覆盖已有）
-    setSession((s) => (s ? { ...s, admin: !!j.admin } : s));
-  }, []);
-
-  const enterApp = useCallback(async () => {
-    state.loggedIn = true;
-    setBoot("app");
-    setSession({ user: state.user, admin: state.admin });
-    startHeartbeat(() => { // E_AUTH：钥匙过期/吊销 → 踢回登录窗
-      state.loggedIn = false;
-      setBoot("login");
-      setSession(null);
-    });
-    // plan-17 §3：登录即 4 路并发（projects/images/space/whoami），任一路失败不阻断
-    await Promise.allSettled([refreshProjects(true), ensureImages(true), refreshSpace(true), syncAdmin()]);
-  }, [refreshProjects, ensureImages, refreshSpace, syncAdmin]);
-
-  const login = useCallback(async (user: string, pass: string) => {
-    setLoginNotice("");
-    await passwordLogin(user.trim(), pass);
-    await enterApp();
-  }, [enterApp]);
-
-  const logout = useCallback(() => {
-    stopHeartbeat(); // 登出即停心跳（防清钥后的无效请求）
-    if (state.seed && state.user && state.kid) {
-      api("POST", "/_api/key-selfrm", { kid: state.kid }).catch(() => {});
-    }
-    state.loggedIn = false;
-    state.admin = false;
-    state.boundAdmin = false;
-    localStorage.removeItem("sr.seed");
-    localStorage.removeItem("sr.user");
-    setProjects([]); setImages([]); setEvents([]); setEvConnected(false);
-    setSession(null);
-    setBoot("login");
-  }, []);
-
-  const onPwChanged = useCallback(() => {
-    // 原版 B2 语义：改密=结束当前会话（清本机钥匙）+ 登录框提示行；不刷新页面
-    state.loggedIn = false;
-    localStorage.removeItem("sr.seed");
-    localStorage.removeItem("sr.user");
-    setLoginNotice("密码已修改：请输入新密码重新登录。");
-    setSession(null);
-    setBoot("login");
-  }, []);
-
   const markRow = useCallback((project: string, kind: "publishing" | "uploading" | "rebuilding" | "failed", ms: number) => {
     setMarks((m) => ({ ...m, [project]: { kind, until: Date.now() + ms } }));
   }, []);
@@ -188,7 +240,7 @@ export function AppProvider({ children }: { children: ReactNode }) {
   const projOp = useCallback(async (name: string, op: "start" | "stop" | "rm") => {
     await api("POST", `/_api/${op}`, { project: name });
     dataInvalidate("projects");
-    await refreshProjects(true); // 写操作强制失效
+    await refreshProjects(true);
   }, [refreshProjects]);
 
   const rollback = useCallback(async (name: string, v: string) => {
@@ -198,7 +250,6 @@ export function AppProvider({ children }: { children: ReactNode }) {
   }, [refreshProjects]);
 
   const publishDone = useCallback(async (_name: string) => {
-    // 阶段二接完整发布链路（seal 分片上传 + publish --wait）；此处先同步列表
     dataInvalidate("projects", "images", "space");
     await Promise.allSettled([refreshProjects(true), ensureImages(true), refreshSpace(true)]);
   }, [refreshProjects, ensureImages, refreshSpace]);
@@ -209,29 +260,57 @@ export function AppProvider({ children }: { children: ReactNode }) {
     await Promise.allSettled([ensureImages(true), refreshSpace(true)]);
   }, [ensureImages, refreshSpace]);
 
-  // —— 启动：wasm 装载 → 密钥无感 → 有「钥匙+账号」签名自测直达；E_AUTH 回落密码表单 ——
+  // 桥填充（每渲染同步最新函数；会话层的登录并发/登出清理经此触发）
   useEffect(() => {
-    (async () => {
-      await initWasm();
-      state.user = localStorage.getItem("sr.user") || "";
-      ensureSeed();
-      if (state.seed && NAME_RE.test(state.user)) {
-        try {
-          await api("GET", "/_api/health");
-          await enterApp();
-          return;
-        } catch {
-          state.user = localStorage.getItem("sr.user") || ""; // 保留账号名便于重登
-        }
-      }
-      setBoot("login");
-    })().catch(() => setBoot("login"));
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []);
+    dataBridge.refreshProjects = refreshProjects;
+    dataBridge.ensureImages = ensureImages;
+    dataBridge.refreshSpace = refreshSpace;
+    dataBridge.reset = () => { setProjects([]); setImages([]); setMarks({}); };
+  });
 
-  // 事件流（§3）：登录即订阅；页签隐藏退订；E_AUTH 由心跳统一踢回
+  // 30s 恒实时（plan-17 §3）：按当前标签只刷新对应数据源
   useEffect(() => {
-    if (boot !== "app") return;
+    if (!state.loggedIn) return;
+    const id = window.setInterval(() => {
+      switch (tab) {
+        case "proj": void refreshProjects(true).catch(() => {}); break;
+        case "img": void ensureImages(true).catch(() => {}); void refreshSpace().catch(() => {}); break;
+        case "db": void refreshSpace().catch(() => {}); break;
+      }
+    }, 30000);
+    return () => clearInterval(id);
+  }, [tab, refreshProjects, ensureImages, refreshSpace]);
+
+  // 断网恢复（§3/验收 8）：连网即强制重取项目与空间
+  useEffect(() => {
+    const onOnline = () => {
+      if (!state.loggedIn) return;
+      void refreshProjects(true).catch(() => {});
+      void refreshSpace(true).catch(() => {});
+    };
+    window.addEventListener("online", onOnline);
+    return () => window.removeEventListener("online", onOnline);
+  }, [refreshProjects, refreshSpace]);
+
+  const value = useMemo<DataState>(() => ({
+    tab, setTab, pubPrefill, setPubPrefill,
+    projects, refreshProjects, projOp, rollback, publishDone,
+    images, ensureImages, rmImage, space, refreshSpace, marks, markRow,
+  }), [tab, pubPrefill, projects, refreshProjects, projOp, rollback, publishDone,
+    images, ensureImages, rmImage, space, refreshSpace, marks, markRow]);
+  return <DataCtx.Provider value={value}>{children}</DataCtx.Provider>;
+}
+
+// —— 事件层：订阅/重连/可见性与登录态联动；事件 2s 去抖驱动项目列表刷新 ——
+function EventsProvider({ children }: { children: ReactNode }) {
+  const [events, setEvents] = useState<string[]>([]);
+  const [evConnected, setEvConnected] = useState(false);
+  const evAc = useRef<AbortController | null>(null);
+  const tab = useContext(DataCtx)!.tab;
+  const refreshProjects = useContext(DataCtx)!.refreshProjects;
+
+  useEffect(() => {
+    if (!state.loggedIn) return;
     const want = !document.hidden && (tab === "proj" || tab === "admin");
     if (!want) {
       evAc.current?.abort();
@@ -256,7 +335,7 @@ export function AppProvider({ children }: { children: ReactNode }) {
         setEvents((evs) => [...evs.slice(-19), new Date().toLocaleTimeString("sv-SE") + "  " + JSON.stringify(j)]);
         // 恒实时（§3）：事件 2s 去抖 → 项目列表即时收敛（容器启停/发布完成等）
         if (evDebounce) clearTimeout(evDebounce);
-        evDebounce = setTimeout(() => { void refreshProjects(true); }, 2000);
+        evDebounce = setTimeout(() => { void refreshProjects(true).catch(() => {}); }, 2000);
       }, ac.signal).catch(() => {
         if (evAc.current === ac) { evAc.current = null; setEvConnected(false); }
         if (alive) retryTimer = setTimeout(start, 5000); // §3 断流 5s 重订
@@ -280,41 +359,19 @@ export function AppProvider({ children }: { children: ReactNode }) {
       evAc.current?.abort();
       evAc.current = null;
     };
-  }, [boot, tab, refreshProjects]);
+  }, [tab, refreshProjects]);
 
-  // 断网恢复（§3/验收 8）：连网即重订事件流 + 强制重取项目与空间
-  useEffect(() => {
-    const onOnline = () => {
-      if (!state.loggedIn) return;
-      void refreshProjects(true);
-      void refreshSpace(true);
-    };
-    window.addEventListener("online", onOnline);
-    return () => window.removeEventListener("online", onOnline);
-  }, [refreshProjects, refreshSpace]);
+  const value = useMemo<EventsState>(() => ({ events, evConnected }), [events, evConnected]);
+  return <EventsCtx.Provider value={value}>{children}</EventsCtx.Provider>;
+}
 
-  // 30s 恒实时（plan-17 §3）：按当前标签只刷新对应数据源
-  useEffect(() => {
-    if (boot !== "app") return;
-    const id = window.setInterval(() => {
-      switch (tab) {
-        case "proj": void refreshProjects(true); break;
-        case "img": void ensureImages(true); void refreshSpace(); break;
-        case "db": void refreshSpace(); break;
-      }
-    }, 30000);
-    return () => clearInterval(id);
-  }, [boot, tab, refreshProjects, ensureImages, refreshSpace]);
-
-  const value = useMemo<AppState>(() => ({
-    boot, session, login, logout, tab, setTab, pubPrefill, setPubPrefill,
-    projects, refreshProjects, projOp, rollback, publishDone,
-    images, ensureImages, rmImage, space, refreshSpace,
-    events, evConnected, marks, markRow, onPwChanged, loginNotice,
-  }), [boot, session, login, logout, tab, pubPrefill, projects, refreshProjects, loginNotice,
-    projOp, rollback, publishDone, images, ensureImages, rmImage, space, refreshSpace, events, evConnected]);
-
-  return <Ctx.Provider value={value}>{children}</Ctx.Provider>;
+/** 聚合 hook：页面统一入口（三层 context 合并成既有 AppState 形状）。 */
+export function useApp(): AppState {
+  const ss = useContext(SessionCtx);
+  const ds = useContext(DataCtx);
+  const es = useContext(EventsCtx);
+  if (!ss || !ds || !es) throw new Error("useApp outside AppProvider");
+  return { ...ss, ...ds, ...es };
 }
 
 // —— 对外 URL 展示策略（plan-17 §6，对齐原版 proj.mjs）：① sr.publicBase → ② location.origin
@@ -342,10 +399,5 @@ export function apiFailToast(e: unknown, what: string, refreshSpace?: (f?: boole
   toast.error(`${what} 失败：${err?.msg || err?.error || "网络异常或服务不可用"}`);
 }
 
-export function useApp(): AppState {
-  const v = useContext(Ctx);
-  if (!v) throw new Error("useApp outside provider");
-  return v;
-}
 
 export { toast };
