@@ -99,8 +99,23 @@ fn legacyslot_of(root: &Path, p: &str) -> Option<String> {
 
 // —— 六端点内核 ——
 
-/// POST /_api/db-sql：confirm 门 + psql 定库执行（stdin），返回 stdout 全文（psql 文本格式）。
-pub fn sql(root: &Path, p: &str, sql: &str, confirm: bool) -> R<String> {
+/// db-sql 响应：`out` 为 psql 输出全文（CLI/旧客户端兼容通道）；单条 SELECT 时额外附
+/// `csv`（psql --csv 机器可读表：首行表头，引号/双引号/换行标准 CSV 转义）——控制台据此
+/// 渲染结果表格（多语句由前端按分号拆分逐条请求 → 多结果 Tab）。
+pub struct SqlResult {
+    pub out: String,
+    pub csv: Option<String>,
+}
+
+/// 单条 SELECT 判定：trim 后以 SELECT 开头（前端已按分号拆分；带 CTE 的 WITH…SELECT
+/// 走文本通道，不影响正确性）。
+fn is_plain_select(sql: &str) -> bool {
+    sql.trim_start().get(..6).map(|s| s.eq_ignore_ascii_case("select")).unwrap_or(false)
+}
+
+/// POST /_api/db-sql：confirm 门 + psql 定库执行（stdin）。
+/// SELECT（单条）用 --csv 执行：out 与 csv 同文（CLI 亦直读）；其余语句走默认文本格式。
+pub fn sql(root: &Path, p: &str, sql: &str, confirm: bool) -> R<SqlResult> {
     if !confirm && sql_needs_confirm(sql) {
         return Err(ApiError::new(
             "E_STATE",
@@ -108,7 +123,12 @@ pub fn sql(root: &Path, p: &str, sql: &str, confirm: bool) -> R<String> {
         ));
     }
     let db = resolve_db(p, legacyslot_of(root, p).as_deref())?.0;
-    dockerops::psql_db(&db, &[], sql.as_bytes())
+    if is_plain_select(sql) {
+        let csv = dockerops::psql_db(&db, &["--csv"], sql.as_bytes())?;
+        Ok(SqlResult { out: csv.clone(), csv: Some(csv) })
+    } else {
+        Ok(SqlResult { out: dockerops::psql_db(&db, &[], sql.as_bytes())?, csv: None })
+    }
 }
 
 /// GET /_api/db-tables：public schema 的用户表（\dt 等价 SQL，非系统表）。

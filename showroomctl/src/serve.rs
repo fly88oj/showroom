@@ -647,8 +647,8 @@ async fn dispatch(
             user_check(&s.root, &req.project, &user)?;
             let (p, sql, confirm) = (req.project, req.sql, req.confirm.unwrap_or(false));
             let root = s.root.clone();
-            let out = blk(move || dbmaint::sql(&root, &p, &sql, confirm)).await?;
-            Ok(Json(json!({"out": out})))
+            let r = blk(move || dbmaint::sql(&root, &p, &sql, confirm)).await?;
+            Ok(Json(json!({"out": r.out, "csv": r.csv})))
         }
 
         ("GET", "/_api/db-tables", _) => {
