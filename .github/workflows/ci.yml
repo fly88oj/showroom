@@ -48,11 +48,12 @@ jobs:
       - name: 安装 zstd
         run: sudo apt-get update && sudo apt-get install -y zstd
 
-      - name: console 类型检查与构建（React + shadcn/ui）
+      - name: console 类型检查、单测与构建（React + shadcn/ui）
         working-directory: showroom-web/console
         run: |
           npm ci --no-audit --no-fund || npm install --no-audit --no-fund
           npx tsc --noEmit -p tsconfig.app.json
+          npm test
           npm run build
       - name: node smoke.mjs（密码学垫片往返）
         working-directory: showroom-web

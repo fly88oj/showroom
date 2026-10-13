@@ -386,6 +386,20 @@ function EventsProvider({ children }: { children: ReactNode }) {
 }
 
 /** 聚合 hook：页面统一入口（三层 context 合并成既有 AppState 形状）。 */
+/** 分页页码列表：≤7 全显；否则首尾+当前页邻近，中间省略（预览/结果分页共用）。 */
+export function pageList(cur: number, total: number): (number | "…")[] {
+  if (total <= 7) return Array.from({ length: total }, (_, i) => i + 1);
+  const keep = [...new Set([1, 2, cur - 1, cur, cur + 1, total - 1, total].filter((x) => x >= 1 && x <= total))].sort((x, y) => x - y);
+  const out: (number | "…")[] = [];
+  let prev = 0;
+  for (const n of keep) {
+    if (n - prev > 1) out.push("…");
+    out.push(n);
+    prev = n;
+  }
+  return out;
+}
+
 export function useApp(): AppState {
   const ss = useContext(SessionCtx);
   const ds = useContext(DataCtx);
