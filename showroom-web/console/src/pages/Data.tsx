@@ -452,7 +452,7 @@ export function Data({ onOpenSettings }: { onOpenSettings: () => void }) {
             <FieldLabel htmlFor="db-sql">SQL 语句（多条以分号分隔，逐条执行）</FieldLabel>
             <Textarea
               id="db-sql" className="min-h-24 font-mono text-xs" spellCheck={false}
-              placeholder={"SELECT * FROM users;"} value={sql} onChange={(e) => setSql(e.target.value)}
+              placeholder="输入要执行的语句…" value={sql} onChange={(e) => setSql(e.target.value)}
             />
           </Field>
           <div><Button onClick={runSql} disabled={sqlBusy}>{sqlBusy ? "执行中…" : "执行 SQL"}</Button></div>
@@ -488,7 +488,7 @@ export function Data({ onOpenSettings }: { onOpenSettings: () => void }) {
           <Separator />
           <h3 className="text-sm font-semibold text-info">备份与恢复</h3>
           <div className="flex flex-wrap items-center gap-3">
-            <Button variant="secondary" onClick={dump}>备份下载（自动生成下载专用密码）</Button>
+            <Button variant="secondary" onClick={dump}>备份下载</Button>
             <label htmlFor="db-restore-file">
               <Button variant="outline" asChild>
                 <span>选择恢复文件</span>
@@ -502,7 +502,7 @@ export function Data({ onOpenSettings }: { onOpenSettings: () => void }) {
               {restoreFile ? `${restoreFile.name}（${restoreFile.size} 字节）` : "未选择文件"}
             </span>
             <Button variant="destructive" disabled={!restoreFile || !dbProject} onClick={() => setRestoreConfirm(true)}>
-              恢复上传（覆盖当前数据）
+              恢复上传
             </Button>
             <Button variant="destructive" disabled={!dbProject} onClick={() => setResetConfirm(true)}>
               重置数据库
