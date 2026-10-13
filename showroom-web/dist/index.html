@@ -144,10 +144,9 @@
             <span class="note changed-note hidden" id="pub-cport-changed">与上次发布不同</span></label>
         </div>
       </details>
-      <!-- 视觉QA P2-3：「发布」「仅上传」同一行排列（row 包组，不再随栅格换行分离） -->
+      <!-- R10：仅上传归镜像库页（用户裁决：镜像 CRUD 主体在镜像库）；发布页上传 Tab=传完即发快捷通道 -->
       <span class="row" id="pub-actions">
         <button type="submit" id="pub-submit">发布</button>
-        <button type="button" id="btn-upload-only">仅上传</button>
       </span>
       <!-- 第1轮UI审查P1：空间条在发布页可见（镜像 tar 上传发生在本页；与镜像库页 #space-note 同数据同刷新） -->
       <p class="note mt-2" id="pub-space-note" aria-live="polite">可用空间：…</p>
@@ -185,7 +184,7 @@
       <ol class="note help-list">
         <li>选「上传镜像」→ 自动压缩 → 上传 → 发布 → 展示访问地址（恒为「访问地址 /&lt;项目名&gt;/」形式）。</li>
         <li>选「镜像库」→ 直接发布已入库镜像（①②两段自动跳过）。</li>
-        <li>任一步失败状态条标红，可点「重试」；「仅上传」只把镜像送入镜像库（不发布），适合先备好镜像、稍后发布。</li>
+        <li>任一步失败状态条标红，可点「重试」；只入库不发布请到「镜像库」页上传。</li>
       </ol>
     </div>
   </section>
@@ -201,6 +200,23 @@
       </table>
     </div>
 
+    <div class="fs">
+      <h3>上传镜像</h3>
+      <div class="row">
+        <label class="field" for="img-up-project"><span>项目</span>
+          <input type="text" id="img-up-project" size="12" class="mono" placeholder="如 demo…"></label>
+        <span class="field">
+          <span>镜像 tar 文件</span>
+          <span class="row">
+            <input type="file" id="img-file" class="file-hidden" aria-label="选择镜像 tar 文件">
+            <label for="img-file" class="file-btn">选择文件</label>
+            <span class="note" id="img-file-name">未选择文件</span>
+            <button type="button" id="btn-img-upload">上传</button>
+          </span>
+        </span>
+      </div>
+      <div class="fb" id="img-upload-fb" aria-live="polite"></div>
+    </div>
     <div class="fs hidden" id="fs-resume">
       <h3>断点续传</h3>
       <div class="row">
@@ -334,7 +350,7 @@
         <tr class="admin-only hidden"><td>发放新账号（初始密码 / 管理员）</td><td class="mono">showroomctl user-add &lt;账号&gt; --gen-password [--admin]</td></tr>
         <tr class="admin-only hidden"><td>补发 / 重置密码（管理员）</td><td class="mono">showroomctl user-passwd &lt;账号&gt; --gen-password</td></tr>
         <tr><td>项目列表</td><td class="mono">showroom ps</td></tr>
-        <tr><td>发布（单表单：本地 tar / 镜像库）/ 仅上传</td><td class="mono">showroom deploy / push / publish</td></tr>
+        <tr><td>发布（上传镜像 / 镜像库）/ 上传入库</td><td class="mono">showroom publish / push</td></tr>
         <tr><td>启动 / 停止 / 回滚 / 删除</td><td class="mono">showroom start / stop / rollback / rm</td></tr>
         <tr><td>日志 / 环境变量</td><td class="mono">showroom logs / showroom env</td></tr>
         <tr><td>SQL 执行 / 表清单 / 预览</td><td class="mono">showroom db sql / tables / preview</td></tr>

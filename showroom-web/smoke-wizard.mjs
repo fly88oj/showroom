@@ -35,7 +35,7 @@
 //      字段校验（空/不一致/与当前相同）→ 当前密码校验复用 login-begin+本地 finish（错即内联拒绝，
 //      不触达 pw-begin）→ pw-begin {user,m1}（SR-SIG1 签名）→ pw-commit {user,record} → 旧密码
 //      失效/新密码可登录（toy 服务端记录替换）→ 成功提示重新登录并退出会话
-//  12) §13 发布三入口并存：一键发布 / 仅上传（无 publish 调用，③④ skip，镜像已入库提示）/
+//  12) §13 R10：发布=上传即发快捷通道；仅上传在镜像库页（onImgUpload，无 publish）/
 //      部署表单（/_api/images 惰性加载+刷新+选择自动带出项目标签+发布）；
 //      §13.2 Redis 浏览用户隔离文案 + 管理员视图标注（whoami 两态）
 //  13) 静态断言：「内存上限」「槽位/slot」零残留 / 旧三步向导主路径零残留 /
@@ -111,7 +111,7 @@ const armTabs = () => { $s('tabs').querySelectorAll = () => ['proj', 'pub', 'img
 /** 模拟浏览器渲染 HTML：给关键按钮桩设置初始文案（busy 恢复断言按真实文字比对）。 */
 const BTN_TEXT = {
   'lg-submit': '登录',
-  'pub-submit': '发布', 'btn-upload-only': '仅上传', 'ad-na-submit': '发放', // plan-17 §5：单表单（dep-submit 删除）
+  'pub-submit': '发布', 'ad-na-submit': '发放', // R10：仅上传迁镜像库页
   'hs-apply': '查看变更', 'hs-confirm': '确认执行', 'hs-rx-preview': '获取确认提示', 'hs-rx-run': '我已了解，执行扩容',
   'pw-submit': '确认修改',
 };
@@ -1069,32 +1069,30 @@ ok(!($s('dp-text').textContent || '').includes('分片'), 'F9：上传失败文�
   ok(![...store.keys()].some((k) => k.startsWith('sr.up.')), '续传成功后本地会话记录清除');
   ok($s('dp-url').textContent === 'http://showroom.test/demo3/', '重试后完成 URL 正确（externalUrl）');
 
-  // 7a-4. §13.1 入口二「仅上传」：同一 tar 选择，只压缩上传入库——无 publish 调用、③④ skip
-  $s('pub-project').value = 'demo4';
-  $s('pub-file').files = [];
-  fire($s('btn-upload-only'), 'click', { preventDefault() {} });
-  ok(($s('pub-file-err').textContent || '').includes('仅上传'), '仅上传未选文件：字段旁内联错误（含下一步指引）');
-  ok(importEndN === 2, '仅上传未选文件：未发起上传请求');
+  // 7a-4. R10 用户裁决：镜像 CRUD 主体在镜像库页——「仅上传」从发布页移除，入库走镜像库「上传镜像」
+  ok(!els.has('btn-upload-only') && !html.includes('btn-upload-only'), '发布页「仅上传」按钮已删（主体归镜像库页）');
+  ok(html.includes('id="btn-img-upload"') && html.includes('上传镜像</h3>'), '镜像库页新增「上传镜像」区（选择文件+上传）');
+  // 镜像库页上传流程：未选文件 → 内联提示；选文件 → 压缩上传 import-end → 无 publish → 清单刷新
+  $s('img-up-project').value = 'demo4';
+  $s('img-file').files = [];
+  fire($s('btn-img-upload'), 'click', { preventDefault() {} });
+  ok(($s('img-upload-fb').textContent || '').includes('请先选择'), '库页上传未选文件：行内提示');
+  ok(importEndN === 2, '库页上传未选文件：未发起上传请求');
   const small2 = new Uint8Array(200000);
   for (let i = 0; i < small2.length; i++) small2[i] = i % 251;
-  $s('pub-file').files = [fakeFile(small2, 'only-up.tar')];
+  $s('img-file').files = [fakeFile(small2, 'only-up.tar')];
   const pubBase = publishN, imgBase = imagesN;
-  fire($s('btn-upload-only'), 'click', { preventDefault() {} });
-  ok(await waitFor(() => importEndN === 3, 20000), '仅上传：压缩 → 分片上传 → import-end 完成');
+  fire($s('btn-img-upload'), 'click', { preventDefault() {} });
+  ok(await waitFor(() => importEndN === 3, 20000), '库页上传：压缩 → 分片上传 → import-end 完成（uploadRest 单次收尾）');
   await sleep(80);
-  ok(publishN === pubBase, '仅上传：全程无 publish 调用（不部署）');
-  ok($s('dp-s1').classList.contains('done') && $s('dp-s2').classList.contains('done'), '仅上传：①压缩②上传两段完成');
-  ok($s('dp-s3').classList.contains('skip') && $s('dp-s4').classList.contains('skip'), '仅上传：③发布④完成标记为跳过');
-  ok(($s('dp-text').textContent || '').includes('镜像已入库'), '仅上传完成文案：「镜像已入库」');
-  ok(($s('dp-text').textContent || '').includes('镜像库'), '仅上传完成文案：指引稍后到「发布」页选「镜像库」源');
-  ok(hidden('dp-done'), '仅上传：不展示部署完成 URL 段');
-  ok(imagesN > imgBase, '仅上传完成后自动刷新镜像清单（新镜像即刻可选）');
-  ok(!$s('btn-upload-only').disabled && $s('btn-upload-only').textContent === '仅上传', '请求结束：按钮恢复原文与可用');
+  ok(publishN === pubBase, '库页上传：全程无 publish 调用（纯入库）');
+  ok(imagesN > imgBase, '库页上传完成后自动刷新镜像清单');
+  ok(!$s('btn-img-upload').disabled, '请求结束：上传按钮恢复可用');
 
   // 7c. plan-17 §5 镜像库源：radio 切换 → ComboBox 选中镜像带出项目/标签 → ①②skip 直接发布
   fire($s('pub-src-registry'), 'change');
-  ok(hidden('pub-src-file-box') && !hidden('pub-src-reg-box') && $s('btn-upload-only').disabled,
-    'R3 Tab：镜像库源选中 → tar 框收起、源镜像下拉出现、「仅上传」禁用（分段 Tab 等价原 radio 行为）');
+  ok(hidden('pub-src-file-box') && !hidden('pub-src-reg-box'),
+    'R10 Tab：镜像库源选中 → tar 框收起、源镜像下拉出现');
   ok($s('pub-src-registry').classList.contains('on') && $s('pub-src-registry').getAttribute('aria-selected') === 'true'
     && !$s('pub-src-tar').classList.contains('on'), 'R3 Tab：选中态 on + aria-selected 同步');
   $s('dep-image').value = 'alice/demo:v1';
@@ -1871,8 +1869,8 @@ ok(!html.includes('账号与钥匙') && !html.includes('删除钥匙') && !html.
 ok(!html.includes('该账号任意钥匙登录即具管理权限') && html.includes('该账号登录即具管理权限'),
   'F2：账号级权限表述设备语言化（「该账号登录即具管理权限」）');
 // —— §13.1 三入口并存（一键不取代分步）+ §13.2/13.3 Redis 隔离 ——
-ok(html.includes('id="pub-submit"') && html.includes('id="btn-upload-only"'),
-  'plan-17 §5：发布主按钮 pub-submit + 次要按钮「仅上传」（三入口收敛为单表单）');
+ok(html.includes('id="pub-submit"') && !html.includes('id="btn-upload-only"'),
+  'R10 裁决：发布页唯一主按钮 pub-submit；「仅上传」归镜像库页（id=btn-img-upload）');
 for (const s of ['仅上传', '镜像已入库', '上传镜像', '镜像库']) ok(html.includes(s), `§13.1/§5/R3：入口与镜像源 Tab 文案「${s}」`);
 ok(html.includes('/_api/images'), '§13.1：/_api/images 已接线（镜像 ComboBox 数据源）');
 ok(html.includes('setComboOptions') && !html.includes('<datalist'), '§13.1：镜像 ComboBox（R5b 自绘下拉：同宽/token 样式/输入过滤）；原生 datalist 全站归零');

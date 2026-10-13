@@ -1,8 +1,8 @@
 // —— img.mjs：镜像库清单/删除 + 空间条 + 加密信封分片上传（seal/zstd 压缩/断点续传）——
 // apiFail 随其磁盘 E_QUOTA 分支的依赖 refreshSpace 就近放置（全部模块均可 import 本层）。
 // upBusy 归 proj.mjs（deploy 流私有旗标）；onResumeUpload 入口亦在 proj.mjs。
-import { $, enc, esc, showMsg, errText, Buffer_fromHex, setComboOptions, diffRows } from './util.mjs';
-import { SEG, WRAP, NONCE, TAG, CHUNK, state, dataFresh, dataMark, dataInvalidate, retryOnce, platformPem } from './state.mjs';
+import { $, enc, esc, showMsg, errText, Buffer_fromHex, setComboOptions, diffRows, busy, toHex } from './util.mjs';
+import { SEG, WRAP, NONCE, TAG, CHUNK, state, dataFresh, dataMark, dataInvalidate, retryOnce, platformPem, pemReady } from './state.mjs';
 import { ex, mem, alloc, put, unput, api, signHeaderPtr, checkResp } from './api.mjs';
 export const apiFail = (what, e) => {
   // §14.2/§14.3：磁盘空间不足的 E_QUOTA（msg 含「磁盘空间不足」）→ 顶部条追加删除引导并刷新空间条（内存类 E_QUOTA 不追加）
@@ -254,4 +254,40 @@ export async function resumeUploadCore(id, file, opts = {}) {
   refreshResumeUi();
   dataInvalidate('space'); refreshSpace(true); // §14.1：import-end 成功后刷新空间条
   return { pre, zsize: zb.size };
+}
+
+// —— R10 用户裁决：镜像 CRUD 主体在镜像库页——上传入库完整序列（压缩→begin→登记→seal→逐片→end）
+let imgUpBusy = false;
+export async function onImgUpload() {
+  if (imgUpBusy) return showMsg('已有上传进行中，请等待完成');
+  const project = document.getElementById('img-up-project')?.value.trim() || '';
+  const f = document.getElementById('img-file')?.files?.[0];
+  if (!project) { $('img-upload-fb').textContent = '请填写项目名（镜像将存入该项目名下）'; return; }
+  if (!f) { $('img-upload-fb').textContent = '请先选择镜像 tar 文件'; return; }
+  if (!pemReady()) return;
+  imgUpBusy = true;
+  busy($('btn-img-upload'), true, '上传中…');
+  try {
+    const { blob: zb } = await uploadPayload(f);
+    const total = sealedTotal(zb.size);
+    const sessSeed = new Uint8Array(32); crypto.getRandomValues(sessSeed);
+    const j = await api('POST', '/_api/import-begin', { project, image_id: f.name, total_bytes: total });
+    const uploadId = j.upload_id, tag = String(j.tag || '');
+    localStorage.setItem('sr.up.' + uploadId, JSON.stringify({ seed: toHex(sessSeed), project, tag, size: f.size, zsize: zb.size, name: f.name }));
+    refreshResumeUi();
+    const sid = sealBegin(platformPem(), sessSeed);
+    await uploadRest(uploadId, sid, zb, 0, 0, total, (sent, t) => { $('img-upload-fb').textContent = `上传中 ${sent} / ${t} 字节`; }); // uploadRest 内部完成 import-end 收尾与会话清理
+    $('img-upload-fb').textContent = `已入库 ${project}:${tag}，可在「发布」页选「镜像库」源发布。`;
+    await ensureImages(true);
+  } catch (e) { apiFail('上传入库', e); $('img-upload-fb').textContent = ''; }
+  busy($('btn-img-upload'), false);
+  imgUpBusy = false;
+}
+
+export function wireImgUpload() {
+  const inp = document.getElementById('img-file');
+  if (!inp || inp._wired) return;
+  inp._wired = true;
+  inp.addEventListener('change', () => { $('img-file-name').textContent = inp.files?.[0]?.name || '未选择文件'; });
+  $('btn-img-upload').addEventListener('click', onImgUpload);
 }

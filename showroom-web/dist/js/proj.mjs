@@ -3,7 +3,7 @@
 import { $, esc, fmtTime, showMsg, errText, fieldErr, clearErrs, busy, copyText, randAlnum, toHex, setComboOptions, diffRows } from './util.mjs';
 import { state, ENV_DESC, checkProj, platformPem, pemReady, dataFresh, dataMark, retryOnce, myProjectNames } from './state.mjs';
 import { api, consumeNdjson } from './api.mjs';
-import { ensureImages, refreshSpace, onImageRm, apiFail, uploadPayload, resumeUploadCore, sealedTotal, sealBegin, uploadRest, refreshResumeUi, latestUpId, upProgress } from './img.mjs';
+import { ensureImages, refreshSpace, onImageRm, apiFail, uploadPayload, resumeUploadCore, sealedTotal, sealBegin, uploadRest, refreshResumeUi, latestUpId, upProgress, wireImgUpload } from './img.mjs';
 import { fillDbTargets, ensureRedisDbs } from './db.mjs';
 import { adminBuilt, activateAdminPanel } from './admin.mjs';
 // —— plan-17 §4：项目 7 态显示机（服务器真值 5 + 本地在途 2；显示层只出 7 词；C4：已知态不再带英文 tooltip，未知原词回落保留） ——
@@ -127,8 +127,8 @@ export function wireProjTab() {
     if (ev.key === 'Escape' && moreOpen) closeMoreMenu();
   });
   $('img-list').addEventListener('click', onImageRm);                       // §14.3：镜像清单行删除（事件委托）
+  wireImgUpload();                                                              // R10：上传入库归镜像库页（镜像 CRUD 主体）
   $('pub-form').addEventListener('submit', onDeploy); // 单表单提交：tar→压缩+上传+发布 / 镜像库→直接发布（plan-17 §5）
-  $('btn-upload-only').addEventListener('click', onUploadOnly); // 次要按钮「仅上传」：同一 tar，只入库不发布
   // R3 镜像源分段 Tab（复用帮助/管理子导航样式）：click 真实浏览器；change 兼容测试垫片触发
   for (const r of ['tar', 'registry']) {
     $(`pub-src-${r}`).addEventListener('click', () => pickPubSource(r));
@@ -181,7 +181,6 @@ function pickPubSource(v) {
   }
   $('pub-src-file-box').classList.toggle('hidden', v !== 'tar');
   $('pub-src-reg-box').classList.toggle('hidden', v !== 'registry');
-  $('btn-upload-only').disabled = v !== 'tar'; // 仅上传只对本地 tar 有意义
   if (v === 'tar') fieldErr('dep-image', '');
 }
 /** 命中已有项目名 → 沿用上次发布参数（mem/cport=服务端 conf 行，R5 数据源 /_api/projects；
@@ -422,7 +421,7 @@ async function deployRun(mode) {
       }
       deploy.uploadId = null;
       dpSet(2, 'done');
-      if (deploy.intent === 'upload') { // 入口二「仅上传」：到②即完成，不发布（③④ 跳过）
+      if (false && deploy.intent === 'upload') { // R10：仅上传已迁镜像库页（onImgUpload），发布页恒走完整发布
         dpSet(3, 'skip'); dpSet(4, 'skip');
         dpText('② 完成：镜像已入库。可稍后到本页选「镜像库」源发布。');
         deploy.failAt = null;
@@ -474,14 +473,13 @@ function collectPubFields(requireFile) {
   const badP = checkProj(project);
   if (badP) { fieldErr('pub-project', badP); return null; }
   const file = ($('pub-file').files || [])[0] || null;
-  if (requireFile && !file) { fieldErr('pub-file', '「仅上传」需要选择镜像 tar 文件（不选文件的直发请用「发布」，已有镜像请改选「镜像库」源）'); return null; }
+  if (requireFile && !file) { fieldErr('pub-file', '请选择镜像 tar 文件（只入库不发布请到「镜像库」页上传）'); return null; }
   return { project, file };
 }
 
 /** 两入口共用：请求期间互斥禁用对方按钮（各自显示「发布中…/上传中…」）。 */
 function pubBtnsBusy(on) {
   busy($('pub-submit'), on, '发布中…');
-  busy($('btn-upload-only'), on, '上传中…');
 }
 
 /** 入口一「发布」：tar→压缩→上传→立即发布（快捷路径）。 */
@@ -513,22 +511,6 @@ async function onDeploy(ev) {
 }
 
 /** 次要按钮「仅上传」（§13.1）：同一 tar 选择，只压缩上传入库，不发布。 */
-async function onUploadOnly() {
-  if (deploy.busy || upBusy) return showMsg('已有发布或上传进行中，请等待完成');
-  if (pubSrc() !== 'tar') return showMsg('「仅上传」用于本地 tar 文件：请先选回「本地 tar 文件」镜像源');
-  clearErrs('pub-project', 'pub-file');
-  const f = collectPubFields(true);
-  if (!f) return;
-  if (!pemReady()) return; // 仅上传同样走加密信封
-  deploy.intent = 'upload';
-  deploy.project = f.project; deploy.tag = ''; // 上传 tag 由 import-begin 服务端下发
-  deploy.file = f.file;
-  deploy.blob = null; deploy.uploadId = null;
-  dpReset();
-  pubBtnsBusy(true);
-  await deployRun('fresh');
-  pubBtnsBusy(false);
-}
 
 /** ② 上传段进度：已传 / 压缩后总长（同时镜像到镜像库「断点续传」区的进度条）。 */
 function dpUploadNote(sent, total) {
