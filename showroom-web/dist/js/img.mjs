@@ -14,16 +14,15 @@ export const apiFail = (what, e) => {
 };
 
 // —— §13.1 镜像清单（ComboBox 数据源）：进入发布区惰性加载；force=true 强制重取 ——
-export let imagesLoaded = false;
+// B13：imagesLoaded 旗标删除——TTL 缓存（dataMark/dataFresh）已是单源（dataAt>0 即曾成功加载）
 export async function ensureImages(force = false) {
-  if (imagesLoaded && !force && dataFresh('images')) return; // plan-17 §3：TTL 300s
+  if (!force && dataFresh('images')) return; // plan-17 §3：TTL 300s
   $('dep-images-fb').textContent = '正在加载镜像清单…'; // 镜像库下拉（发布页）反馈
   try {
     const j = await api('GET', '/_api/images');
     const images = (j.images || []).map(String);
     setComboOptions($('dep-image'), images);
     renderImageList(images); // §14.3：清单容器（删除按钮挂此）与 ComboBox 同源同刷
-    imagesLoaded = true;
     dataMark('images');
     // B4 徽章已随 R4 用户裁决移除（管理员身份由顶栏「管」角标表达，同一信息只出现一次）
     $('img-sub').textContent = ''; // 成功不写「已加载 N 项」计数（清单即数据；自动刷新兜底，无手动重取入口）
@@ -205,11 +204,11 @@ export async function uploadRest(uploadId, sid, blob, startSeq, sent0, total, no
 
 /** 断点续传核心（手动「恢复上传」与发布重试共用，§8.1）：查已收分片 → 重新压缩重建产物
  *  （压缩确定性 ⇒ 信封逐字节一致）→ 重放已收分片推进加密会话 → 补传剩余 → import-end 收尾。
+ *  C19：续传文件由调用方传入（发布重试传 deploy.file；手动恢复传发布表单当前选择）。
  *  opts：compNote 压缩进度 / onRec(rec) 已收片数提示 / upNote 上传进度。返回 { pre, zsize }。 */
-export async function resumeUploadCore(id, opts = {}) {
+export async function resumeUploadCore(id, file, opts = {}) {
   const saved = JSON.parse(localStorage.getItem('sr.up.' + id) || 'null');
   if (!saved) throw { error: 'E_STATE', msg: '本地无该会话记录（浏览器数据被清则无法续传，请重新发起）' };
-  const file = $('pub-file').files[0];
   if (!file || file.size !== saved.size) throw { error: 'E_STATE', msg: `续传需在发布表单选择同一文件（${saved.name}，${saved.size} 字节）` };
   const pem = platformPem();
   if (!pem.startsWith('-----BEGIN PUBLIC KEY-----')) throw { error: 'E_STATE', msg: '尚未完成安全配置：到「设置」完成' };

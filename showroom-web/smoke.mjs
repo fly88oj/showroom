@@ -323,8 +323,7 @@ function sealOneShot(pubPemBuf, input) { // 随机会话整段封包（信封全
 
 // —— 4) 错误码 ——
 ok(ex.sr_seal_push(9999, 0, 0, 0, 0) === -5, '不存在的会话 → -5');
-{ const [p, l] = put(pem.subarray(0, l0(pem) - 30)); ok(ex.sr_seal_begin(p, l) === -3, '截断 PEM → -3'); ex.sr_free(p, l); }
-function l0(b) { return b.length; }
+{ const [p, l] = put(pem.subarray(0, pem.length - 30)); ok(ex.sr_seal_begin(p, l) === -3, '截断 PEM → -3'); ex.sr_free(p, l); }
 { const small = alloc(4); ok(ex.sr_pub_string(sp, small, 4) < 0, '容量不足 → 负所需长度（-52）'); ex.sr_free(small, 4); }
 ok(ex.sr_pub_string(sp, 0, 128) === -2, '空输出指针（容量足）→ -2');
 ex.sr_free(sp, 32);

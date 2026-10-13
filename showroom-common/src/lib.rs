@@ -265,6 +265,8 @@ pub struct Verified {
     pub user: String,
     pub ts: i64,
     pub nonce: String,
+    /// 命中钥匙在 pubkeys 中的索引（Design#4：调用方据此直接定位 kid，无需逐把复验）。
+    pub key_idx: usize,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -286,7 +288,8 @@ impl fmt::Display for AuthError {
 
 impl std::error::Error for AuthError {}
 
-/// 验证 SR-SIG1：格式解析 → ±300s 时间窗 → 依次尝试登记公钥（user 可多把，任一命中即过）。
+/// 验证 SR-SIG1：格式解析 → ±300s 时间窗 → 依次尝试登记公钥（user 可多把，任一命中即过，
+/// `Verified.key_idx` 指明命中的是哪一把——调用方定位 kid 无需复验）。
 /// nonce 查重（per-user LRU，SPEC §1）由调用方按返回的 `Verified.nonce` 自行完成。
 pub fn verify(
     auth_value: &str,
@@ -327,12 +330,13 @@ pub fn verify_with_hash(
         return Err(AuthError::Stale);
     }
     let canonical = build_canonical(user, ts, nonce, method, path_q, body_sha_hex);
-    for vk in pubkeys {
+    for (i, vk) in pubkeys.iter().enumerate() {
         if vk.verify(canonical.as_bytes(), &sig).is_ok() {
             return Ok(Verified {
                 user: user.to_owned(),
                 ts,
                 nonce: nonce.to_owned(),
+                key_idx: i,
             });
         }
     }
@@ -695,6 +699,11 @@ mod tests {
         let vk = [k.0.verifying_key()];
         let v = verify_with_hash(&auth, &vk, "POST", pq, &hash, 7).unwrap();
         assert_eq!((v.user.as_str(), v.nonce.as_str()), ("alice", "aabb0011ccdd2233"));
+        assert_eq!(v.key_idx, 0, "单钥匙：命中索引 0");
+        // Design#4：多钥匙——签名的钥匙排在第二位时返回索引 1（调用方免复验定位 kid）
+        let other = UserKey::generate();
+        let vk2 = [other.0.verifying_key(), vk[0]];
+        assert_eq!(verify_with_hash(&auth, &vk2, "POST", pq, &hash, 7).unwrap().key_idx, 1);
         assert_eq!(
             verify_with_hash(&auth, &vk, "POST", pq, &sha256_hex(b"other"), 7),
             Err(AuthError::BadSignature)

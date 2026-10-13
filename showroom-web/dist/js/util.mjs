@@ -95,26 +95,17 @@ export function nonceHex() {
   return toHex(b);
 }
 
-// —— §11 随机项目名：crypto.getRandomValues 拒绝采样生成 8 位 [a-zA-Z0-9]（降低字典遍历发现门槛） ——
-export function randomProject() {
+// —— 随机字母数字串：crypto.getRandomValues 拒绝采样生成 len 位 [a-zA-Z0-9] ——
+//    两用：§11 随机项目名 randAlnum(8)（提高字典遍历发现门槛）；
+//    plan-16 §1.4 发卡/补发强密码 randAlnum(16)（62^16≈2^95 熵，纯字母数字便于人工抄录转交，
+//    与 CLI 侧 24 hex 同一强度档位）。B11：原 randomProject/randomPassword 同体合并。
+export function randAlnum(len) {
   const A = 'abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789';
   let s = '';
-  while (s.length < 8) {
+  while (s.length < len) {
     const b = new Uint8Array(32);
     crypto.getRandomValues(b);
-    for (const v of b) { if (v < 248 && s.length < 8) s += A[v % 62]; } // 248=62×4：截断去模偏
-  }
-  return s;
-}
-// —— plan-16 §1.4 发卡/补发用强密码：crypto.getRandomValues 拒绝采样生成 16 位 [a-zA-Z0-9]
-//    （62^16≈2^95 熵；纯字母数字便于人工抄录转交，与 CLI 侧 24 hex 同一强度档位） ——
-export function randomPassword() {
-  const A = 'abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789';
-  let s = '';
-  while (s.length < 16) {
-    const b = new Uint8Array(32);
-    crypto.getRandomValues(b);
-    for (const v of b) { if (v < 248 && s.length < 16) s += A[v % 62]; } // 248=62×4：截断去模偏
+    for (const v of b) { if (v < 248 && s.length < len) s += A[v % 62]; } // 248=62×4：截断去模偏
   }
   return s;
 }

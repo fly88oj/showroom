@@ -1029,29 +1029,19 @@ async fn auth(s: &S, method: &str, uri: &str, body_sha: &str, headers: &HeaderMa
         eprintln!("showroomctl: auth fail: {e:?} {method} {uri}");
         ApiError::new("E_AUTH", e.to_string())
     })?;
+    // 定位命中钥匙：verify_with_hash 返回命中索引（Design#4：TTL 检查/touch/Verified.kid 同用
+    // 一次验签结果——不再逐把复验三遍；ed25519 验签在 auth 内只发生一轮）
+    let kid = keys
+        .get(v.key_idx)
+        .map(|(k, _)| k.clone())
+        .ok_or_else(|| ApiError::new("E_AUTH", "matching key vanished mid-auth"))?;
     // 绑定钥匙 TTL：每次成功认证 = 活跃信号 → touch .bound 续期；
     // 30 分钟无任何认证 → 过期吊销 → E_AUTH（CLI push 的每个 chunk、控制台每次请求都自动续期）
-    {
-        let kid_for_ttl = keys.iter().find(|(_, vk)| {
-            common::verify_with_hash(authv, std::slice::from_ref(vk), method, uri, body_sha, now).is_ok()
-        }).map(|(k, _)| k.clone());
-        if let Some(kid) = kid_for_ttl {
-            if !state::bound_key_alive(&s.root, &v.user, &kid) {
-                return Err(ApiError::new("E_AUTH", "bound key expired (no activity >30min)"));
-            }
-            // 每次认证 touch（CLI 每个 API 调用自动续期，长操作 push 的 chunk 天然保活）
-            state::touch_bound_key(&s.root, &v.user, &kid);
-        }
+    if !state::bound_key_alive(&s.root, &v.user, &kid) {
+        return Err(ApiError::new("E_AUTH", "bound key expired (no activity >30min)"));
     }
-    // 定位命中钥匙：单把复验（user 钥匙数 handful、ed25519 验签微秒级，开销可忽略）
-    let kid = keys
-        .iter()
-        .find(|(_, vk)| {
-            common::verify_with_hash(authv, std::slice::from_ref(vk), method, uri, body_sha, now)
-                .is_ok()
-        })
-        .map(|(kid, _)| kid.clone())
-        .ok_or_else(|| ApiError::new("E_AUTH", "matching key vanished mid-auth"))?;
+    // 每次认证 touch（CLI 每个 API 调用自动续期，长操作 push 的 chunk 天然保活）
+    state::touch_bound_key(&s.root, &v.user, &kid);
     let mut m = s.nonces.lock().unwrap();
     if !nonce_fresh(&mut m, &v.user, &v.nonce, now) {
         return Err(ApiError::new("E_AUTH", format!("nonce replay: {}:{}", v.user, v.nonce)));
@@ -1119,41 +1109,11 @@ fn uri_str(uri: &OriginalUri) -> String {
 }
 
 fn qmap(uri: &OriginalUri) -> HashMap<String, String> {
-    // Redis key 含 `:` 等符号，前端 encodeURIComponent 会编码——必须 percent-decode
-    uri.query()
-        .unwrap_or_default()
-        .split('&')
-        .filter_map(|kv| {
-            kv.split_once('=').map(|(k, v)| {
-                (percent_decode(k), percent_decode(v))
-            })
-        })
+    // Redis key 含 `:` 等符号，前端 encodeURIComponent 会编码——form_urlencoded 标准解码
+    // （%XX + '+'→空格；B10：原手搓 percent_decode 删除，语义不变）
+    form_urlencoded::parse(uri.query().unwrap_or_default().as_bytes())
+        .map(|(k, v)| (k.into_owned(), v.into_owned()))
         .collect()
-}
-
-/// 极简 percent-decode（%XX 十六进制 → 字节；'+' → 空格）
-fn percent_decode(s: &str) -> String {
-    let bytes = s.as_bytes();
-    let mut out = Vec::with_capacity(bytes.len());
-    let mut i = 0;
-    while i < bytes.len() {
-        match bytes[i] {
-            b'%' if i + 2 < bytes.len() => {
-                let hex = |b: u8| (b as char).to_digit(16).unwrap_or(0) as u8;
-                out.push(hex(bytes[i + 1]) << 4 | hex(bytes[i + 2]));
-                i += 3;
-            }
-            b'+' => {
-                out.push(b' ');
-                i += 1;
-            }
-            b => {
-                out.push(b);
-                i += 1;
-            }
-        }
-    }
-    String::from_utf8_lossy(&out).into_owned()
 }
 
 fn qget(m: &HashMap<String, String>, k: &str) -> R<String> {
@@ -1548,6 +1508,7 @@ mod tests {
         let vk = [showroom_common::UserKey::from_pub_string(&k.pub_string()).unwrap()];
         let v = common::verify_with_hash(&authv, &vk, "POST", "/_api/publish", &sha256_hex(body), 1000).unwrap();
         assert_eq!((v.user.as_str(), v.nonce.as_str()), ("alice", "aabb0011ccdd2233"));
+        assert_eq!(v.key_idx, 0, "Design#4：命中钥匙索引随验签返回（auth 据此定位 kid 免复验）");
 
         assert_eq!(
             common::verify_with_hash(&authv, &vk, "POST", "/_api/publish", &sha256_hex(b"x"), 1000),

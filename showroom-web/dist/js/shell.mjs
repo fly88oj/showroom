@@ -1,14 +1,24 @@
 // —— shell.mjs：管理壳（buildApp/wireTabs/顶栏与设置弹窗接线/修改密码）+ logout + whoami(syncAdmin) + 30s 自动刷新 ——
 // 会话编排（enterApp/登录窗提交/心跳接线）见 app.mjs；adminBuilt/adTimer 写入经 admin.mjs 访问器。
-import { $, esc, showMsg, fieldErr, clearErrs, busy, randomProject, fmtToolSize } from './util.mjs';
-import { state, ENV_DESC, openSettings } from './state.mjs';
+import { $, esc, showMsg, fieldErr, clearErrs, busy, randAlnum, fmtToolSize } from './util.mjs';
+import { state, ENV_DESC, platformPem, hydratePem, dataLoaded } from './state.mjs';
 import { api, apiDo, respErr } from './api.mjs';
 import { opaqueStart, opaqueFinish, opaqueEnd, opaqueRegStart, opaqueRegFinish, opaqueRegEnd, postAuthJson } from './auth.mjs';
-import { ensureImages, imagesLoaded, apiFail, refreshSpace } from './img.mjs';
+import { ensureImages, apiFail, refreshSpace } from './img.mjs';
 import { drawerRow, wireProjTab, activateTab, updatePubUrl, logsLive, logsRender, refreshProjects, renderProjects, closeDrawer, stopEventsStream } from './proj.mjs';
 import { wireDbTab } from './db.mjs';
 import { adminBuilt, setAdminBuilt, stopAdTimer, buildAdminTab, teardownAdmin, loadAdminUsers, refreshAdminStatus } from './admin.mjs';
 import { evLive } from './proj.mjs'; // R7：事件流指示器（仅 admin 模板克隆后补写用）
+// —— 设置对话框（plan-17 S1 / Design#3：编排归 shell——对外域名 + PEM 收纳 + 改密入口聚合） ——
+/** 打开设置对话框：focusPem=true 时焦点落 PEM 字段（发布/恢复的「去设置」内联引导跳转）。 */
+export function openSettings(focusPem = false) {
+  $('set-base').value = localStorage.getItem('sr.publicBase') || '';
+  fieldErr('set-base', '');
+  $('pub-pem-hint')?.classList.add('hidden');
+  $('dlg-settings').showModal();
+  (focusPem ? $('hd-pempub') : $('set-base'))?.focus();
+}
+
 // —— 帮助页·工具下载（/_api/tool/*，签名 GET → Blob → a.download）——
 // 三件：CLI 二进制（Linux x86_64）/ Agent Skill（SKILL.md）/ 平台公钥（PEM）。
 // 大小不预取（简化）：首次下载从 Content-Length / blob.size 回填大小列。
@@ -150,8 +160,9 @@ export function buildApp() {
   appBuilt = true; // A2：模板克隆完成立即置位——此后任何单点异常都不会触发换号/重进时的重复克隆
 
   $('hd-user').textContent = state.user;
-  $('hd-pempub').value = localStorage.getItem('sr.pempub') || '';
-  $('hd-pempub').addEventListener('input', () => localStorage.setItem('sr.pempub', $('hd-pempub').value));
+  // Design#3：PEM 事实源 state.pem（sr.pempub 读取归 state）；本字段是设置视图——手工粘贴经输入监听写回 state
+  $('hd-pempub').value = state.pem;
+  $('hd-pempub').addEventListener('input', () => { state.pem = $('hd-pempub').value; localStorage.setItem('sr.pempub', state.pem); });
   // 设置（plan-17 S1）：PEM 收纳 + 对外访问域名 + 改密/忘记设备聚合入口
   $('btn-settings').addEventListener('click', () => openSettings(false));
   $('dlg-settings-close').addEventListener('click', () => $('dlg-settings').close());
@@ -169,17 +180,19 @@ export function buildApp() {
   $('help-env-tbl').querySelector('tbody').innerHTML = Object.entries(ENV_DESC)
     .map(([k, d]) => `<tr><td class="mono">${esc(k)}</td><td class="wrap">${esc(d)}</td></tr>`).join('');
   wireHelpTab();
-  $('pub-project').value = randomProject(); // 页面加载（建壳）时预填一次随机名（留空提交时自动生成兜底，无需手动重随机入口）
+  $('pub-project').value = randAlnum(8); // 页面加载（建壳）时预填一次随机名（留空提交时自动生成兜底，无需手动重随机入口）
   updatePubUrl();
   // 行抽屉（S2）：先挂入文档（hidden）再接线——getElementById 只寻址文档内元素
   $('proj-tbl').querySelector('tbody')?.append?.(drawerRow);
   $('drawer-close').addEventListener('click', () => closeDrawer());
-  logsLive.want = true; // R4 用户裁决：抽屉展开即恒实时跟随（断线 5 秒自动重连），无开关 UI
+  // R4 用户裁决：日志抽屉展开即恒实时跟随（断线 5 秒自动重连），无开关 UI——无 want 旗标
   // A2：三个 wire* 各自 try/catch——单页绑定异常只降级对应页签（console.warn 记录页签名），不再雪崩全局
   wireHelpSubnav(); // R9：帮助页二级导航
-  for (const [name, fn] of [['wireTabs', wireTabs], ['wireProjTab', wireProjTab], ['wireDbTab', wireDbTab]]) {
+  for (const [name, fn] of [['wireTabs', wireTabs], ['wireProjTab', wireProjTab]]) {
     try { fn(); } catch (e) { console.warn(`[showroom] ${name} 事件绑定失败（对应页签功能可能不可用）`, e); }
   }
+  // C17：openSettings 归 shell——经 wireDbTab 注入（db 的恢复流程「去设置」引导用），避免 db→shell 反向依赖
+  try { wireDbTab(openSettings); } catch (e) { console.warn('[showroom] wireDbTab 事件绑定失败（对应页签功能可能不可用）', e); }
 }
 
 /** 对外访问域名（plan-17 §6）：合法 http(s) 地址即存 sr.publicBase（去尾斜杠）并重渲 URL 列；清空回退 origin。 */
@@ -197,7 +210,7 @@ function onSetBaseInput() {
   }
 }
 
-/** 顶栏账号徽标的管理员角标（纯呈现）：boundAdmin=密码登录继承；admin=whoami 结论。
+/** 顶栏账号徽标的管理员角标（纯呈现）：boundAdmin=登录响应/键绑回传；admin=whoami 结论；二者皆账号级。
  *  F11：数据页 Redis 静态句的「管理员可见全部逻辑库」半句同钩子显隐（state.admin||boundAdmin 才拼入）。 */
 function refreshAdminBadge() {
   const m = $('hd-admin');
@@ -249,10 +262,10 @@ export async function syncAdmin() {
   try {
     const j = await api('GET', '/_api/whoami');
     state.kid = j.kid || '';
-    // plan-17 S1：platform_pem 自动取+缓存（写现有 sr.pempub 键；不覆盖手工已配置值）
-    if (j.platform_pem && !$('hd-pempub').value.trim()) {
-      $('hd-pempub').value = j.platform_pem;
-      localStorage.setItem('sr.pempub', j.platform_pem);
+    // plan-17 S1：platform_pem 自动取+缓存（hydratePem 水合 state.pem + sr.pempub；不覆盖手工已配置值）
+    if (j.platform_pem && !platformPem()) {
+      hydratePem(j.platform_pem);
+      $('hd-pempub').value = state.pem; // 设置视图随事实源同步
     }
     isAdmin = !!j.admin;
     clearTimeout(whoamiTimer);
@@ -266,7 +279,7 @@ export async function syncAdmin() {
   // 第2轮xiaozhi P3：帮助页 CLI 对照表的 user-add/user-passwd 为管理员命令——按 whoami 结论显隐（非 admin 默认隐藏，防误导）
   for (const el of document.querySelectorAll('#app .admin-only')) el.classList.toggle('hidden', !isAdmin);
   refreshAdminBadge(); // whoami 落定后同步顶栏角标（纯呈现；管理员与否只看「管」角标，无第三徽标——R4 用户裁决去冗余）
-  if (isAdmin && imagesLoaded) ensureImages(true); // whoami 晚于首次清单加载时重取（admin 全量视角）
+  if (isAdmin && dataLoaded('images')) ensureImages(true); // whoami 晚于首次清单加载时重取（admin 全量视角；dataAt>0 即曾加载）
   if (isAdmin && !adminBuilt) {
     buildAdminTab(); setAdminBuilt(true);
     // R7：enterApp 的 startEventsStream 先于管理模板克隆执行，「已连接」写入落空且流已

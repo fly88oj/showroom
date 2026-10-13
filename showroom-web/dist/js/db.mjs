@@ -1,10 +1,13 @@
 // —— db.mjs：数据页四件套（表清单/预览/SQL/备份恢复重置）+ Redis 浏览（库号/键列表/值查看）——
 import { $, enc, esc, showMsg, busy, sleep, derToPem, setComboOptions } from './util.mjs';
-import { state, checkProj, SEG, DUMP_CHUNK, platformPem, pemReady, openSettings, retryOnce } from './state.mjs';
+import { checkProj, SEG, DUMP_CHUNK, platformPem, pemReady, retryOnce, myProjectNames } from './state.mjs';
 import { ex, mem, alloc, put, unput, shimCStr, api, apiDo, respErr } from './api.mjs';
 import { apiFail, uploadPayload, sealBegin, pushSlice, pushFlush } from './img.mjs';
 // ================ 标签页 2：数据库（SPEC §9） ================
-export function wireDbTab() {
+// C17：openSettings 归 shell（对话框编排层）——经 wireDbTab 注入（恢复流程「去设置」引导用），避免 db→shell 反向依赖
+let openSettings = () => {};
+export function wireDbTab(openSettingsFn) {
+  openSettings = openSettingsFn;
   // Redis 浏览（§10.3；S2 自状态页迁入数据页）
   // A1 根因清理：#rd-refresh 按钮已随 c3b0558 删除（30s 自动刷新取代），此处死引用曾致
   // wireDbTab 抛 TypeError → buildApp/enterApp 雪崩（登录误报失败等 4 个 P0）；查询入口=回车/选库
@@ -25,7 +28,7 @@ function dbTarget() {
   return { project };
 }
 export function fillDbTargets() {
-  setComboOptions($('db-project'), [...new Set(state.projects.map((p) => p.project))]);
+  setComboOptions($('db-project'), myProjectNames()); // C16：集合提取 state.mjs（与项目下拉候选同源）
 }
 
 const dbOut = (text) => { $('db-out').textContent = text; };
@@ -256,12 +259,12 @@ async function onDbReset() {
 }
 
 // —— Redis 浏览（SPEC §13.2/13.3：DB 下拉仅列自己的（admin 全量）；错误一律走顶部条）——
-let rdDbsLoaded = false;
+// B13：rdDbsLoaded 旗标删除——事实源 = #rd-db 有无 option（空列表/换号清空 innerHTML 即未加载态，
+// 下次进入自动重取；成功填充 option 即已加载）。
+const rdHasDbs = () => ($('rd-db').innerHTML || '').includes('<option');
 
-// 拆分适配（enterApp 换号复位 Redis 作用域经此访问器；行为不变）：
-export const setRdDbsLoaded = (v) => { rdDbsLoaded = v; };
 export async function ensureRedisDbs() {
-  if (rdDbsLoaded) return;
+  if (rdHasDbs()) return;
   try {
     const j = await api('GET', '/_api/redis-dbs'); // 服务端已按用户过滤（§13.2：请求 db ∈ 名下项目集合）
     const entries = (j.entries ?? []).filter((e) => Number.isInteger(e.db));
@@ -273,13 +276,12 @@ export async function ensureRedisDbs() {
     // R8 用户裁决：下拉显示项目名而非库号（value 仍为库号供查询）；管理员未分配库显示占位
     $('rd-db').innerHTML = entries.map((e) =>
       `<option value="${e.db}">${esc(e.project ?? '未分配')}</option>`).join('');
-    rdDbsLoaded = true; // 管理员全量标注已随 R4 裁决移除（顶栏「管」角标唯一）
   } catch (e) { apiFail('Redis 项目列表获取', e); }
 }
 
 async function refreshRedisKeys() {
   await ensureRedisDbs();
-  if (!rdDbsLoaded) return;
+  if (!rdHasDbs()) return;
   const db = $('rd-db').value;
   const q = $('rd-q').value.trim();
   $('rd-keys').innerHTML = '<option value="">加载中…</option>';

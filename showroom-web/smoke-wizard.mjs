@@ -12,10 +12,7 @@
 //   4) 失败两态之二：服务端 404 E_AUTH（限流/拒绝文案，无后续请求）；未知用户 login-begin
 //      仍 200 且与错密码同文案（防枚举）；换账号密码登录（沿用本机钥匙 + admin 继承显式提示）；
 //      whoami 失败顶部条报错
-//   5) 「忘记此设备」：confirm 取消不清除；确认 → key-selfrm {kid}（仅删自身）→ 本地清
-//      sr.seed/sr.user → 无感层即刻重生成新候选钥匙 → 干净登录卡
-//   6) 专家路径（钥匙登录折叠）：本机已有默认选中（指纹=公钥载荷前 8 位）/ 导入种子
-//      （非法 seed 字段内联拒绝；合法导入）→ E_AUTH 公钥展示与重检循环 → 登记后进入
+//   5)/6) 原「忘记此设备」与登录窗专家路径链路已随 B5/B6 整体删除（行为断言由下方场景 7 零残留静态断言取代）
 //   7) §11 去版本字段：发布表单随机 8 位项目名预填（留空提交自动生成兜底）+ URL 恒 /<project>/
 //   8) §10.4 流式消费：日志实时流（ndjson 行缓冲/1000 行帽/时间戳/开关停流）、
 //      平台事件流（sr- 过滤/心跳忽略/20 条滚动/2s 去抖刷新/断线 5 秒重连）、
@@ -108,9 +105,6 @@ const adpBtn = (name) => ({ dataset: { adp: name }, classList: new Cls(), closes
 const clickAdp = (name) => fire($s('admin-subnav'), 'click', { target: adpBtn(name) });
 /** tabs 方向键支持：querySelectorAll 桩返回按钮序列（与页面 #tabs 初始顺序一致）。 */
 const armTabs = () => { $s('tabs').querySelectorAll = () => ['proj', 'pub', 'img', 'db', 'help'].map(tabBtn); }; // plan-17 §1 五标签
-/** 与真实登录 HTML 的初始 class 对齐（惰性元素桩无 class 信息；断言「初始不可见」前先打桩）。
- *  B5/B6 后登录卡无隐藏按钮，此桩已空（保留调用点便于将来再引入初始 hidden 元素）。 */
-const armLoginInit = () => {};
 /** 模拟浏览器渲染 HTML：给关键按钮桩设置初始文案（busy 恢复断言按真实文字比对）。 */
 const BTN_TEXT = {
   'lg-submit': '登录',
@@ -156,7 +150,7 @@ const wmem = () => new Uint8Array(exW.memory.buffer);
 {
   const strip = (exports) => {
     const e = { ...exports };
-    for (const k of Object.keys(e)) if (k === 'sr_rwd' || k.startsWith('sr_login') || k.startsWith('sr_reg')) delete e[k];
+    for (const k of Object.keys(e)) if (k.startsWith('sr_login') || k.startsWith('sr_reg')) delete e[k];
     return e;
   };
   const origInstantiate = WebAssembly.instantiate.bind(WebAssembly);
@@ -612,7 +606,6 @@ els.clear();
 await load(1);
 armTabs(); // tabs 方向键桩
 armBtnText(); // 按钮初始文案（busy 恢复断言用）
-armLoginInit(); // 登录卡初始 hidden 桩（对齐真实 HTML；现无隐藏按钮，空操作）
 await sleep(40);
 ok(shown('login') && !els.has('hd-user'), '登录前：只有登录卡（一步「账号+密码」），管理壳未构建（零管理信息）');
 const seed1 = store.get('sr.seed');
@@ -884,7 +877,7 @@ ok(/^\d{2}:\d{2}:\d{2} log-/m.test(logTxt), '每行带格式化时间戳前缀')
 ok(logsN === 1, '抽屉展开只发起一次日志流（恒跟随，无开关路径）');
 click('drawer-close');
 ok(!($s('st-logs-fb').textContent || '').includes('已收起抽屉') && !($s('st-logs-fb').textContent || '').includes('未跟随'),
-  'S2：收起抽屉无「已收起/未跟随」类冗余回执（自动行为不播报；want 恒 true 无死分支）');
+  'S2：收起抽屉无「已收起/未跟随」类冗余回执（自动行为不播报；恒跟随无开关分支）');
 ok(logsN === 1, '收起抽屉 → 日志流随行断开（不再发起日志请求）');
 
 // ═══ 场景 6c：§10.4 三段式备份下载（begin → 轮询两轮 → 两个 chunk → 解密落地） ═══
@@ -926,7 +919,7 @@ ok(($s('db-out').textContent || '') === 'pg_dump -Fc 导出完成（服务端原
     name, size: bytes.length,
     slice: (a, b) => { const c = bytes.slice(a, Math.min(b, bytes.length)); return { arrayBuffer: async () => { compSnaps.push($s('dp-text').textContent || ''); return c.buffer; } }; },
   });
-  $s('hd-pempub').value = ''; store.delete('sr.pempub'); // 模拟未配置（清掉 whoami 自动带回值）
+  $s('hd-pempub').value = ''; fire($s('hd-pempub'), 'input'); // 模拟未配置（Design#3：PEM 事实源 state.pem——字段改动走输入监听，清空即未配置态）
   $s('pub-pem-hint').classList.add('hidden'); // 对齐真实 HTML 初始 hidden（惰性桩无 class 信息）
   $s('pub-project').value = 'demo9'; $s('pub-tag').value = 'v9';
   $s('pub-file').files = [fakeFile(new Uint8Array(1024), 'pem-guide.tar')];
@@ -938,9 +931,10 @@ ok(($s('db-out').textContent || '') === 'pg_dump -Fc 导出完成（服务端原
   ok($s('dlg-settings').open === true, 'S1 验收6：「去设置」→ 设置对话框打开');
   click('dlg-settings-close');
   ok($s('dlg-settings').open === false, 'S1 验收6：设置对话框可关闭');
-  // 平台公钥（页面 seal 信封用）：node 生成 RSA-3072 SPKI PEM（引导测试后恢复真钥）
+  // 平台公钥（页面 seal 信封用）：node 生成 RSA-3072 SPKI PEM（引导测试后恢复真钥；经输入监听水合 state.pem）
   const plat = generateKeyPairSync('rsa', { modulusLength: 3072 });
   $s('hd-pempub').value = plat.publicKey.export({ type: 'spki', format: 'pem' }).toString();
+  fire($s('hd-pempub'), 'input');
 
   // 7a. 一键发布（§12.1）：状态条四段流转——压缩 2 片 → 上传 2 chunk（数据片+收尾片）→ 发布 → 完成
   $s('pub-project').value = 'demo2';
@@ -1087,7 +1081,6 @@ const ab2 = authBeginN, kb2n = keyBindBodies.length;
 els.clear();
 await load(2);
 armBtnText(); // 发卡按钮初始文案（busy 恢复断言用）
-armLoginInit(); // 与真实登录 HTML 初始 hidden 对齐（B2 断言「免密码进入」不出现的前提）
 await sleep(80);
 ok(hidden('login') && shown('app'), '再访（钥匙+账号记忆）：签名自测通过自动进入（免密码）');
 ok(authBeginN === ab2 && keyBindBodies.length === kb2n, '再访直达：零 auth 请求（不重走密码登录）');
@@ -1482,7 +1475,6 @@ store.set('sr.seed', seed1); store.set('sr.user', 'alice');
 els.clear();
 await load(3);
 armBtnText();
-armLoginInit();
 await sleep(80);
 ok(shown('login') && !els.has('hd-user'), '钥匙失效：自测失败回落密码表单（不自动进入，管理壳未构建）');
 ok(($s('lg-fb').textContent || '').includes('失效') && ($s('lg-fb').textContent || '').includes('重新登录'),

@@ -1,6 +1,7 @@
-// —— state.mjs：状态单例 + 全站常量（SEG/WRAP/NAME_RE/ENV_DESC…）+ TTL 数据缓存/兜底重试 + PEM/设置配置访问 ——
-// platformPem/pemReady/openSettings 就近于 state 层：img/db（下层页签）与 shell 均消费，避免反向依赖。
-import { $, fieldErr } from './util.mjs';
+// —— state.mjs：状态单例 + 全站常量（SEG/WRAP/NAME_RE/ENV_DESC…）+ TTL 数据缓存/兜底重试 + PEM 访问 ——
+// platformPem/pemReady 就近于 state 层（Design#3：PEM 事实源 state.pem，img/db（下层页签）与 shell 均消费，
+// 避免反向依赖；设置对话框编排 openSettings 在 shell.mjs）。
+import { $ } from './util.mjs';
 // —— 常量（与 showroom-common 信封常量一致，用于前端进度/总长核算）——
 export const SEG = 4 * 1024 * 1024;      // AES-GCM 段明文 4MiB
 export const WRAP = 384;                  // RSA-3072 wrap 头
@@ -31,6 +32,7 @@ export const ENV_DESC = {
 const DATA_TTL = { projects: 30000, images: 300000, space: 60000 };
 const dataAt = { projects: 0, images: 0, space: 0 };
 export const dataFresh = (k) => Date.now() - dataAt[k] < DATA_TTL[k];
+export const dataLoaded = (k) => dataAt[k] > 0; // 曾成功加载过（TTL 失效只清新鲜度，写操作失效清零）
 export const dataMark = (k) => { dataAt[k] = Date.now(); retryCounts[k] = 0; }; // 成功即复位兜底重试计数
 export const dataInvalidate = (...ks) => ks.forEach((k) => { dataAt[k] = 0; });
 // plan-17 §3/验收 8：失败 3 秒自动重试 1 次；此后每 10s 慢速兜底重试（≤7 次）直至恢复——
@@ -44,7 +46,17 @@ export function retryOnce(key, fn, delay = 3000) {
 }
 
 // —— 密钥状态（localStorage：sr.seed hex64 / sr.user / sr.pempub）——
-export const state = { seed: null, pub: '', user: '', loggedIn: false, projects: [], kid: '', admin: false, boundAdmin: false };
+// Design#3：PEM 事实源 = state.pem（sr.pempub 读取归 state；whoami 自动带回经 hydratePem 水合；
+// 设置对话框手工粘贴经 shell 输入监听写入——两条路径都过 state，不再直读 DOM 字段）。
+export const state = { seed: null, pub: '', user: '', loggedIn: false, projects: [], kid: '', admin: false, boundAdmin: false, pem: localStorage.getItem('sr.pempub') || '' };
+/** 水合 PEM（写 state.pem 并缓存 sr.pempub）；守卫（不覆盖已有配置）由调用方保持。 */
+export function hydratePem(pem) {
+  state.pem = pem;
+  localStorage.setItem('sr.pempub', pem);
+}
+
+/** 项目名集合（去重）：proj/db 两处下拉候选共用（C16 重复提取）。 */
+export const myProjectNames = () => [...new Set(state.projects.map((p) => p.project))];
 
 // —— 发布（可选先走 §8.1 分片上传）——
 export function checkProj(project) {
@@ -52,7 +64,7 @@ export function checkProj(project) {
   return null;
 }
 
-export const platformPem = () => $('hd-pempub').value.trim();
+export const platformPem = () => state.pem.trim();
 
 /** PEM 就绪检查（plan-17 验收 6）：未配置 → 内联引导到「设置」完成安全配置（F12 统一文案）。
  *  whoami 已自动带回 platform_pem 时本检查恒过，永不需手工粘贴。 */
@@ -60,13 +72,4 @@ export function pemReady() {
   if (platformPem().startsWith('-----BEGIN PUBLIC KEY-----')) return true;
   $('pub-pem-hint')?.classList.remove('hidden');
   return false;
-}
-
-/** 打开设置对话框（plan-17 S1）：focusPem=true 时焦点落 PEM 字段（内联引导跳转）。 */
-export function openSettings(focusPem = false) {
-  $('set-base').value = localStorage.getItem('sr.publicBase') || '';
-  fieldErr('set-base', '');
-  $('pub-pem-hint')?.classList.add('hidden');
-  $('dlg-settings').showModal();
-  (focusPem ? $('hd-pempub') : $('set-base'))?.focus();
 }

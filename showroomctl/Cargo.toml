@@ -11,6 +11,7 @@ futures-util = { version = "0.3", default-features = false }
 clap = { version = "4", features = ["derive"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
+form_urlencoded = "1" # B10：serve qmap 查询串解码（%XX + '+'→空格；原手搓 percent_decode 删除）
 bcrypt = "0.15"
 zstd = "0.13"
 flate2 = "1" # gzip 降级路径的魔数自适应解包（default features = 纯 Rust miniz_oxide 后端）
@@ -18,7 +19,5 @@ rand = "0.8"
 sha2 = "0.10"
 hex = "0.4"
 base64 = "0.22"
-# plan-16 §6.2：OPAQUE 登录两端实现收口在 common::opaque（两端同 crate 无互操作缝隙），
-# 此处直接依赖仅锚定与 common 一致的版本（服务端注册记录/登录序列经由 common 调用）。
-opaque-ke = { version = "3", default-features = false, features = ["ristretto255-voprf"] }
-argon2 = { version = "0.5", default-features = false, features = ["alloc"] }
+# B14：opaque-ke/argon2 直接依赖删除——showroomctl 代码不经由它们调用（OPAQUE 两端实现
+# 收口在 common::opaque，见 showroom-common/Cargo.toml；版本锚定随 common 一致即可）。

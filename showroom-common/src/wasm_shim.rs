@@ -708,8 +708,7 @@ pub extern "C" fn sr_zstd_end(sid: i32) -> i32 {
 // —— OPAQUE 登录/注册会话（plan-16 / SPEC §16；与 seal 会话同构的句柄模型）——
 //
 // 浏览器侧一步登录（账号+密码）与登录态改密码的 native 内核入口：
-// - `sr_rwd`：argon2id 硬化（native/wasm 漂移由 common 的固定向量测试把关，垫片不重定义）；
-// - `sr_login_start/sr_login_ke1/sr_login_finish`：登录三步 ke1→ke2→ke3；
+// - `sr_login_start/sr_login_ke1/sr_login_finish`：登录三步 ke1→ke2→ke3（rwd 硬化在垫片内部完成）；
 // - `sr_reg_start/sr_reg_msg/sr_reg_finish`：改密码 m1→m2→record（pw-commit 上行）。
 // ABI 惯例与本文件其余部分一致：b64 串输入指针+长度、输出 b64 串 NUL 结尾写入调用方
 // 缓冲（容量不足返回 -(所需字节数)）；盲化因子与 KE 临时份额取全局熵池；会话槽位只增
@@ -769,28 +768,6 @@ fn opaque_msg(sid: i32) -> Result<String, i32> {
         Some(Some(OpaqueState::Reg(s))) => Ok(s.m1.clone()),
         _ => Err(E_SESSION),
     }
-}
-
-/// rwd（argon2id 硬化）：pw+user → 32B 写往 out。0 成功 / -2 参数 / -7 计算。
-#[no_mangle]
-pub extern "C" fn sr_rwd(
-    pw: *const u8,
-    pw_len: usize,
-    user: *const u8,
-    user_len: usize,
-    out: *mut u8,
-) -> i32 {
-    guarded(|| {
-        let pw = utf8(pw, pw_len)?;
-        let user = utf8(user, user_len)?;
-        if pw.is_empty() || user.is_empty() || out.is_null() {
-            return Err(E_ARGS);
-        }
-        let o = unsafe { std::slice::from_raw_parts_mut(out, crate::opaque::RWD_LEN) };
-        let r = crate::opaque::rwd(&pw, &user).map_err(|_| E_CRYPTO)?;
-        o.copy_from_slice(&r);
-        Ok(0)
-    })
 }
 
 /// 开启登录会话（熵池驱动盲化）：返回句柄（>0）或负错误码（-6 熵未注入 / -7 协议失败）。

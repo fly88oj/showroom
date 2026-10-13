@@ -1,7 +1,7 @@
 // —— proj.mjs：项目列表/行操作/更多菜单/行抽屉/日志流/事件流 + 发布表单与发布 dp-*（deploy 流）——
-// activateTab/wireTabs 的页签切换与各页签数据源同层（switchTab 别名保留）。
-import { $, esc, fmtTime, showMsg, errText, fieldErr, clearErrs, busy, copyText, randomProject, toHex, setComboOptions } from './util.mjs';
-import { state, ENV_DESC, checkProj, platformPem, pemReady, dataFresh, dataMark, retryOnce } from './state.mjs';
+// activateTab/wireTabs 的页签切换与各页签数据源同层。
+import { $, esc, fmtTime, showMsg, errText, fieldErr, clearErrs, busy, copyText, randAlnum, toHex, setComboOptions } from './util.mjs';
+import { state, ENV_DESC, checkProj, platformPem, pemReady, dataFresh, dataMark, retryOnce, myProjectNames } from './state.mjs';
 import { api, consumeNdjson } from './api.mjs';
 import { ensureImages, refreshSpace, onImageRm, apiFail, uploadPayload, resumeUploadCore, sealedTotal, sealBegin, uploadRest, refreshResumeUi, latestUpId, upProgress } from './img.mjs';
 import { fillDbTargets, ensureRedisDbs } from './db.mjs';
@@ -102,8 +102,6 @@ export function activateTab(name) {
   if (name === 'db') { ensureRedisDbs(); fillDbTargets(); } // Redis 区首次展开惰性拉库号；下拉消费已加载 projects
   if (name === 'admin') activateAdminPanel(); // E1：管理页按二级导航当前面板按需刷新（默认「账号」）
 }
-
-const switchTab = activateTab;
 
 // ================ 标签页 1：项目管理（§13.1 三入口并存） ================
 export function wireProjTab() {
@@ -239,8 +237,8 @@ export function renderProjects() {
   }
   syncLogsDrawerBtn(); // B1：重渲后恢复该行 ▴/aria-expanded（抽屉展开态不因重渲丢失）
   if (moreOpen && moreOpen.isConnected === false) moreOpen = null; // B2：重渲后旧「更多」按钮已脱离文档——指向即清
-  // 项目下拉候选 = 已有项目（R5b 自绘 Combo）
-  setComboOptions($('pub-project'), [...new Set(state.projects.map((p) => p.project))]);
+  // 项目下拉候选 = 已有项目（R5b 自绘 Combo；C16：集合提取 state.mjs myProjectNames）
+  setComboOptions($('pub-project'), myProjectNames());
 }
 
 const ACT_CN = { start: '启动', stop: '停止', rollback: '回滚', rm: '删除' };
@@ -273,7 +271,7 @@ function updateViaPub(p) {
   activateTab('pub');
   $('pub-project').value = p.project;
   updatePubUrl();
-  pubPrefill(p.project, { fallbackTag: p.tag }); // 无本地记忆时回落当前 tag
+  pubPrefill(p.project);
   $('pub-tag').focus?.();
 }
 
@@ -362,7 +360,7 @@ async function deployRun(mode) {
       renderProjects(); // 行内标记「上传中」（dp-bar 为主显示）
       dpSet(2, 'on');
       if (deploy.uploadId) {
-        await resumeUploadCore(deploy.uploadId, {
+        await resumeUploadCore(deploy.uploadId, deploy.file, {
           compNote: (done, raw) => { dpSet(1, 'on'); dpText(`① 重新压缩（断点续传重建产物）：${done} / ${raw} 字节…`); $('dp-prog').max = raw; $('dp-prog').value = done; },
           onRec: (rec) => dpText(`② 上传中：断点续传（服务端已收 ${rec} 片），重新压缩后补传…`),
           upNote: dpUploadNote,
@@ -417,7 +415,7 @@ async function deployRun(mode) {
 function collectPubFields(requireFile) {
   let project = $('pub-project').value.trim();
   if (!project) { // §12.1：项目名为空 = 自动生成随机 8 位并回填表单
-    project = randomProject();
+    project = randAlnum(8);
     $('pub-project').value = project;
     updatePubUrl();
     showMsg(`项目名为空：已自动生成随机项目名 ${project} 并填入表单。`, 'ok');
@@ -539,7 +537,9 @@ async function onResumeUpload() {
   upBusy = true;
   busy($('btn-resume'), true, '恢复中…'); // B3：请求期间按钮就地「恢复中…」并禁用
   try {
-    const r = await resumeUploadCore(id, {
+    // C19：续传用文件由调用方传入（发布表单当前选择；一致性校验在 resumeUploadCore 内）
+    const file = ($('pub-file').files || [])[0] || null;
+    const r = await resumeUploadCore(id, file, {
       onRec: (rec) => { $('up-status').textContent = `会话 ${id}：服务端已收 ${rec} 片，重建压缩产物…`; },
       compNote: (done, raw) => { $('up-status').textContent = `重新压缩中 ${done} / ${raw} 字节（恢复续传需先重建压缩产物）…`; },
     });
@@ -554,7 +554,7 @@ async function onResumeUpload() {
 // ================ 标签页 3：状态监控 ================
 // —— §10.4 日志实时流：ndjson 追加渲染 + 1000 行环形 + 断开 5 秒重连 ——
 const LOGS_MAX = 1000;
-export const logsLive = { ac: null, timer: null, project: null, lines: [], want: true }; // want 恒 true（跟随开关 UI 已删：抽屉展开即实时跟随）
+export const logsLive = { ac: null, timer: null, project: null, lines: [] }; // 跟随开关 UI 已删：抽屉展开即恒实时跟随（无 want 旗标）
 const tsCn = (t) => Number.isFinite(t)
   ? new Date(t).toLocaleTimeString('zh-CN', { hour12: false }) : '--:--:--';
 export function logsRender() {
@@ -570,7 +570,7 @@ function stopLogsStream() {
   if (logsLive.ac) { logsLive.ac.abort(); logsLive.ac = null; } // 断流即停（回执由连接状态就地更新，无「已收起」类播报）
 }
 async function startLogsStream() {
-  if (!logsLive.want || !logsLive.project || logsLive.ac) return;
+  if (!logsLive.project || logsLive.ac) return;
   const project = logsLive.project;
   logsLive.ac = new AbortController();
   const ac = logsLive.ac;
@@ -587,7 +587,7 @@ async function startLogsStream() {
     logsLive.ac = null;
     $('st-logs-fb').textContent = `连接断开（${errText(e)}），5 秒后自动重连…`;
     clearTimeout(logsLive.timer);
-    logsLive.timer = setTimeout(() => { if (logsLive.want && logsLive.project === project) startLogsStream(); }, 5000);
+    logsLive.timer = setTimeout(() => { if (logsLive.project === project) startLogsStream(); }, 5000);
   }
 }
 function pickLogs(project) {
@@ -595,7 +595,7 @@ function pickLogs(project) {
   logsLive.lines = [];
   logsRender();
   stopLogsStream();
-  startLogsStream(); // want 恒 true（跟随开关已删，无「未跟随」分支）
+  startLogsStream();
 }
 
 // —— §10.4 平台事件流：sr- 前缀过滤 + 最近 20 条滚动 + 心跳忽略 + 健康列表去抖刷新 ——

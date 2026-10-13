@@ -4,11 +4,10 @@
 import { $, showMsg, fieldErr, clearErrs, busy } from './util.mjs';
 import { state, NAME_RE } from './state.mjs';
 import { api } from './api.mjs';
-import { passwordLogin, ensureSeed, startHeartbeat, heartbeatTimer } from './auth.mjs';
+import { passwordLogin, ensureSeed, startHeartbeat } from './auth.mjs';
 import { ensureImages, refreshSpace, apiFail } from './img.mjs';
 import { refreshProjects, evLive, startEventsStream } from './proj.mjs';
-import { setRdDbsLoaded } from './db.mjs';
-import { buildApp, startAutoRefresh, syncAdmin, appBuilt, autoRefreshTimer } from './shell.mjs';
+import { buildApp, startAutoRefresh, syncAdmin, appBuilt } from './shell.mjs';
 // ———— showroom-web 控制台（SPEC §9.1）：原生 JS + showroom-common wasm 垫片 ————
 // 零框架 / 零构建 / 零外部资源；登录门内只有登录 UI，管理壳放在 <template> 里惰性克隆。
 
@@ -82,9 +81,8 @@ function enterApp() {
     try { startAutoRefresh(); } catch (e) { console.warn('[showroom] startAutoRefresh 启动失败', e); }
   }
   // 第2轮xiaozhi P2：换号刷新——#hd-user 仅在 buildApp（首次进入）设置，logout 后密码登录新账号会残留旧账号名；
-  // 每次进入都按 state.user 重写；数据页 Redis 作用域同步复位（rdDbsLoaded 置否 + 清旧选项 → ensureRedisDbs 按新账号重取）
+  // 每次进入都按 state.user 重写；数据页 Redis 作用域同步复位（清旧 DB 选项 → 「有无 option」事实源即复位，ensureRedisDbs 按新账号重取）
   $('hd-user').textContent = state.user;
-  setRdDbsLoaded(false);
   $('rd-db').innerHTML = ''; // 换号复位：清旧账号 DB 选项（R4 断言暴露的真残留）
   $('app').classList.remove('hidden');
   // plan-17 §3：登录即 4 路并发（projects/images/space/whoami），任一路失败不阻断其余（allSettled）
@@ -117,12 +115,6 @@ document.addEventListener?.('visibilitychange', () => {
     if (projShown || adminShown) { evLive.want = true; startEventsStream(); }
   }
 });
-
-// A3 回归锚点：模块级 let 不上 window——以 getter 暴露两个会话定时器，供无头浏览器断言「心跳/自动刷新已启动」
-if (typeof window !== 'undefined') {
-  Object.defineProperty(window, 'heartbeatTimer', { configurable: true, get: () => heartbeatTimer });
-  Object.defineProperty(window, 'autoRefreshTimer', { configurable: true, get: () => autoRefreshTimer });
-}
 
 // —— 初始化（plan-16 §3）：无感生成钥匙；有「钥匙+账号」→ 签名自测直达（免密码）；
 //    自测失败回落密码表单（E_AUTH=钥匙被删/回收 → 密码重绑新钥匙=「找回/换设备」） ——

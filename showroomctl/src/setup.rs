@@ -272,7 +272,8 @@ WantedBy=multi-user.target
 // —— Caddyfile 渲染（plan-15 §2.2；快照测试覆盖三组合）——
 
 /// registry ∈ 集合才有 site A 的 /v2 handle；/_bootstrap、/_console、routes import 恒在；
-/// PUBLIC_HOST 空 → 不渲染 site B（纯内网主机）。非空 → site B 用 :8080 纯端口匹配（frpc 转发流量 Host 是公网 IP，Host 匹配会漏）。
+/// PUBLIC_HOST 空 → 不渲染 site B（纯内网主机）。非空 → site B 用 :8081 纯端口匹配（frpc 转发流量 Host 是公网 IP，
+/// Host 匹配会漏；用户裁决：双 frp 隧道都打 8081，无 8080 访问来源——监听收窄为仅 8081）。
 pub fn render_caddyfile(mw: &BTreeSet<String>, lan: &str, public: &str) -> String {
     let mut s = String::from(
         "# ————— 公共片段：两个站点共用 —————\n\
@@ -290,7 +291,8 @@ pub fn render_caddyfile(mw: &BTreeSet<String>, lan: &str, public: &str) -> Strin
          \t}\n\
          \t# 展项路由（showroomctl 按项目生成到 state/routes/<project>.caddy 并 reload）\n\
          \timport /srv/showroom/state/routes/*.caddy\n\
-         \t# 根路径与未匹配路径一律 404（零信息暴露：不重定向、不暴露站点信息）\n\
+         \t# 根路径与未匹配路径返回真 404（零信息暴露：不重定向、不暴露站点信息；空体）\n\
+         \trespond 404\n\
          }\n\
          \n\
          # ————— site A：内网面 —————\n",
@@ -309,7 +311,7 @@ pub fn render_caddyfile(mw: &BTreeSet<String>, lan: &str, public: &str) -> Strin
         s.push_str(
             "\n# ————— site B：公网面（frp 等公网隧道流量命中的站点）—————\n\
              # 公网发布走加密 import 通道，不放 /v2。\n\
-             http://:8080, :8081 {\n\
+             http://:8081 {\n\
              \timport showroom-app\n\
              }\n",
         );
@@ -451,7 +453,8 @@ pub enum Action {
     ContainerRm { name: String },
     PackageInstall { pkg: &'static str },
     UnitInstall { name: String, contents: String },
-    UnitEnable { name: String, now: bool },
+    /// B12：now 恒 true 旗标删除——直接 enable --now（plan-15 全部启用点都带 --now）。
+    UnitEnable { name: String },
     UnitDisableRm { name: String },
     Cmd { what: String, argv: Vec<String> },
     /// frpc 下载（补充需求①）：下载后 file 校验 ELF 再 chmod 0755；非 ELF 报错并提示手工放置。
@@ -490,7 +493,7 @@ pub fn action_needed(a: &Action, obs: &Obs) -> bool {
         Action::UnitInstall { name, contents } => {
             obs.files.get(&unit_path(name)).map(String::as_str) != Some(contents.as_str())
         }
-        Action::UnitEnable { name, .. } => !obs.units_enabled.contains(name),
+        Action::UnitEnable { name } => !obs.units_enabled.contains(name),
         Action::UnitDisableRm { name } => obs.units_installed.contains(name) || obs.units_enabled.contains(name),
         Action::Cmd { .. } => true, // 派生类：只在触发条件成立时进 plan（见 plan_setup）
         Action::FrpcFetch { dest, .. } => !obs.binaries.contains(dest),
@@ -671,19 +674,19 @@ pub fn plan_setup(host: &HostEnv, obs: &Obs) -> Vec<Action> {
         move |a: &Action| matches!(a, Action::WriteFile { path, .. } if path == Path::new(p))
     }
 
-    let mut enables: Vec<Action> = vec![Action::UnitEnable { name: "showroom-api.service".into(), now: true }];
+    let mut enables: Vec<Action> = vec![Action::UnitEnable { name: "showroom-api.service".into() }];
     for t in TIMER_ENABLE {
-        enables.push(Action::UnitEnable { name: t.to_string(), now: true });
+        enables.push(Action::UnitEnable { name: t.to_string() });
     }
     if host.dedup {
-        enables.push(Action::UnitEnable { name: "showroom-dedup.timer".into(), now: true });
+        enables.push(Action::UnitEnable { name: "showroom-dedup.timer".into() });
     }
     if host.frp == FrpMode::Chmlfrp {
         let fetch = Action::FrpcFetch { url: FRPC_URL.to_string(), dest: PathBuf::from(FRPC_BIN) };
         if action_needed(&fetch, obs) {
             needed.insert(0, fetch); // 下载先于单元启用
         }
-        enables.push(Action::UnitEnable { name: "chmlfrp.service".into(), now: true });
+        enables.push(Action::UnitEnable { name: "chmlfrp.service".into() });
     }
     let enables: Vec<Action> = enables.into_iter().filter(|a| action_needed(a, obs)).collect();
 
@@ -842,7 +845,7 @@ pub fn apply(root: &Path, actions: &[Action], dry: bool) -> R<Report> {
                 items.push((a.clone(), true, detail));
             }
             Err(e) => {
-                let (kind, target, _) = action_brief(a);
+                let (kind, _, target, _) = action_brief(a);
                 warnings.push(format!("{kind} {target} 失败，中止余项: {e}"));
                 items.push((a.clone(), false, e.to_string()));
                 if matches!(
@@ -899,13 +902,8 @@ fn exec_action(a: &Action) -> R<String> {
             fs::write(unit_path(name), contents)?;
             Ok(format!("{name} installed"))
         }
-        Action::UnitEnable { name, now } => {
-            let mut argv = vec!["enable"];
-            if *now {
-                argv.push("--now");
-            }
-            argv.push(name.as_str());
-            dockerops::run("systemctl", &argv).map(|_| format!("{name} enabled"))
+        Action::UnitEnable { name } => {
+            dockerops::run("systemctl", &["enable", "--now", name]).map(|_| format!("{name} enabled"))
         }
         Action::UnitDisableRm { name } => {
             let _ = dockerops::run("systemctl", &["disable", "--now", name]);
@@ -943,9 +941,12 @@ fn exec_frpc_fetch(url: &str, dest: &str) -> R<String> {
 
 // —— diff / 报告呈现（人读行 + JSON 同构）——
 
-pub fn action_brief(a: &Action) -> (&'static str, String, String) {
+/// 四元组概要：(kind JSON 类别, label 人读行前缀, target 目标, detail 说明)。
+/// B12：原 action_brief（三元组）与 action_line 的第二个 match（label）合一——label 进本表，
+/// 人读行/JSON 各取所需，无双 match 与 `let _ = kind;`。
+pub fn action_brief(a: &Action) -> (&'static str, &'static str, String, String) {
     match a {
-        Action::CreateDir { path, mode } => ("CreateDir", path.display().to_string(), format!("{mode:o}")),
+        Action::CreateDir { path, mode } => ("CreateDir", "dir", path.display().to_string(), format!("{mode:o}")),
         Action::WriteFile { path, contents, .. } => {
             let name = path.file_name().and_then(|o| o.to_str()).unwrap_or("");
             let detail = match name {
@@ -953,45 +954,25 @@ pub fn action_brief(a: &Action) -> (&'static str, String, String) {
                 "host.env" => format!("{} keys", contents.lines().filter(|l| l.contains('=') && !l.starts_with('#')).count()),
                 _ => format!("{} lines", contents.lines().count()),
             };
-            ("WriteFile", path.display().to_string(), detail)
+            let label = if path.ends_with("99-showroom.conf") { "sysctl" } else { "file" };
+            ("WriteFile", label, path.display().to_string(), detail)
         }
-        Action::BtrfsSubvol { path } => ("BtrfsSubvol", path.display().to_string(), "btrfs subvolume".into()),
-        Action::NetworkCreate { name } => ("NetworkCreate", name.clone(), "docker network".into()),
-        Action::ContainerUp { spec } => ("ContainerUp", spec.name.clone(), spec.detail()),
-        Action::ContainerRm { name } => ("ContainerRm", name.clone(), "docker rm -f -v".into()),
-        Action::PackageInstall { pkg } => ("PackageInstall", pkg.to_string(), "pacman -S".into()),
-        Action::UnitInstall { name, .. } => ("UnitInstall", name.clone(), "render".into()),
-        Action::UnitEnable { name, now } => {
-            ("UnitEnable", name.clone(), if *now { "enable --now".into() } else { "enable".into() })
-        }
-        Action::UnitDisableRm { name } => ("UnitDisableRm", name.clone(), "disable --now + rm".into()),
-        Action::Cmd { what, .. } => ("Cmd", what.clone(), what.clone()),
-        Action::FrpcFetch { url, dest } => ("FrpcFetch", dest.display().to_string(), url.to_string()),
+        Action::BtrfsSubvol { path } => ("BtrfsSubvol", "subvol", path.display().to_string(), "btrfs subvolume".into()),
+        Action::NetworkCreate { name } => ("NetworkCreate", "network", name.clone(), "docker network".into()),
+        Action::ContainerUp { spec } => ("ContainerUp", "ctr", spec.name.clone(), spec.detail()),
+        Action::ContainerRm { name } => ("ContainerRm", "ctr-rm", name.clone(), "docker rm -f -v".into()),
+        Action::PackageInstall { pkg } => ("PackageInstall", "pkg", pkg.to_string(), "pacman -S".into()),
+        Action::UnitInstall { name, .. } => ("UnitInstall", "unit", name.clone(), "render".into()),
+        Action::UnitEnable { name } => ("UnitEnable", "enable", name.clone(), "enable --now".into()),
+        Action::UnitDisableRm { name } => ("UnitDisableRm", "unit-rm", name.clone(), "disable --now + rm".into()),
+        Action::Cmd { what, .. } => ("Cmd", "cmd", what.clone(), what.clone()),
+        Action::FrpcFetch { url, dest } => ("FrpcFetch", "frpc", dest.display().to_string(), url.to_string()),
     }
 }
 
-/// 人读单行（plan-15 §3 diff 样例的对齐风格）。
+/// 人读单行（plan-15 §3 diff 样例的对齐风格）；label/detail 与 JSON 同源（action_brief 单一 match）。
 pub fn action_line(a: &Action) -> String {
-    if let Action::ContainerUp { spec } = a {
-        return format!("{:<9}{} ({})", "ctr", spec.name, spec.detail());
-    }
-    let (kind, target, detail) = action_brief(a);
-    let label = match a {
-        Action::CreateDir { .. } => "dir",
-        Action::WriteFile { path, .. } if path.ends_with("99-showroom.conf") => "sysctl",
-        Action::WriteFile { .. } => "file",
-        Action::BtrfsSubvol { .. } => "subvol",
-        Action::NetworkCreate { .. } => "network",
-        Action::ContainerUp { .. } => unreachable!(),
-        Action::ContainerRm { .. } => "ctr-rm",
-        Action::PackageInstall { .. } => "pkg",
-        Action::UnitInstall { .. } => "unit",
-        Action::UnitEnable { .. } => "enable",
-        Action::UnitDisableRm { .. } => "unit-rm",
-        Action::Cmd { .. } => "cmd",
-        Action::FrpcFetch { .. } => "frpc",
-    };
-    let _ = kind;
+    let (_, label, target, detail) = action_brief(a);
     if detail == target || detail.is_empty() {
         format!("{label:<9}{target}")
     } else {
@@ -1005,7 +986,7 @@ pub fn diff_json(host: &HostEnv, actions: &[Action], warnings: &[String]) -> Val
     json!({
         "host_env": host.to_json(),
         "actions": actions.iter().map(|a| {
-            let (kind, target, detail) = action_brief(a);
+            let (kind, _, target, detail) = action_brief(a);
             json!({"kind": kind, "target": target, "needed": true, "detail": detail})
         }).collect::<Vec<_>>(),
         "warnings": warnings,
@@ -1018,7 +999,7 @@ pub fn report_json(r: &Report) -> Value {
         "ok": r.items.iter().all(|(_, ok, _)| *ok),
         "changed": r.changed,
         "items": r.items.iter().map(|(a, ok, detail)| {
-            let (kind, target, _) = action_brief(a);
+            let (kind, _, target, _) = action_brief(a);
             json!({"kind": kind, "target": target, "ok": ok, "result": detail})
         }).collect::<Vec<_>>(),
         "warnings": r.warnings,
@@ -1302,7 +1283,7 @@ mod tests {
                     obs.files.insert(unit_path(name), contents.clone());
                     obs.units_installed.insert(name.clone());
                 }
-                Action::UnitEnable { name, .. } => {
+                Action::UnitEnable { name } => {
                     obs.units_enabled.insert(name.clone());
                 }
                 _ => {}
@@ -1322,7 +1303,7 @@ mod tests {
         let mut h = default_host();
         h.middleware.remove("redis");
         for a in mk(&h) {
-            let (_, target, _) = action_brief(&a);
+            let (_, _, target, _) = action_brief(&a);
             assert!(!target.contains("sr-redis") && !target.contains("_middleware/redis"), "{target}");
         }
         assert!(mk(&h).iter().any(|a| matches!(a, Action::ContainerUp { spec } if spec.name == "sr-postgres")));
@@ -1331,7 +1312,7 @@ mod tests {
         let mut h = default_host();
         h.caddy = false;
         for a in mk(&h) {
-            let (_, target, _) = action_brief(&a);
+            let (_, _, target, _) = action_brief(&a);
             let is_caddy = matches!(a, Action::PackageInstall { pkg: "caddy" })
                 || target.contains("Caddyfile")
                 || target.to_lowercase().contains("caddy");
@@ -1348,7 +1329,7 @@ mod tests {
         assert!(!plan.iter().any(|a| matches!(a, Action::UnitInstall { name, .. } if name.contains("dedup"))));
         assert!(!plan.iter().any(|a| matches!(a, Action::WriteFile { path, .. } if path.ends_with("showroom-dedup"))));
         assert!(plan.iter().any(|a| matches!(a, Action::UnitDisableRm { .. })), "DEDUP=none 须产 UnitDisableRm");
-        assert!(!plan.iter().any(|a| matches!(a, Action::UnitEnable { name, .. } if name.contains("dedup"))));
+        assert!(!plan.iter().any(|a| matches!(a, Action::UnitEnable { name } if name.contains("dedup"))));
 
         // FRP=chmlfrp：frpc 目录/下载/单元/启用；凭据不落单元明文（EnvironmentFile）
         let mut h = default_host();
@@ -1430,8 +1411,8 @@ mod tests {
             &Action::UnitInstall { name: "v.service".into(), contents: "x".into() },
             &obs
         ));
-        assert!(!action_needed(&Action::UnitEnable { name: "t.timer".into(), now: true }, &obs));
-        assert!(action_needed(&Action::UnitEnable { name: "u.service".into(), now: false }, &obs));
+        assert!(!action_needed(&Action::UnitEnable { name: "t.timer".into() }, &obs));
+        assert!(action_needed(&Action::UnitEnable { name: "u.service".into() }, &obs));
         assert!(action_needed(&Action::UnitDisableRm { name: "u.service".into() }, &obs));
         assert!(!action_needed(&Action::UnitDisableRm { name: "zz.timer".into() }, &obs));
         // Cmd 恒 needed（派生类只在触发时进 plan）；FrpcFetch 在/缺
@@ -1452,15 +1433,16 @@ mod tests {
         assert!(a.contains("http://lan.example {"));
         assert!(a.contains("handle /v2/* {"), "registry 在集合 → site A 有 /v2");
         assert!(a.contains("reverse_proxy 127.0.0.1:5000"));
-        assert!(a.contains("http://:8080, :8081 {"), "site B 双端口（8080=旧隧道遗留，8081=frpc local_port；R7：8081 曾因重渲染丢失致公网断连）");
+        assert!(a.contains("http://:8081 {") && !a.contains(":8080"), "site B 仅监听 8081（用户裁决：双 frp 隧道都打 8081，无 8080 访问来源；R7：8081 曾因重渲染丢失致公网断连）");
         assert!(a.contains("precompressed zstd gzip"), "file_server precompressed 恒渲染（zstd+gzip 双格式：代理客户端常只发 gzip）");
         assert!(a.contains("import /srv/showroom/state/routes/*.caddy"));
+        assert!(a.contains("\trespond 404"), "未匹配路径补真 404（共用片段尾部；此前仅注释宣称 404，Caddy 实回空 200）");
         assert!(!a.contains("handle_path /_bootstrap"), "R8 用户裁决：CLI/Skill 仅登录后经 /_api/tool/* 可下载——静态匿名分发不进任何面");
 
         let b = render_caddyfile(&no_reg, "lan.example", "pub.example");
         assert!(!b.contains("handle /v2/*"), "registry 缺 → 无 /v2 块");
         assert!(!b.contains("127.0.0.1:5000"), "registry 缺 → 不反代 registry");
-        assert!(b.contains("http://:8080, :8081 {"));
+        assert!(b.contains("http://:8081 {"));
 
         let c = render_caddyfile(&full, "lan.example", "");
         assert!(!c.contains("site B"), "PUBLIC_HOST 空 → 不渲染 site B");
@@ -1484,7 +1466,8 @@ mod tests {
              \t}\n\
              \t# 展项路由（showroomctl 按项目生成到 state/routes/<project>.caddy 并 reload）\n\
              \timport /srv/showroom/state/routes/*.caddy\n\
-             \t# 根路径与未匹配路径一律 404（零信息暴露：不重定向、不暴露站点信息）\n\
+             \t# 根路径与未匹配路径返回真 404（零信息暴露：不重定向、不暴露站点信息；空体）\n\
+             \trespond 404\n\
              }\n\
              \n\
              # ————— site A：内网面 —————\n\
@@ -1498,7 +1481,7 @@ mod tests {
              \n\
              # ————— site B：公网面（frp 等公网隧道流量命中的站点）—————\n\
              # 公网发布走加密 import 通道，不放 /v2。\n\
-             http://:8080, :8081 {\n\
+             http://:8081 {\n\
              \timport showroom-app\n\
              }\n"
         );

@@ -29,7 +29,7 @@ export function ensureSeed() {
 
 // —— OPAQUE 客户端适配层（plan-16 §2.2 报文序列 / §6.1 垫片导出）——
 // 垫片导出已由服务端侧落入 showroom-common/src/wasm_shim.rs（真实 ABI，下方 real 分支已按其
-// 接线）：sr_rwd / sr_login_start(pw,user)→sid / sr_login_ke1(sid)→b64 / sr_login_finish(sid,pw,ke2)→ke3。
+// 接线）：sr_login_start(pw,user)→sid / sr_login_ke1(sid)→b64 / sr_login_finish(sid,pw,ke2)→ke3。
 // wasm 垫片已含 OPAQUE 导出（sr_login_start 等），OPAQUE_SHIM 探测自动走真分支；
 // mock 兜底层仅在探测失败时降级（如 wasm 加载失败），正常永不触发。
 // 真分支 ABI 要点（与垫片源码一致）：b64 串进出；输出 NUL 结尾、容量不足 -(所需) ≤ -40；

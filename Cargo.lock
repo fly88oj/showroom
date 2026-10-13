@@ -1498,15 +1498,14 @@ dependencies = [
 name = "showroomctl"
 version = "0.1.0"
 dependencies = [
- "argon2",
  "axum",
  "base64 0.22.1",
  "bcrypt",
  "clap",
  "flate2",
+ "form_urlencoded",
  "futures-util",
  "hex",
- "opaque-ke",
  "rand",
  "serde",
  "serde_json",

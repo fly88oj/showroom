@@ -1,6 +1,6 @@
 // —— admin.mjs：管理页五面板（账号/全部项目/平台状态/宿主配置/实时事件）+ 发卡补发 + §15 主机编排 ——
 // adminBuilt/adTimer 为本模块私有可变旗标：shell（登出收尾/权限收回）经下方访问器读写。
-import { $, esc, fmtTime, fmtGB, statusCn, statusCls, showMsg, fieldErr, clearErrs, busy, copyText, randomPassword } from './util.mjs';
+import { $, esc, fmtTime, fmtGB, statusCn, statusCls, showMsg, fieldErr, clearErrs, busy, copyText, randAlnum } from './util.mjs';
 import { NAME_RE } from './state.mjs';
 import { api } from './api.mjs';
 import { apiFail } from './img.mjs';
@@ -65,7 +65,7 @@ function wireAdminTab() {
   $('ad-user-add').addEventListener('click', () => { // 发卡对话框（打开即聚焦首字段；Esc/关闭焦点自动归还）
     $('ad-na-user').value = '';
     $('ad-na-admin').checked = false;
-    naGenPw = randomPassword(); // 打开即客户端生成并暂存（不展示）；发放成功后在结果区一次性展示
+    naGenPw = randAlnum(16); // 打开即客户端生成并暂存（不展示）；发放成功后在结果区一次性展示
     $('ad-na-result').classList.add('hidden');
     $('ad-na-login-pw').textContent = ''; $('ad-na-pw').textContent = '';
     clearErrs('ad-na-user');
@@ -221,7 +221,7 @@ async function onAdminKeyAction(ev) {
  *  新密码一次性展示（对话框）；旧密码即刻失效，其他设备不受影响 → 表刷新（徽标翻转）。 */
 async function onAdminPasswdSet(user, btn) {
   if (!confirm(`确认为账号 ${user} 补发密码？将生成新的登录初始密码，原密码即刻失效；其他设备不受影响。`)) return;
-  const pw = randomPassword();
+  const pw = randAlnum(16);
   busy(btn, true, '补发中…'); // B3：请求期间按钮就地「补发中…」并禁用
   try {
     const j = await api('POST', '/_api/admin/passwd-set', { user, password: pw });
@@ -252,7 +252,7 @@ async function onUserAdd() { // 主路径（plan-16 §1.5 + B7）：账号 + 打
   busy($('ad-na-submit'), true, '发放中…');
   try {
     await issueUser(body);
-    naGenPw = randomPassword(); // 本轮密码已在结果区一次性展示；就地补生成，同一对话框连续发放不复用旧密码
+    naGenPw = randAlnum(16); // 本轮密码已在结果区一次性展示；就地补生成，同一对话框连续发放不复用旧密码
   } catch (e) { apiFail('发放新账号', e); }
   busy($('ad-na-submit'), false);
 }
