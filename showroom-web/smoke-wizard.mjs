@@ -680,7 +680,7 @@ ok(!els.has('tab-admin') && !els.has('ad-users-tbl') && !els.has('dlg-user-add')
 $s('rd-db').value = '3'; $s('rd-q').value = 'sr_';
 fire($s('rd-q'), 'keydown', { key: 'Enter', preventDefault() {} }); // A1 后：查询入口=回车（#rd-refresh 已随 c3b0558 删除）
 await sleep(60);
-ok(($s('rd-db').innerHTML || '').includes('<option value="0">demo</option>') && ($s('rd-db').innerHTML || '').includes('未分配'), 'redis-dbs：下拉显示项目名（R8 裁决；未分配库占位，value=库号）');
+ok(($s('rd-db').innerHTML || '').includes('<option value="0">demo</option>') && !($s('rd-db').innerHTML || '').includes('未分配'), 'redis-dbs：下拉显示项目名（R8/R9：未分配不显示，value=库号）');
 ok(($s('rd-keys').innerHTML || '').includes('sr_demo'), 'redis-keys：键列表渲染（前缀过滤请求）');
 ok($s('rd-count').textContent === '共 1 个键', '「共 N 个键」提示（C2：Redis 文案统一「键」；「可能截断」只留在静态说明）');
 ok(!els.has('rd-scope'), '§13.2 R4 裁决：管理员视图徽章已删（顶栏「管」角标唯一，同一信息只出现一次）');
@@ -1391,8 +1391,8 @@ ok($s('dlg-redis-x').open === false, '扩容对话框关闭');
 // —— §13.2 Redis 浏览管理员视图（S2：Redis 已迁数据页；服务端 admin_view 标注路径） ——
 clickTab('db');
 await sleep(80);
-ok(($s('rd-db').innerHTML || '').includes('<option value="3">未分配</option>'),
-  'admin：Redis 下拉全量（dbs 0-3 含未分配；R8：显示项目名，全量视角由数据本身体现）');
+ok(!($s('rd-db').innerHTML || '').includes('未分配') && ($s('rd-db').innerHTML || '').includes('<option value="0">demo</option>') && ($s('rd-db').innerHTML || '').includes('<option value="1">demo2</option>'),
+  'admin：Redis 下拉只显示有项目的库（R9 裁决：未分配不显示）');
 clickTab('proj');
 whoamiAdmin = false;
 
