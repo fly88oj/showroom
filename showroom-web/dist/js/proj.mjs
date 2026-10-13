@@ -423,8 +423,8 @@ function collectPubFields(requireFile) {
   const tag = $('pub-tag').value.trim();
   const badP = checkProj(project);
   if (badP) { fieldErr('pub-project', badP); return null; }
-  if (!tag) { fieldErr('pub-tag', '请填写镜像标签'); return null; }
-  if (/\s|\//.test(tag)) { fieldErr('pub-tag', `镜像标签「${tag}」不能含空白或斜杠，请修改后重试`); return null; }
+  if (!tag) { fieldErr('pub-tag', '请填写版本号'); return null; }
+  if (/\s|\//.test(tag)) { fieldErr('pub-tag', `版本号「${tag}」不能含空白或斜杠，请修改后重试`); return null; }
   const file = ($('pub-file').files || [])[0] || null;
   if (requireFile && !file) { fieldErr('pub-file', '「仅上传」需要选择镜像 tar 文件（不选文件的直发请用「发布」，已有镜像请改选「镜像库」源）'); return null; }
   return { project, tag, file };
