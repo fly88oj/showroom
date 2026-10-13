@@ -8,13 +8,13 @@ import { Input } from "@/components/ui/input";
 import { useApp } from "@/lib/app";
 
 /** 登录页：一步「账号+密码」（原版 plan-16 §3）；Demo 免密一键进入两种角色 */
-export function Login() {
+export function Login({ notice }: { notice?: string }) {
   const { login } = useApp();
   const [user, setUser] = useState("");
   const [pass, setPass] = useState("");
   const [errU, setErrU] = useState("");
   const [errP, setErrP] = useState("");
-  const [fb, setFb] = useState("");
+  const [fb, setFb] = useState(notice ?? "");
   const [busy, setBusy] = useState(false);
 
   async function submit(e: React.FormEvent) {

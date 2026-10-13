@@ -53,6 +53,10 @@ interface AppState {
   /** 行内在途标记（§4）：发布中…/上传中/重建中(60s)/异常(60s)——服务端 status 收敛前的本地过渡 */
   marks: Record<string, { kind: "publishing" | "uploading" | "rebuilding" | "failed"; until: number }>;
   markRow: (project: string, kind: "publishing" | "uploading" | "rebuilding" | "failed", ms: number) => void;
+  /** 改密成功收口：页内登出（清本机钥匙）+ 登录框提示行（原版 shell.mjs 语义，不 reload） */
+  onPwChanged: () => void;
+  /** 登录框一次性提示（改密成功后由 onPwChanged 写入） */
+  loginNotice: string;
 }
 
 const Ctx = createContext<AppState | null>(null);
@@ -85,6 +89,7 @@ const mapProject = (p: Record<string, unknown>): Project => {
 export function AppProvider({ children }: { children: ReactNode }) {
   const [boot, setBoot] = useState<"loading" | "login" | "app">("loading");
   const [session, setSession] = useState<Session | null>(null);
+  const [loginNotice, setLoginNotice] = useState("");
   const [tab, setTabRaw] = useState<Tab>("proj");
   const [pubPrefill, setPubPrefill] = useState<string | null>(null);
   const [projects, setProjects] = useState<Project[]>([]);
@@ -148,6 +153,7 @@ export function AppProvider({ children }: { children: ReactNode }) {
   }, [refreshProjects, ensureImages, refreshSpace, syncAdmin]);
 
   const login = useCallback(async (user: string, pass: string) => {
+    setLoginNotice("");
     await passwordLogin(user.trim(), pass);
     await enterApp();
   }, [enterApp]);
@@ -163,6 +169,16 @@ export function AppProvider({ children }: { children: ReactNode }) {
     localStorage.removeItem("sr.seed");
     localStorage.removeItem("sr.user");
     setProjects([]); setImages([]); setEvents([]); setEvConnected(false);
+    setSession(null);
+    setBoot("login");
+  }, []);
+
+  const onPwChanged = useCallback(() => {
+    // 原版 B2 语义：改密=结束当前会话（清本机钥匙）+ 登录框提示行；不刷新页面
+    state.loggedIn = false;
+    localStorage.removeItem("sr.seed");
+    localStorage.removeItem("sr.user");
+    setLoginNotice("密码已修改：请输入新密码重新登录。");
     setSession(null);
     setBoot("login");
   }, []);
@@ -277,8 +293,8 @@ export function AppProvider({ children }: { children: ReactNode }) {
     boot, session, login, logout, tab, setTab, pubPrefill, setPubPrefill,
     projects, refreshProjects, projOp, rollback, publishDone,
     images, ensureImages, rmImage, space, refreshSpace,
-    events, evConnected, marks, markRow,
-  }), [boot, session, login, logout, tab, pubPrefill, projects, refreshProjects,
+    events, evConnected, marks, markRow, onPwChanged, loginNotice,
+  }), [boot, session, login, logout, tab, pubPrefill, projects, refreshProjects, loginNotice,
     projOp, rollback, publishDone, images, ensureImages, rmImage, space, refreshSpace, events, evConnected]);
 
   return <Ctx.Provider value={value}>{children}</Ctx.Provider>;

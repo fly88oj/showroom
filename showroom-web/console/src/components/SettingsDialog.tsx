@@ -79,13 +79,12 @@ export function SettingsDialog({
 
 /** 修改密码（plan-16 §2.2 真序列）：旧密码本地校验（login-begin+finish，不产生登录态）
  *  → pw-begin {m1} → 本地 reg finish → pw-commit {record} → 引导重登。 */
-export function PasswordDialog({ open, onOpenChange }: { open: boolean; onOpenChange: (v: boolean) => void }) {
+export function PasswordDialog({ open, onOpenChange, onDone }: { open: boolean; onOpenChange: (v: boolean) => void; onDone?: () => void }) {
   const [cur, setCur] = useState("");
   const [nw, setNw] = useState("");
   const [nw2, setNw2] = useState("");
   const [errs, setErrs] = useState<Record<string, string>>({});
   const [busy, setBusy] = useState(false);
-  const { logout } = { logout: () => window.location.reload() }; // 改密成功后由调用方登出（见下）
 
   async function submit() {
     const e: Record<string, string> = {};
@@ -135,10 +134,7 @@ export function PasswordDialog({ open, onOpenChange }: { open: boolean; onOpenCh
       setCur(""); setNw(""); setNw2("");
       onOpenChange(false);
       toast.success("密码修改成功：请使用新密码重新登录。");
-      // 收口：结束当前会话，引导新密码重登（清本地钥匙）
-      localStorage.removeItem("sr.seed");
-      localStorage.removeItem("sr.user");
-      setTimeout(() => window.location.reload(), 800);
+      onDone?.(); // 页内登出回登录框（提示行写明请用新密码重登），不刷新页面
     } catch (err2) {
       const e2 = err2 as { error?: string; msg?: string };
       if (e2.error === "E_PW_CUR") {
@@ -151,7 +147,6 @@ export function PasswordDialog({ open, onOpenChange }: { open: boolean; onOpenCh
     }
   }
 
-  void logout;
 
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
