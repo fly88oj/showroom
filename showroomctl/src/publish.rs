@@ -62,9 +62,10 @@ fn align_services(root: &Path, project: &str, services: &[state::Svc], env_file:
         let cname = svc_container_name(project, &v.name);
         let _ = dockerops::run_fail_ok("docker", &["rm", "-f", &cname]);
         let cpu_s = v.cpu.to_string();
+        let full = format!("{}/{}", dockerops::REGISTRY, v.image);
         if let Err(e) = dockerops::docker(&[
             "run", "-d", "--name", &cname, "--network", net, "--restart", "unless-stopped",
-            "--memory", &v.mem, "--cpus", &cpu_s, "--env-file", env_file, &v.image,
+            "--memory", &v.mem, "--cpus", &cpu_s, "--env-file", env_file, &full,
         ]) {
             eprintln!("showroomctl: publish: 附加服务 {} 启动失败: {}", v.name, e.msg);
         }
