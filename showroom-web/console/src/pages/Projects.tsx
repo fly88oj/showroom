@@ -280,7 +280,7 @@ function RollbackDialog({
 }) {
   const [pending, setPending] = useState<{ v: string; image: string } | null>(null);
   const [busy, setBusy] = useState(false);
-  const [rows, setRows] = useState<{ version: string; image: string; time: number; imagePresent?: boolean }[]>([]);
+  const [rows, setRows] = useState<{ version: string; image: string; time: number; imagePresent?: boolean; services?: string[]; envCount?: number; svcEnvCount?: number }[]>([]);
   const [cur, setCur] = useState<string | null>(null);
 
   useEffect(() => {
@@ -290,7 +290,7 @@ function RollbackDialog({
     (async () => {
       try {
         const j = (await api("GET", `/_api/versions?project=${encodeURIComponent(project.project)}`)) as {
-          current?: string | number; versions?: { version: string; image: string; time: number; imagePresent?: boolean }[];
+          current?: string | number; versions?: { version: string; image: string; time: number; imagePresent?: boolean; services?: string[]; envCount?: number; svcEnvCount?: number }[];
         };
         if (!alive) return;
         setCur(String(j.current ?? ""));
@@ -319,7 +319,7 @@ function RollbackDialog({
           <DialogHeader>
             <DialogTitle>回滚 · <span className="font-mono">{project?.project}</span></DialogTitle>
             <DialogDescription>
-              选择要回滚到的版本：将用该版本发布时的镜像重新部署，当前版本随即切换（此后新发布继续向前编号）。
+              回滚到该版本发布时的完整配置（镜像 + 附加服务 + 自定义环境变量一起恢复），当前版本随即切换（此后新发布继续向前编号）。
             </DialogDescription>
           </DialogHeader>
           <div className="rounded-lg border">
@@ -328,6 +328,7 @@ function RollbackDialog({
                 <TableRow>
                   <TableHead className="w-20">版本</TableHead>
                   <TableHead>镜像</TableHead>
+                  <TableHead className="w-36">该版本配置</TableHead>
                   <TableHead className="w-36 text-right">发布时间</TableHead>
                   <TableHead className="w-28 text-right">操作</TableHead>
                 </TableRow>
@@ -340,6 +341,10 @@ function RollbackDialog({
                     <TableRow key={v.version} className={cn(isCur && "bg-muted/50", !isCur && gone && "opacity-40")}>
                       <TableCell><Badge variant="outline" className="font-mono">{v.version.startsWith("v") ? v.version : `v${v.version}`}</Badge></TableCell>
                       <TableCell className="font-mono text-xs">{v.image}{gone && !isCur && (v.imagePresent === false ? "（镜像已删除）" : "（镜像状态未知）")}</TableCell>
+                      <TableCell className="text-xs text-muted-foreground">
+                        {(v.services?.length ?? 0) > 0 ? `主+${v.services!.length} 服务` : "单服务"}
+                        {((v.envCount ?? 0) + (v.svcEnvCount ?? 0)) > 0 ? ` · ${(v.envCount ?? 0) + (v.svcEnvCount ?? 0)} 变量` : ""}
+                      </TableCell>
                       <TableCell className="text-right text-xs text-muted-foreground">{fmtTime(v.time)}</TableCell>
                       <TableCell>
                         {isCur ? <span className="text-xs text-muted-foreground">当前版本</span> : (

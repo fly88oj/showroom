@@ -798,7 +798,15 @@ fn parse_svc_specs(specs: &[String]) -> Result<Vec<serde_json::Value>, String> {
             .map_err(|_| format!("--svc port 非法：'{sp}'"))?;
         let mem = it.next().unwrap_or("128m").to_string();
         let cpu: f64 = it.next().unwrap_or("0.5").parse().unwrap_or(0.5);
-        out.push(serde_json::json!({ "name": name, "image": image, "cport": cport, "mem": mem, "cpu": cpu }));
+        // 其余段=本服务专属变量 K=V（可多个；CLI 简写形态）
+        let mut env: Vec<(String, String)> = Vec::new();
+        for pair in it {
+            let (k, v) = pair.split_once('=').ok_or_else(|| format!("--svc 变量须 K=V：'{pair}'"))?;
+            env.push((k.trim().to_string(), v.to_string()));
+        }
+        let env_obj: serde_json::Map<String, serde_json::Value> =
+            env.into_iter().map(|(k, v)| (k, serde_json::json!(v))).collect();
+        out.push(serde_json::json!({ "name": name, "image": image, "cport": cport, "mem": mem, "cpu": cpu, "env": env_obj }));
     }
     Ok(out)
 }

@@ -141,11 +141,25 @@ pub struct SvcReq {
     pub mem: String,
     #[serde(default)]
     pub cpu: f64,
+    #[serde(default)]
+    pub env: Option<std::collections::BTreeMap<String, String>>,
 }
 
 impl From<SvcReq> for Svc {
     fn from(r: SvcReq) -> Self {
-        Svc { name: r.name, image: r.image, cport: r.cport, mem: r.mem, cpu: r.cpu }
+        Svc {
+            name: r.name,
+            image: r.image,
+            cport: r.cport,
+            mem: r.mem,
+            cpu: r.cpu,
+            env: r.env
+                .unwrap_or_default()
+                .into_iter()
+                .map(|(k, v)| format!("{k}={v}"))
+                .collect::<Vec<_>>()
+                .join(";"),
+        }
     }
 }
 
@@ -158,6 +172,9 @@ pub struct Svc {
     pub cport: u16,
     pub mem: String,
     pub cpu: f64,
+    /// 本服务专属变量（plan-20 二轮）：`K=V;K2=V2` 文本（追加在全体变量之后=服务级覆盖）。
+    #[serde(default)]
+    pub env: String,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -201,7 +218,11 @@ impl Conf {
             s.push_str(&format!("legacyslot={ls}\n"));
         }
         for v in &self.services {
-            s.push_str(&format!("svc={}|{}|{}|{}|{}\n", v.name, v.image, v.cport, v.mem, v.cpu));
+            s.push_str(&format!(
+                "svc={}|{}|{}|{}|{}|{}\n",
+                v.name, v.image, v.cport, v.mem, v.cpu,
+                v.env.replace('\n', " ").replace('|', "/")
+            ));
         }
         for (k, v) in &self.uenv {
             s.push_str(&format!("uenv={k}|{v}\n"));
@@ -256,6 +277,7 @@ impl Conf {
             "port": self.port, "cport": self.cport, "mem": self.mem, "cpu": self.cpu, "updated": self.updated,
             "services": self.services.iter().map(|v| json!({
                 "name": v.name, "image": v.image, "cport": v.cport, "mem": v.mem, "cpu": v.cpu,
+                "env": v.env,
             })).collect::<Vec<_>>(),
         })
     }
@@ -266,9 +288,9 @@ fn parse_svc_lines(text: &str) -> R<Vec<Svc>> {
     let mut out = Vec::new();
     for line in text.lines().filter(|l| l.starts_with("svc=")) {
         let v = &line[4..];
-        let mut it = v.splitn(5, '|');
-        let (Some(name), Some(image), Some(cport), Some(mem), Some(cpu)) =
-            (it.next(), it.next(), it.next(), it.next(), it.next())
+        let mut it = v.splitn(6, '|');
+        let (Some(name), Some(image), Some(cport), Some(mem), Some(cpu), env) =
+            (it.next(), it.next(), it.next(), it.next(), it.next(), it.next())
         else {
             return Err(ApiError::state(format!("conf svc 行字段不足: {v}")));
         };
@@ -278,6 +300,7 @@ fn parse_svc_lines(text: &str) -> R<Vec<Svc>> {
             cport: cport.parse().map_err(|e| ApiError::state(format!("conf svc cport: {e}")))?,
             mem: mem.to_string(),
             cpu: cpu.parse().map_err(|e| ApiError::state(format!("conf svc cpu: {e}")))?,
+            env: env.unwrap_or("").to_string(),
         });
     }
     Ok(out)
@@ -525,7 +548,7 @@ mod svc_tests {
         assert!(c.services.is_empty());
         // 带服务往返
         let c2 = Conf {
-            services: vec![Svc { name: "side".into(), image: "u/img:latest".into(), cport: 3000, mem: "128m".into(), cpu: 0.5 }],
+            services: vec![Svc { name: "side".into(), image: "u/img:latest".into(), cport: 3000, mem: "128m".into(), cpu: 0.5, env: String::new() }],
             ..c.clone()
         };
         let text = c2.to_conf();

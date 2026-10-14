@@ -35,7 +35,7 @@ export function Publish({
   const { projects, images, session, publishDone, space, refreshSpace, markRow } = useApp();
   const [project, setProject] = useState("");
   // 附加服务行（plan-19）：name/image/cport/mem/cpu
-  const [svcs, setSvcs] = useState<{ name: string; image: string; cport: string; mem: string; cpu: string }[]>([]);
+  const [svcs, setSvcs] = useState<{ name: string; image: string; cport: string; mem: string; cpu: string; env: string }[]>([]);
   // 自定义环境变量行（plan-20）：KEY/VALUE——注入容器；同键可覆写平台默认
   const [uenvs, setUenvs] = useState<{ k: string; v: string }[]>([]);
   const [projErr, setProjErr] = useState("");
@@ -96,11 +96,20 @@ export function Publish({
       for (const u of validUenvs) m[u.k.trim()] = u.v; // 同键后值胜出
       body.env = m;
     }
+    const parsePairs = (txt: string): Record<string, string> => {
+      const m: Record<string, string> = {};
+      for (const part of txt.split(";")) {
+        const kv = part.split("=");
+        if (kv.length >= 2 && kv[0].trim()) m[kv[0].trim()] = kv.slice(1).join("=");
+      }
+      return m;
+    };
     const validSvcs = svcs.filter((v) => v.name.trim() && v.image.trim() && parseInt(v.cport, 10) > 0);
     if (validSvcs.length) {
       body.services = validSvcs.map((v) => ({
         name: v.name.trim(), image: v.image.trim(),
         cport: parseInt(v.cport, 10), mem: v.mem.trim() || "128m", cpu: parseFloat(v.cpu) || 0.5,
+        env: parsePairs(v.env),
       }));
     }
     const memv = mem.trim();
@@ -372,39 +381,44 @@ export function Publish({
               <Separator />
               <div className="flex flex-col gap-2">
                 <div className="flex items-center gap-2">
-                  <span className="text-sm font-medium">附加服务（多容器）</span>
-                  <Button
-                    type="button" variant="outline" size="sm"
-                    onClick={() => setSvcs((v) => [...v, { name: "", image: "", cport: "", mem: "", cpu: "" }])}
-                  >+ 添加服务</Button>
-                  {svcs.length > 0 && (
-                    <span className="text-xs text-muted-foreground">
-                      镜像须已在「镜像库」；互相以 SHOWROOM_SVC_&lt;名称&gt;_HOST/_PORT 发现（详见项目行「环境变量」）
-                    </span>
-                  )}
+                  <span className="text-sm font-medium">自定义环境变量（全体容器）</span>
+                  <Button type="button" variant="outline" size="sm" onClick={() => setUenvs((a) => [...a, { k: "", v: "" }])}>+ 添加变量</Button>
                 </div>
+                <p className="text-xs text-muted-foreground">任意应用变量（如 LOG_LEVEL / TIMEZONE）注入每个容器；与平台默认键同名时覆盖默认值；配置随版本走。</p>
                 {uenvs.map((u, i) => (
                   <div key={`e${i}`} className="grid gap-2 sm:grid-cols-[1fr_3fr_auto]">
-                    <Input placeholder="变量名（如 WORKER_ADDRESS）" value={u.k} onChange={(e) => setUenvs((a) => a.map((x, j) => (j === i ? { ...x, k: e.target.value } : x)))} />
-                    <Input placeholder="值（跨项目连接用 http://sr-&lt;对方项目&gt;:&lt;端口&gt;）" value={u.v} onChange={(e) => setUenvs((a) => a.map((x, j) => (j === i ? { ...x, v: e.target.value } : x)))} />
+                    <Input placeholder="变量名（应用自己的键，如 LOG_LEVEL）" value={u.k} onChange={(e) => setUenvs((a) => a.map((x, j) => (j === i ? { ...x, k: e.target.value } : x)))} />
+                    <Input placeholder="值（如 error / UTC / 任意）" value={u.v} onChange={(e) => setUenvs((a) => a.map((x, j) => (j === i ? { ...x, v: e.target.value } : x)))} />
                     <Button type="button" variant="ghost" size="sm" onClick={() => setUenvs((a) => a.filter((_, j) => j !== i))}>移除</Button>
                   </div>
                 ))}
+              </div>
+
+              <Separator />
+              <div className="flex flex-col gap-2">
                 <div className="flex items-center gap-2">
-                  <span className="text-sm font-medium">自定义环境变量</span>
-                  <Button type="button" variant="outline" size="sm" onClick={() => setUenvs((a) => [...a, { k: "", v: "" }])}>+ 添加变量</Button>
-                  {uenvs.length > 0 && (
-                    <span className="text-xs text-muted-foreground">注入容器；同键覆写平台默认值；配置随版本走（回滚恢复）</span>
-                  )}
+                  <span className="text-sm font-medium">附加服务（多容器）</span>
+                  <Button
+                    type="button" variant="outline" size="sm"
+                    onClick={() => setSvcs((v) => [...v, { name: "", image: "", cport: "", mem: "", cpu: "", env: "" }])}
+                  >+ 添加服务</Button>
                 </div>
+                <p className="text-xs text-muted-foreground">镜像须已在「镜像库」；容器互相以 SHOWROOM_SVC_&lt;名称&gt;_HOST/_PORT 发现；回滚时附加服务随版本一起恢复。</p>
                 {svcs.map((v, i) => (
-                  <div key={i} className="grid gap-2 sm:grid-cols-[1fr_2fr_5rem_5rem_5rem_auto]">
-                    <Input placeholder="名称（如 api）" value={v.name} onChange={(e) => setSvcs((a) => a.map((x, j) => (j === i ? { ...x, name: e.target.value } : x)))} />
-                    <Input placeholder="镜像（user/name:tag，无 user/ 前缀自动补）" value={v.image} onChange={(e) => setSvcs((a) => a.map((x, j) => (j === i ? { ...x, image: e.target.value } : x)))} />
-                    <Input placeholder="端口" type="number" value={v.cport} onChange={(e) => setSvcs((a) => a.map((x, j) => (j === i ? { ...x, cport: e.target.value } : x)))} />
-                    <Input placeholder="128m" value={v.mem} onChange={(e) => setSvcs((a) => a.map((x, j) => (j === i ? { ...x, mem: e.target.value } : x)))} />
-                    <Input placeholder="0.5" value={v.cpu} onChange={(e) => setSvcs((a) => a.map((x, j) => (j === i ? { ...x, cpu: e.target.value } : x)))} />
-                    <Button type="button" variant="ghost" size="sm" onClick={() => setSvcs((a) => a.filter((_, j) => j !== i))}>移除</Button>
+                  <div key={i} className="grid gap-2 rounded-lg border p-2">
+                    <div className="grid gap-2 sm:grid-cols-[1fr_2fr_5rem_5rem_5rem_auto]">
+                      <Input placeholder="名称（如 api）" value={v.name} onChange={(e) => setSvcs((a) => a.map((x, j) => (j === i ? { ...x, name: e.target.value } : x)))} />
+                      <Input placeholder="镜像（user/name:tag，无 user/ 前缀自动补）" value={v.image} onChange={(e) => setSvcs((a) => a.map((x, j) => (j === i ? { ...x, image: e.target.value } : x)))} />
+                      <Input placeholder="端口" type="number" value={v.cport} onChange={(e) => setSvcs((a) => a.map((x, j) => (j === i ? { ...x, cport: e.target.value } : x)))} />
+                      <Input placeholder="128m" value={v.mem} onChange={(e) => setSvcs((a) => a.map((x, j) => (j === i ? { ...x, mem: e.target.value } : x)))} />
+                      <Input placeholder="0.5" value={v.cpu} onChange={(e) => setSvcs((a) => a.map((x, j) => (j === i ? { ...x, cpu: e.target.value } : x)))} />
+                      <Button type="button" variant="ghost" size="sm" onClick={() => setSvcs((a) => a.filter((_, j) => j !== i))}>移除</Button>
+                    </div>
+                    <Input
+                      className="font-mono text-xs"
+                      placeholder="本服务专属变量（可选；KEY=VALUE;KEY2=V2，覆盖全体变量）"
+                      value={v.env} onChange={(e) => setSvcs((a) => a.map((x, j) => (j === i ? { ...x, env: e.target.value } : x)))}
+                    />
                   </div>
                 ))}
               </div>

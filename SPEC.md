@@ -117,10 +117,13 @@ SHOWROOM_PROJECT=<project>   SHOWROOM_BASE_PATH=/<project>/
 SHOWROOM_SVC_<NAME>_HOST=<容器名>   SHOWROOM_SVC_<NAME>_PORT=<端口>   # plan-19：全体服务含 main
 ```
 
-**自定义环境变量（plan-20）**：发布时可带任意 `KEY=VALUE`（CLI `--env` 可重复 /
-API `env:{K:V}` / 控制台发布页重复行），追加在平台默认块**之后**——Docker
---env-file 同键后者覆盖前者语义 → 可覆写任意默认值（如指向外部 DB 时覆写
-DATABASE_URL）。键 POSIX 形状 `^[A-Za-z_][A-Za-z0-9_]*$`；同键后值胜出；禁换行。
+**自定义环境变量（plan-20）**：两层——①**全体变量**（CLI `--env` 可重复 /
+API `env:{K:V}` / 控制台「自定义环境变量（全体容器）」）：追加在平台默认块**之后**
+——Docker --env-file 同键后者覆盖前者语义 → 可覆写任意默认值；②**服务专属变量**
+（`--svc …,K=V;K2=V2` / API services[].env / 控制台服务行专属变量框）：再追加在
+①之后 = 三级覆盖链（平台默认 < 全体变量 < 服务专属）。键 POSIX 形状
+`^[A-Za-z_][A-Za-z0-9_]*$`；同层同键后值胜出；值禁换行。**回滚 = 整体恢复**
+（主服务 + 附加服务 + 两层变量都回到目标版本的快照）。
 **配置随版本走（plan-20 用户裁决）**：每次发布把当时的完整配置
 （services/uenv/mem/cpu/cport）快照进 versions.json 对应记录；回滚按**目标版本的
 快照**恢复（旧记录无快照 → 按当前 conf 兜底，与旧行为一致）。

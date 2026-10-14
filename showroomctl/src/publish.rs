@@ -65,9 +65,31 @@ fn align_services(root: &Path, project: &str, services: &[state::Svc], env_file:
         let _ = dockerops::run_fail_ok("docker", &["rm", "-f", &cname]);
         let cpu_s = v.cpu.to_string();
         let full = format!("{}/{}", dockerops::REGISTRY, v.image);
+        // 每服务独立 env 文件：基础 env + 本服务专属变量追加（覆盖语义）；
+        // 空专属时直接复用主 env 文件（零额外落盘）
+        let svc_env_path;
+        let env_arg = if v.env.trim().is_empty() {
+            env_file
+        } else {
+            svc_env_path = format!("{env_file}.{}", v.name);
+            let base = fs::read_to_string(env_file).unwrap_or_default();
+            let mut extra = String::new();
+            for pair in v.env.split(';') {
+                if pair.trim().is_empty() {
+                    continue;
+                }
+                if let Some((k, val)) = pair.split_once('=') {
+                    if state::check_env_key(k.trim()) {
+                        extra.push_str(&format!("{}={}\n", k.trim(), val));
+                    }
+                }
+            }
+            let _ = fs::write(&svc_env_path, format!("{base}{extra}"));
+            Box::leak(svc_env_path.into_boxed_str()) // 生命周期：容器 run 在本函数内完成
+        };
         if let Err(e) = dockerops::docker(&[
             "run", "-d", "--name", &cname, "--network", net, "--restart", "unless-stopped",
-            "--memory", &v.mem, "--cpus", &cpu_s, "--env-file", env_file, &full,
+            "--memory", &v.mem, "--cpus", &cpu_s, "--env-file", env_arg, &full,
         ]) {
             eprintln!("showroomctl: publish: 附加服务 {} 启动失败: {}", v.name, e.msg);
         }

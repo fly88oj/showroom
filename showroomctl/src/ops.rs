@@ -182,8 +182,13 @@ pub fn versions_of(root: &Path, p: &str) -> R<Value> {
             },
             None => json!(false),
         };
+        // 配置摘要（plan-20：回滚整体恢复该版本配置——主+附加服务+全部变量）
+        let svc_names: Vec<&str> = r.services.iter().map(|v| v.name.as_str()).collect();
         items.push(json!({
             "version": r.version, "image": r.image, "time": r.time, "imagePresent": present,
+            "services": svc_names,
+            "envCount": r.uenv.len(),
+            "svcEnvCount": r.services.iter().map(|v| if v.env.is_empty() { 0 } else { v.env.split(';').filter(|p| !p.trim().is_empty()).count() }).sum::<usize>(),
         }));
     }
     let current = if c.version.is_empty() { c.tag.clone() } else { c.version.clone() };
