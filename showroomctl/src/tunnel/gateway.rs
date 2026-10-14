@@ -11,7 +11,6 @@
 //! 天然落在正确的先压后封顺序）。
 
 use std::net::SocketAddr;
-use std::sync::Arc;
 
 use showroom_common::srtp::{
     is_srtp, header, FLAG_UPLINK, HDR_LEN, SrtpError, TReader, TWriter,
@@ -20,19 +19,19 @@ use showroom_common::srtp::{
 /// 上行记录分帧（SRTP v1）：解封明文 = 重复的 `[8B 大端长度][载荷]`。中继不支持
 /// 客户端半关闭（用户侧 EOF 即拆整流，真机实弹），网关不能靠 EOF 判请求完结——
 /// 故由帧界驱动转发：读满一帧即转发，无需等流尾。单帧上限 1GiB 防御坏帧。
-const MAX_FRAME: u64 = 1 << 30;
+pub(crate) const MAX_FRAME: u64 = 1 << 30;
 
 /// 分帧转发状态机：喂入解封明文 → 返回本次应写给上游的字节（帧头已剥，调用方写完即弃）。
 /// `finish` 在客户端 EOF 时校验无残帧。
 #[derive(Default)]
-struct FrameFwd {
+pub(crate) struct FrameFwd {
     buf: Vec<u8>,
     /// None=等帧头；Some(n)=当前帧剩余载荷字节
     pending: Option<u64>,
 }
 
 impl FrameFwd {
-    fn feed(&mut self, data: &[u8]) -> Result<Vec<u8>, SrtpError> {
+    pub(crate) fn feed(&mut self, data: &[u8]) -> Result<Vec<u8>, SrtpError> {
         self.buf.extend_from_slice(data);
         let mut out = Vec::new();
         loop {
@@ -73,7 +72,6 @@ impl FrameFwd {
         }
     }
 }
-use showroom_common::PlatformKeys;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
 
@@ -83,7 +81,7 @@ const HEADER_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(20);
 const PUMP_BUF: usize = 64 * 1024;
 
 /// 网关主循环（serve 派生的每连接一个 task；本函数永不返回）。
-pub async fn serve(listener: TcpListener, upstream_port: u16, keys: Option<Arc<PlatformKeys>>) {
+pub async fn serve(listener: TcpListener, upstream_port: u16, root: std::path::PathBuf) {
     let upstream = SocketAddr::from(([127, 0, 0, 1], upstream_port));
     loop {
         let (conn, _peer) = match listener.accept().await {
@@ -94,16 +92,16 @@ pub async fn serve(listener: TcpListener, upstream_port: u16, keys: Option<Arc<P
                 continue;
             }
         };
-        let keys = keys.clone();
+        let root = root.clone();
         tokio::spawn(async move {
-            if let Err(e) = handle(conn, upstream, keys).await {
+            if let Err(e) = handle(conn, upstream, root).await {
                 eprintln!("showroomctl: tunnel: 网关连接: {e}");
             }
         });
     }
 }
 
-async fn handle(mut conn: TcpStream, upstream: SocketAddr, keys: Option<Arc<PlatformKeys>>) -> Result<(), String> {
+async fn handle(mut conn: TcpStream, upstream: SocketAddr, root: std::path::PathBuf) -> Result<(), String> {
     let mut prefix = [0u8; HDR_LEN];
     tokio::time::timeout(HEADER_TIMEOUT, conn.read_exact(&mut prefix))
         .await
@@ -115,8 +113,7 @@ async fn handle(mut conn: TcpStream, upstream: SocketAddr, keys: Option<Arc<Plat
         if prefix[5] != FLAG_UPLINK {
             return Err("上行 SRTP 头 flags 非法（须为 0）".into());
         }
-        let keys = keys.ok_or_else(|| "SRTP 到达但平台私钥缺失（state/platform_rsa）".to_string())?;
-        sealed(conn, up, &keys).await.map_err(|e| format!("密封通道: {e}"))
+        sealed(conn, up, &root).await.map_err(|e| format!("密封通道: {e}"))
     } else {
         // 明文直通：先回放已读前缀，再双向透传（字节级，含 Docker Push 长流）
         up.write_all(&prefix).await.map_err(|e| format!("直通前缀回放: {e}"))?;
@@ -130,23 +127,27 @@ async fn handle(mut conn: TcpStream, upstream: SocketAddr, keys: Option<Arc<Plat
 /// 密封通道：字节级取 384B wrap 解出 k（不与 §2 流式状态机混交接，杜绝混包窗口），
 /// 其后全部字节进传输记录层 TReader → 帧转发（FrameFwd）→ 上游；下行 TWriter 对称
 /// 封装。中继无半关闭语义（真机实弹）：请求完结只由帧界驱动，连接关闭即整体收束。
-async fn sealed(mut conn: TcpStream, up: TcpStream, keys: &PlatformKeys) -> Result<(), SrtpError> {
+async fn sealed(mut conn: TcpStream, up: TcpStream, root: &std::path::Path) -> Result<(), SrtpError> {
     use showroom_common::{srtp::unwrap_key, WRAP_LEN};
     let mut raw: Vec<u8> = Vec::with_capacity(PUMP_BUF);
     let mut chunk = [0u8; PUMP_BUF];
+    // v1.1（plan-18 §3.3）：8B srtp_id → per-user 私钥 → 384B wrap
     let k = loop {
         let n = tokio::time::timeout(HEADER_TIMEOUT, conn.read(&mut chunk))
             .await
             .map_err(|_| SrtpError::Truncated)?
             .map_err(|_| SrtpError::Truncated)?;
         if n == 0 {
-            return Err(SrtpError::Truncated); // wrap 未到齐即断流
+            return Err(SrtpError::Truncated); // 前置未到齐即断流
         }
         raw.extend_from_slice(&chunk[..n]);
-        if raw.len() >= WRAP_LEN {
-            break unwrap_key(&keys.priv_pkcs8_pem(), &raw[..WRAP_LEN])?;
+        if raw.len() >= 8 + WRAP_LEN {
+            let id: [u8; 8] = raw[..8].try_into().expect("8B");
+            let pem = super::srtpkeys::lookup_pem(root, &id).ok_or(SrtpError::BadKey)?;
+            break unwrap_key(&pem, &raw[8..8 + WRAP_LEN])?;
         }
     };
+    let _ = raw.drain(..8 + WRAP_LEN); // 残余=首条记录字节，交给记录层
     eprintln!("showroomctl: tunnel: SRTP 会话建立（wrap 已解，下行对称封装开始）");
 
     let (mut cr, mut cw) = conn.into_split();
@@ -160,8 +161,8 @@ async fn sealed(mut conn: TcpStream, up: TcpStream, keys: &PlatformKeys) -> Resu
         let mut fwd = FrameFwd::default();
         let mut plain = Vec::with_capacity(PUMP_BUF);
         let mut chunk = [0u8; PUMP_BUF];
-        // wrap 之后的残余字节（同包到达的记录）先喂入
-        reader.push(&raw[WRAP_LEN..], &mut plain)?;
+        // 前置之后的残余字节（同包到达的记录）先喂入
+        reader.push(&raw, &mut plain)?;
         loop {
             let out = fwd.feed(&plain)?;
             if !out.is_empty() {

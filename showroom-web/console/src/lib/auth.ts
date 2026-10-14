@@ -3,6 +3,7 @@ import { Buffer_fromHex, enc, toHex } from "@/lib/bytes";
 import { api, checkResp, signHeaderPtr } from "@/lib/api";
 import { ex, mem, put, readCStr, shimCStr, unput } from "@/lib/wasm";
 import { state } from "@/lib/state";
+import { loginSessionKey, setCreds, srtpTeardown, verifyKeyMac } from "@/lib/srtp";
 
 function loadSeed() {
   const hex = localStorage.getItem("sr.seed");
@@ -132,12 +133,25 @@ export async function passwordLogin(user: string, pass: string) {
     throw e;
   }
   let ke3: string;
+  let sessionKey: Uint8Array;
   try {
     ke3 = opaqueFinish(st.sid, pass, r.ke2 as string);
+    sessionKey = loginSessionKey(st.sid); // AKE 输出：验证 SRTP 密钥下发绑定（plan-18 §3.3）
   } finally {
     opaqueEnd(st.sid);
   }
-  const r2 = (await postAuthJson("/_api/auth/login-finish", { user, ke3 })) as { bind_token: string };
+  const r2 = (await postAuthJson("/_api/auth/login-finish", { user, ke3 })) as {
+    bind_token: string;
+    srtp_id?: string;
+    srtp_pub?: string;
+    key_mac?: string;
+  };
+  // SRTP 密钥下发：三项齐备 → 验签（失败=fail-closed 抛错，不降级）；旧服务端无字段=跳过
+  srtpTeardown();
+  if (r2.srtp_id && r2.srtp_pub && r2.key_mac) {
+    const id = verifyKeyMac(sessionKey, r2.srtp_id, r2.srtp_pub, r2.key_mac);
+    setCreds(id, r2.srtp_pub);
+  }
   const kb = (await apiBind(user, state.pub, r2.bind_token)) as { kid?: string; admin?: boolean };
   state.kid = kb.kid || "";
   state.boundAdmin = !!kb.admin;

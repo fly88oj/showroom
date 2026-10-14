@@ -614,6 +614,136 @@ pub extern "C" fn sr_open_end(sid: i32) -> i32 {
     })
 }
 
+// —— SRTP 传输会话（plan-18：浏览器 WS 载波；与 CLI 的 TCP 载波共用记录层）——
+
+struct SrtpState {
+    writer: crate::srtp::TWriter,
+    reader: crate::srtp::TReader,
+}
+
+static SRTP_SESSIONS: Mutex<Vec<Option<SrtpState>>> = Mutex::new(Vec::new());
+
+/// 从全局熵池抽种新建独立 StdRng（会话持有；SRTP 会话随机性与 seal 会话同源同法）。
+fn fresh_rng() -> Result<StdRng, i32> {
+    let mut seed = [0u8; 32];
+    with_global_rng(|r| r.fill_bytes(&mut seed))?;
+    Ok(StdRng::from_seed(seed))
+}
+
+/// 开启 SRTP 会话：per-user 包裹公钥 PEM → 生成 k、写出 384B wrap（v1.1：JS 自行
+/// 在 wrap 前拼 8B srtp_id）。随机性取全局熵池（StdRng；wasm32 无 OS 熵源）。
+/// 返回会话句柄（>0）或负错误码（容量不足报所需，≤-40 协议）。
+#[no_mangle]
+pub extern "C" fn sr_srtp_begin(pub_pem: *const u8, pem_len: usize, out: *mut u8, cap: usize) -> i32 {
+    guarded(|| {
+        let pem = utf8(pub_pem, pem_len)?;
+        let mut rng = fresh_rng()?;
+        let mut k = [0u8; crate::KEY_LEN];
+        rng.fill_bytes(&mut k);
+        let pk = RsaPublicKey::from_public_key_pem(&pem).map_err(|_| E_KEY)?;
+        let wrapped = pk.encrypt(&mut rng, Oaep::new::<Sha256>(), &k).map_err(|_| E_CRYPTO)?;
+        if wrapped.len() > cap {
+            return Err(-(wrapped.len() as i32));
+        }
+        let st = SrtpState {
+            writer: crate::srtp::TWriter::new(k, Box::new(rng)),
+            reader: crate::srtp::TReader::new(k),
+        };
+        let mut v = SRTP_SESSIONS.lock().unwrap();
+        v.push(Some(st));
+        let sid = v.len() as i32;
+        let mut w = W { buf: unsafe { std::slice::from_raw_parts_mut(out, cap) }, pos: 0 };
+        w.put(&wrapped);
+        Ok(sid)
+    })
+}
+
+/// 上行：明文 chunk → 记录字节（每调用一条记录；JS 侧按 ≤64KiB 分片调用，
+/// 与 CLI 一致）。输出上界 = 输入 + 32。
+#[no_mangle]
+pub extern "C" fn sr_srtp_seal(sid: i32, data: *const u8, len: usize, out: *mut u8, cap: usize) -> i32 {
+    guarded(|| {
+        let data = unsafe { slice_const(data, len)? };
+        let mut v = SRTP_SESSIONS.lock().unwrap();
+        let st = v.get_mut(sid as usize - 1).and_then(|s| s.as_mut()).ok_or(E_SESSION)?;
+        let need = data.len() + 32;
+        if need > cap {
+            return Err(-(need.max(40) as i32));
+        }
+        let mut buf = Vec::with_capacity(need);
+        st.writer.record(data, &mut buf).map_err(|_| E_CRYPTO)?;
+        let n = buf.len();
+        if n > cap {
+            return Err(-(n as i32));
+        }
+        let w = unsafe { std::slice::from_raw_parts_mut(out, cap) };
+        w[..n].copy_from_slice(&buf);
+        Ok(n as i32)
+    })
+}
+
+/// 下行：记录字节（任意分片）→ 明文追加写出。返回本次写出的明文字节数（可 0）。
+#[no_mangle]
+pub extern "C" fn sr_srtp_open(sid: i32, data: *const u8, len: usize, out: *mut u8, cap: usize) -> i32 {
+    guarded(|| {
+        let data = if len == 0 { &[][..] } else { unsafe { slice_const(data, len)? } };
+        let mut v = SRTP_SESSIONS.lock().unwrap();
+        let st = v.get_mut(sid as usize - 1).and_then(|s| s.as_mut()).ok_or(E_SESSION)?;
+        let mut plain = Vec::with_capacity(data.len());
+        st.reader.push(data, &mut plain).map_err(|_| E_CRYPTO)?;
+        if plain.len() > cap {
+            return Err(-(plain.len().max(40) as i32));
+        }
+        let w = unsafe { std::slice::from_raw_parts_mut(out, cap) };
+        w[..plain.len()].copy_from_slice(&plain);
+        Ok(plain.len() as i32)
+    })
+}
+
+/// 结束并丢弃 SRTP 会话。
+#[no_mangle]
+pub extern "C" fn sr_srtp_end(sid: i32) -> i32 {
+    guarded(|| {
+        let mut v = SRTP_SESSIONS.lock().unwrap();
+        match v.get_mut(sid as usize - 1) {
+            Some(slot) => {
+                *slot = None;
+                Ok(0)
+            }
+            None => Err(E_SESSION),
+        }
+    })
+}
+
+/// HMAC-SHA256（plan-18 §3.3：key_mac 绑定验证；非安全上下文无 WebCrypto 的回落）。
+/// out 恒 32B；容量不足报 -32。
+#[no_mangle]
+pub extern "C" fn sr_hmac_sha256(
+    key: *const u8,
+    key_len: usize,
+    data: *const u8,
+    data_len: usize,
+    out: *mut u8,
+    cap: usize,
+) -> i32 {
+    guarded(|| {
+        let key = unsafe { slice_const(key, key_len)? };
+        let data = unsafe { slice_const(data, data_len)? };
+        use hmac::Hmac;
+        // wasm_shim 顶部已入 KeyInit（new_from_slice 同名）——显式指定 trait 消歧
+        let mut m = <Hmac<sha2::Sha256> as hmac::Mac>::new_from_slice(key).map_err(|_| E_ARGS)?;
+        use hmac::Mac as _;
+        m.update(data);
+        let mac: [u8; 32] = m.finalize().into_bytes().into();
+        if mac.len() > cap {
+            return Err(-(mac.len() as i32));
+        }
+        let mut w = W { buf: unsafe { std::slice::from_raw_parts_mut(out, cap) }, pos: 0 };
+        w.put(&mac);
+        Ok(w.pos as i32)
+    })
+}
+
 // —— zstd 压缩会话（上传压缩统一；与 seal 会话同构的流式 push 模型）——
 
 struct ZstdState {
@@ -826,9 +956,43 @@ pub extern "C" fn sr_login_finish(
         let OpaqueState::Login(s) = st else {
             return Err(E_ARGS); // 注册会话句柄误用
         };
-        let ke3 =
-            crate::opaque::login_finish(s.state, &pw, &s.user, &ke2).map_err(|_| E_CRYPTO)?;
+        let user = s.user.clone();
+        let (ke3, sk) =
+            crate::opaque::login_finish(s.state, &pw, &user, &ke2).map_err(|_| E_CRYPTO)?;
+        // AKE 会话密钥留槽（sr_login_session_key 取用；plan-18 密钥绑定验证）
+        login_key_set(sid, sk);
         write_cstr(&ke3, out, cap)
+    })
+}
+
+// —— 登录 AKE 会话密钥槽（与 OPAQUE 会话同 sid 索引；end 即清）——
+
+static LOGIN_KEYS: Mutex<Vec<Option<Vec<u8>>>> = Mutex::new(Vec::new());
+
+fn login_key_set(sid: i32, key: Vec<u8>) {
+    let mut v = LOGIN_KEYS.lock().unwrap();
+    while v.len() < sid as usize {
+        v.push(None);
+    }
+    v[sid as usize - 1] = Some(key);
+}
+
+/// 取本次登录的 AKE 会话密钥（32B；plan-18：验证 srtp 下发绑定的 key_mac）。
+/// 返回写出的字节数或负错误码（容量不足报所需，≤-40 协议）。
+#[no_mangle]
+pub extern "C" fn sr_login_session_key(sid: i32, out: *mut u8, cap: usize) -> i32 {
+    guarded(|| {
+        if sid <= 0 {
+            return Err(E_SESSION);
+        }
+        let v = LOGIN_KEYS.lock().unwrap();
+        let key = v.get(sid as usize - 1).and_then(|s| s.as_ref()).ok_or(E_SESSION)?;
+        if key.len() > cap {
+            return Err(-(key.len() as i32));
+        }
+        let mut w = W { buf: unsafe { std::slice::from_raw_parts_mut(out, cap) }, pos: 0 };
+        w.put(key);
+        Ok(w.pos as i32)
     })
 }
 

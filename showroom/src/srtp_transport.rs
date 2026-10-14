@@ -128,15 +128,22 @@ fn dechunk(mut b: &[u8]) -> Option<Vec<u8>> {
 
 /// 一级请求（可注入 tier 原子量——单测各自持有，免进程级静态互扰）。
 /// 返回 None = 一级不可用（调用方回退二级）。
+/// 一级上下文（tier + 入口 + 登录下发凭据）——打包免八参长签名。
+pub struct TxCtx<'a> {
+    pub tier: &'a AtomicU8,
+    pub base: &'a str,
+    pub srtp_id: &'a [u8; 8],
+    pub wrap_pub: &'a RsaPublicKey,
+}
+
 pub fn request_with_tier(
-    tier: &AtomicU8,
-    base: &str,
+    cx: &TxCtx<'_>,
     method: &str,
     path_q: &str,
     headers: &[(&str, &str)],
     body: &[u8],
-    platform_pub: &RsaPublicKey,
 ) -> Option<Response> {
+    let TxCtx { tier, base, srtp_id, wrap_pub } = cx;
     if tier.load(std::sync::atomic::Ordering::Relaxed) == 2 {
         return None; // 粘性降级：对端网关不支持
     }
@@ -152,7 +159,7 @@ pub fn request_with_tier(
     let mut k = [0u8; KEY_LEN];
     use rand::RngCore as _;
     rng.fill_bytes(&mut k);
-    let wrapped = platform_pub.encrypt(&mut rng, Oaep::new::<Sha256>(), &k).ok()?;
+    let wrapped = wrap_pub.encrypt(&mut rng, Oaep::new::<Sha256>(), &k).ok()?;
     if wrapped.len() != WRAP_LEN {
         return None;
     }
@@ -164,6 +171,7 @@ pub fn request_with_tier(
 
     // 上行：帧头(flags=0) + wrap + 密封请求 + 流结束尾段
     let mut up = header(false).to_vec();
+    up.extend_from_slice(srtp_id.as_slice()); // v1.1 前置：网关按 id 查 per-user 私钥
     up.extend_from_slice(&wrapped);
     let mut tw = TWriter::new(k, Box::new(rand::rngs::OsRng) as Box<dyn SessionRng + Send>);
     for piece in framed.chunks(64 * 1024) {
@@ -198,13 +206,14 @@ static TIER: AtomicU8 = AtomicU8::new(0);
 
 pub fn request(
     base: &str,
+    srtp_id: &[u8; 8],
+    wrap_pub: &RsaPublicKey,
     method: &str,
     path_q: &str,
     headers: &[(&str, &str)],
     body: &[u8],
-    platform_pub: &RsaPublicKey,
 ) -> Option<Response> {
-    request_with_tier(&TIER, base, method, path_q, headers, body, platform_pub)
+    request_with_tier(&TxCtx { tier: &TIER, base, srtp_id, wrap_pub }, method, path_q, headers, body)
 }
 
 #[cfg(test)]
@@ -243,33 +252,36 @@ mod tests {
 
     /// 回环伪网关：读 6B 头 + wrap + 密封流 → 解封出 HTTP → 以同 k 密封响应
     ///（与 ctl 侧 gateway::sealed 同构，交叉验证两端实现）。
-    use showroom_common::rsa::pkcs8::DecodePublicKey as _;
-
     /// 回环伪网关（与 ctl 侧 gateway::sealed 同构，交叉验证两端实现）。
-    fn spawn_fake_gateway() -> (String, RsaPublicKey) {
+    /// 返回 (base, srtp_id, per-user pub)——伪网关自持私钥（等价注册表）。
+    fn spawn_fake_gateway() -> (String, [u8; 8], RsaPublicKey) {
+        use showroom_common::rsa::pkcs8::DecodePublicKey as _;
         let keys = PlatformKeys::generate();
         let l = TcpListener::bind(("127.0.0.1", 0)).unwrap();
         let port = l.local_addr().unwrap().port();
-        let priv_pem = keys.priv_pkcs8_pem();
+        let priv_pem: String = keys.priv_pkcs8_pem();
         let pub_pem = keys.public_pem();
+        let mut srtp_id = [7u8; 8];
+        use rand::RngCore as _;
+        rand::rngs::OsRng.fill_bytes(&mut srtp_id);
         std::thread::spawn(move || {
             use showroom_common::srtp::unwrap_key;
             let (mut c, _) = l.accept().unwrap();
             let mut hdr = [0u8; HDR_LEN];
             c.read_exact(&mut hdr).unwrap();
             assert_eq!(&hdr[..4], b"SRTP");
-            assert_eq!(hdr[5], 0); // 上行 flags=0（带 wrap）
-            // 真机网关同构：字节级取 wrap → TReader 流式解密 → 8B 帧界取请求
+            assert_eq!(hdr[5], 0); // 上行 flags=0（带 id+wrap）
+            // 真机网关同构：字节级取 id+wrap → TReader 流式解密 → 8B 帧界取请求
             let mut raw = Vec::new();
             let mut buf = [0u8; 65536];
-            while raw.len() < WRAP_LEN {
-                let n = c.read(&mut buf).expect("wrap 到齐前断开");
+            while raw.len() < 8 + WRAP_LEN {
+                let n = c.read(&mut buf).expect("前置到齐前断开");
                 raw.extend_from_slice(&buf[..n]);
             }
-            let k = unwrap_key(&priv_pem, &raw[..WRAP_LEN]).unwrap();
+            let k = unwrap_key(&priv_pem, &raw[8..8 + WRAP_LEN]).unwrap();
+            let mut rest = raw.split_off(8 + WRAP_LEN); // 残余 = 首条记录字节
             let mut rd = TReader::new(k);
             let mut req_plain = Vec::new();
-            let mut rest = raw[WRAP_LEN..].to_vec();
             let req = loop {
                 if rest.is_empty() {
                     let n = c.read(&mut buf).expect("请求未完即断开");
@@ -298,15 +310,20 @@ mod tests {
             c.write_all(&out).unwrap();
             let _ = c.shutdown(std::net::Shutdown::Write);
         });
-        (format!("http://127.0.0.1:{port}"), RsaPublicKey::from_public_key_pem(&pub_pem).unwrap())
+        (
+            format!("http://127.0.0.1:{port}"),
+            srtp_id,
+            RsaPublicKey::from_public_key_pem(&pub_pem).unwrap(),
+        )
     }
 
     #[test]
     fn loopback_roundtrip_and_sticky_downgrade() {
-        let (base, pubk) = spawn_fake_gateway();
+        let (base, srtp_id, pubk) = spawn_fake_gateway();
         let tier = AtomicU8::new(0);
         let resp = request_with_tier(
-            &tier, &base, "GET", "/_api/health", &[("Authorization", "SR-SIG1 u")], b"", &pubk,
+            &TxCtx { tier: &tier, base: &base, srtp_id: &srtp_id, wrap_pub: &pubk },
+            "GET", "/_api/health", &[("Authorization", "SR-SIG1 u")], b"",
         )
         .expect("一级可用");
         assert_eq!(resp.status, 200);
@@ -323,7 +340,12 @@ mod tests {
             let _ = c.write_all(b"HTTP/1.1 400 Bad Request\r\nContent-Length: 0\r\n\r\n");
         });
         let tier2 = AtomicU8::new(0);
-        let r = request_with_tier(&tier2, &format!("http://127.0.0.1:{port}"), "GET", "/x", &[], b"", &pubk);
+        let id3 = [3u8; 8];
+        let b3 = format!("http://127.0.0.1:{port}");
+        let r = request_with_tier(
+            &TxCtx { tier: &tier2, base: &b3, srtp_id: &id3, wrap_pub: &pubk },
+            "GET", "/x", &[], b"",
+        );
         assert!(r.is_none());
         assert_eq!(tier2.load(std::sync::atomic::Ordering::Relaxed), 2, "对端不支持须粘性降级");
     }

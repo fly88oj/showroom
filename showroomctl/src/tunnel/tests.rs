@@ -1,6 +1,5 @@
 //! tunnel 集成测试：网关回环（明文直通 / 密封全双工）+ resolve 配置改写 + host.env 契约。
 
-use std::sync::Arc;
 use std::time::Duration;
 
 use rand::rngs::StdRng;
@@ -10,7 +9,7 @@ use rsa::Oaep;
 use sha2::Sha256;
 
 use showroom_common::srtp::{header, SessionRng, HDR_LEN};
-use showroom_common::{PlatformKeys, KEY_LEN};
+use showroom_common::KEY_LEN;
 
 use super::{resolve, Source, GATEWAY_PORT};
 use crate::middleware::{FrpMode, HostEnv};
@@ -44,19 +43,29 @@ async fn echo_port() -> u16 {
     port
 }
 
-/// 网关实例（127.0.0.1:0 → echo 上游），返回网关端口。
-async fn gateway_on(upstream_port: u16, keys: Option<Arc<PlatformKeys>>) -> u16 {
+/// 测试 root（每测试独立；网关按 srtp_id 查 per-user 私钥）。
+fn test_root(name: &str) -> std::path::PathBuf {
+    static N: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+    let n = N.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let root = std::env::temp_dir().join(format!("sr-gw-{name}-{}-{n}.d", std::process::id()));
+    let _ = std::fs::remove_dir_all(&root);
+    std::fs::create_dir_all(root.join("state/users/alice")).unwrap();
+    root
+}
+
+/// 网关实例（127.0.0.1:0 → echo 上游），返回 (端口, root)。
+async fn gateway_on(upstream_port: u16, root: std::path::PathBuf) -> (u16, std::path::PathBuf) {
     let l = tokio::net::TcpListener::bind(("127.0.0.1", 0)).await.unwrap();
     let port = l.local_addr().unwrap().port();
-    tokio::spawn(super::gateway::serve(l, upstream_port, keys));
-    port
+    tokio::spawn(super::gateway::serve(l, upstream_port, root.clone()));
+    (port, root)
 }
 
 #[tokio::test]
 async fn plaintext_passthrough_is_byte_exact() {
     // Docker Push / 匿名公开访问路径：非 SRTP 前缀的字节必须原样直达上游、响应原样返回
     let up = echo_port().await;
-    let gw = gateway_on(up, None).await;
+    let (gw, _root) = gateway_on(up, test_root("plain")).await;
     let mut c = tokio::net::TcpStream::connect(("127.0.0.1", gw)).await.unwrap();
 
     let req = b"POST /_api/import-begin HTTP/1.1\r\nHost: 1.2.3.4:24000\r\nContent-Length: 11\r\n\r\nhello=world".to_vec();
@@ -82,13 +91,14 @@ async fn plaintext_passthrough_is_byte_exact() {
 
 #[tokio::test]
 async fn srtp_sealed_full_duplex_roundtrip() {
-    // 密封通道：上行 wrap+段 → 网关解封转上游；下行以同一 k 对称封装 → 客户端解出
-    let keys = PlatformKeys::generate();
-    let pub_pem = keys.public_pem();
+    // 密封通道（v1.1）：id 前置 + per-user wrap + 记录层 → 网关查注册表解封转上游；
+    // 下行以同一 k 对称封装 → 客户端解出
+    let root = test_root("sealed");
+    let (srtp_id, pub_pem) = super::srtpkeys::issue(&root, "alice").unwrap();
     let up = echo_port().await;
-    let gw = gateway_on(up, Some(Arc::new(keys))).await;
+    let (gw, _r) = gateway_on(up, root).await;
 
-    // 客户端构造（镜像真实 wasm 侧形状：RSA-OAEP 包裹 k + 段流）
+    // 客户端构造（镜像真实客户端形状：id + RSA-OAEP 包裹 k + 记录流）
     let k = [0x5au8; KEY_LEN];
     let pubk = rsa::RsaPublicKey::from_public_key_pem(&pub_pem).unwrap();
     let mut rng = StdRng::from_seed([0xAA; 32]);
@@ -101,6 +111,7 @@ async fn srtp_sealed_full_duplex_roundtrip() {
     let mut framed = (payload.len() as u64).to_be_bytes().to_vec();
     framed.extend_from_slice(&payload);
     let mut wire: Vec<u8> = header(false).to_vec();
+    wire.extend_from_slice(&srtp_id); // v1.1 前置
     wire.extend_from_slice(&wrapped);
     let mut tw = showroom_common::srtp::TWriter::new(k, Box::new(rng) as Box<dyn SessionRng + Send>);
     for piece in framed.chunks(64 * 1024) {
@@ -129,13 +140,17 @@ async fn srtp_sealed_full_duplex_roundtrip() {
 }
 
 #[tokio::test]
-async fn srtp_without_platform_key_is_refused() {
-    // 平台私钥缺失（keys=None）时 SRTP 连接被拒——明文直通不受影响（另有用例）
+async fn srtp_unknown_id_is_refused() {
+    // 未知 srtp_id（未注册/已 GC）连接被拒——明文直通不受影响（另有用例）
     let up = echo_port().await;
-    let gw = gateway_on(up, None).await;
+    let (gw, _r) = gateway_on(up, test_root("unknown-id")).await;
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
     let mut c = tokio::net::TcpStream::connect(("127.0.0.1", gw)).await.unwrap();
-    c.write_all(&header(false)).await.unwrap();
+    // 完整前置但 id 未注册：网关查表即拒（不等超时）
+    let mut wire = header(false).to_vec();
+    wire.extend_from_slice(&[0x99u8; 8]); // 未注册 id
+    wire.extend_from_slice(&[0u8; 384]); // wrap 形状无关紧要——查表先失败
+    c.write_all(&wire).await.unwrap();
     let mut buf = [0u8; 16];
     let n = tokio::time::timeout(Duration::from_secs(5), c.read(&mut buf))
         .await

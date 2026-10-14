@@ -45,7 +45,22 @@ body= wrap || aes256gcm(k, zstd(docker_save_tar))
   为应用信封外再套传输密封，双重独立）。
 - 实现位：`showroom-common/src/srtp.rs`（TWriter/TReader + unwrap_key，格式单源）、
   `showroomctl/src/tunnel/gateway.rs`（FrameFwd 帧转发）、`showroom/src/srtp_transport.rs`
-  （CLI 一级 + 粘性降级）。浏览器侧（WS 载波）为后续项。
+  （CLI 一级 + 粘性降级）、`showroomctl/src/tunnel/srtp_ws.rs`（浏览器 WS 载波，§2.2）。
+
+### 2.2 WS 载波与密钥编排（plan-18；已实装）
+
+- **WS 载波**：`GET /_srtp`（子协议 `showroom-srtp-v1`，Caddy 反代至 serve）。msg[0]=
+  8B srtp_id+384B wrap；其后每条二进制消息=记录字节。每完成一帧（HTTP/1.1 请求）经
+  serve 原 Router 分发（SR-SIG1/nonce/限流/零信息暴露原样）；响应以同 k 记录密封回发。
+  登录族恒走明文层（OPAQUE 为敌意信道设计；密钥恰由 login-finish 下发）。
+- **v1.1 前置**：上行 wrap 前加 8B srtp_id（TCP 与 WS 载波一致），网关/serve 按 id 查
+  per-user 私钥（`state/users/<u>/srtp_rsa`，`state/srtp_ids.json` id→user，每用户保
+  最近 8 id）。
+- **密钥编排（§2.1 反 MITM）**：login-finish 附 (srtp_id, srtp_pub, key_mac)，
+  key_mac=HMAC(AKE 会话密钥, "srtp-key-v1"‖id‖pub)。客户端验签失败=fail-closed
+  （不降级）；WS 不可用（旧服务端）→ 页面会话内粘性二级。诚实边界：控制台 JS/wasm
+  本体替换仍防不住（根治=入口 HTTPS，独立事项）；per-user 隔离=定向轮换与波及面
+  收敛，非抗整站磁盘失窃；前向保密（临时 X25519）缓办（plan-18 §3.5）。
 
 ## 3. HTTP API（server=showroomctl serve，127.0.0.1:8090，经 Caddy /_api/* 代理）
 **零信息暴露原则：/_api/* 下所有端点（含 health/projects）一律要求 SR-SIG1 签名；未认证或验签失败的任何请求（无论路径是否存在、方法是否支持）统一返回 404 + `{"error":"E_AUTH"}`——不泄露路径存在性、版本、项目名等任何管理侧信息。**

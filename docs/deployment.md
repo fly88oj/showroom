@@ -116,7 +116,7 @@ showroom login <USER> --server-lan http://showroom-lan.your-host
 showroom config --server-public http://<FRP-SERVER>:28080
 ```
 
-**注意**：frp 仅转发 TCP；管理流量的认证与机密性由 SR-SIG1/信封/OPAQUE 在应用层保证，不依赖 frp 的加密。网关（:8082）按连接首批 6B 混合探测：SRTP 帧头→传输信封解封（SPEC §2.1）；其余（含全部现有流量）→ 字节级明文直通。**隧道必须是 tcp 型**（chmlfrp 隧道与 native 示例均满足；http 型按 Host 路由会解析载荷，不适用）。**CLI 两级传输已实装**：公网通道自动探测——服务端支持即全程协议层密封（stderr 提示「srtp: …已启用」），不可用自动回退明文（原逻辑，零配置）；LAN 恒明文。
+**注意**：frp 仅转发 TCP；管理流量的认证与机密性由 SR-SIG1/信封/OPAQUE 在应用层保证，不依赖 frp 的加密。网关（:8082）按连接首批 6B 混合探测：SRTP 帧头→传输信封解封（SPEC §2.1）；其余（含全部现有流量）→ 字节级明文直通。**隧道必须是 tcp 型**（chmlfrp 隧道与 native 示例均满足；http 型按 Host 路由会解析载荷，不适用）。**CLI 两级传输已实装**：公网通道自动探测——服务端支持即全程协议层密封（stderr 提示「srtp: …已启用」），不可用自动回退明文（原逻辑，零配置）；LAN 恒明文。**浏览器侧（WS 载波）同已实装**（SPEC §2.2）：登录后控制台 API 流量经 `/_srtp` WebSocket 协议层密封，密钥随登录经 OPAQUE 绑定下发（篡改即 fail-closed），旧服务端/WS 失败自动回退明文 fetch。
 
 ---
 

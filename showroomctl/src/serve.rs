@@ -137,6 +137,7 @@ pub async fn run(root: PathBuf) -> R<()> {
     // 永不拖累控制面（supervise 内部兜底；serve Restart=always 覆盖进程级故障）。
     tokio::spawn(crate::tunnel::supervise(root.clone()));
 
+    let root_ws = root.clone(); // /_srtp 路由闭包需要 root（srtp_id 注册表查询）
     let st: S = Arc::new(AppState {
         root,
         nonces: Mutex::new(HashMap::new()),
@@ -145,7 +146,16 @@ pub async fn run(root: PathBuf) -> R<()> {
         bind_tokens: Mutex::new(HashMap::new()),
         pending_pw: Mutex::new(HashMap::new()),
     });
-    let app = Router::new().fallback(api).with_state(st);
+    // /_srtp（plan-18 §3.2）：WS 载波端点——真实路由置于统一 fallback 之前；
+    // 内层分发复用同一 Router（SR-SIG1/限流/零信息暴露原样）。
+    let inner = Router::new().fallback(api).with_state(st);
+    let app = inner
+        .clone()
+        .route("/_srtp", axum::routing::get(move |ws: axum::extract::WebSocketUpgrade| {
+            let inner = inner.clone();
+            let root = root_ws.clone();
+            async move { crate::tunnel::srtp_ws::srtp_ws_upgrades(ws, inner, root) }
+        }));
     let listener = tokio::net::TcpListener::bind("127.0.0.1:8090")
         .await
         .map_err(|e| ApiError::state(format!("bind 127.0.0.1:8090: {e}")))?;
@@ -969,7 +979,7 @@ async fn auth_family(
                 .remove(&req.user) // 一次性消费（ke3 不可重放）
                 .filter(|p| p.expiry > now)
                 .ok_or_else(|| eauth("login-finish: no pending login (expired or replayed)"))?;
-            common::opaque::server_login_finish(&pending.state, &req.ke3)
+            let session_key = common::opaque::server_login_finish(&pending.state, &req.ke3)
                 .map_err(|e| eauth(&format!("ke3 rejected: {e}")))?;
             let token = state::rand_hex(16);
             {
@@ -977,7 +987,17 @@ async fn auth_family(
                 bt.retain(|_, (_, exp)| *exp > now);
                 bt.insert(token.clone(), (req.user.clone(), now + 60));
             }
-            Ok(Json(json!({"bind_token": token})))
+            // plan-18 §3.3：SRTP 密钥下发（OPAQUE 绑定）——per-user 包裹公钥 + 新鲜
+            // srtp_id + key_mac；客户端以 AKE 会话密钥验签，MITM 换任一字段即失败
+            let (srtp_id, srtp_pub) = crate::tunnel::srtpkeys::issue(&s.root, &req.user)
+                .map_err(|e| ApiError::state(format!("srtp issue: {}", e.msg)))?;
+            let key_mac = common::opaque::srtp_key_mac(&session_key, &srtp_id, &srtp_pub);
+            Ok(Json(json!({
+                "bind_token": token,
+                "srtp_id": hex::encode(srtp_id),
+                "srtp_pub": srtp_pub,
+                "key_mac": hex::encode(key_mac),
+            })))
         }
 
         // 绑定：bind_token 单次有效 + SR-SIG1 按 body 内公钥验签（候选钥匙，非已登记钥匙）
@@ -1497,7 +1517,7 @@ mod tests {
         .await;
         assert_eq!(code, 200, "login-begin: {}", String::from_utf8_lossy(&body));
         let ke2 = serde_json::from_slice::<Value>(&body).unwrap()["ke2"].as_str().unwrap().to_string();
-        let ke3 = showroom_common::opaque::login_finish(st, pw, user, &ke2).unwrap();
+        let (ke3, _sk) = showroom_common::opaque::login_finish(st, pw, user, &ke2).unwrap();
         let (code, body) = call(
             s,
             "POST",
@@ -1895,7 +1915,7 @@ FRP=none"}}"#).unwrap_err();
         let (_, b) = call(&s, "POST", "/_api/auth/login-begin",
             &serde_json::to_vec(&json!({"user":"alice","ke1": ke1})).unwrap(), &[]).await;
         let ke2 = serde_json::from_slice::<Value>(&b).unwrap()["ke2"].as_str().unwrap().to_string();
-        let ke3 = showroom_common::opaque::login_finish(st, "pw-a", "alice", &ke2).unwrap();
+        let (ke3, _sk) = showroom_common::opaque::login_finish(st, "pw-a", "alice", &ke2).unwrap();
         let body3 = serde_json::to_vec(&json!({"user":"alice","ke3": ke3})).unwrap();
         let (c, _) = call(&s, "POST", "/_api/auth/login-finish", &body3, &[]).await;
         assert_eq!(c, 200);

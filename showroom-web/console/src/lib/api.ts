@@ -2,6 +2,7 @@
 import { Buffer_fromHex, enc, nonceHex } from "@/lib/bytes";
 import { state } from "@/lib/state";
 import { ex, mem, put, unput, shimCStr } from "@/lib/wasm";
+import { httpSerialize, parseHttpResponse, srtpTry } from "@/lib/srtp";
 
 export interface ApiError { error: string; msg: string }
 
@@ -32,9 +33,19 @@ export async function apiDo(method: string, pathQ: string, body: unknown, signal
   const [bp, bl] = put(bodyBytes);
   const auth = signHeaderPtr(method, pathQ, bp, bl);
   unput(bp, bl);
+  const headers: [string, string][] = [
+    ["Authorization", auth],
+    ...(isJson ? ([["Content-Type", "application/json"]] as [string, string][]) : []),
+  ];
+  // 两级（plan-18）：一级 SRTP-WS 可用即密封整请求；失败/未激活走原 fetch（零改动）
+  const tier1 = await srtpTry(httpSerialize(method, pathQ, headers, bodyBytes));
+  if (tier1) {
+    const { status, body: respBody } = parseHttpResponse(tier1);
+    return new Response(respBody as BodyInit, { status });
+  }
   return fetch(pathQ, {
     method,
-    headers: { Authorization: auth, ...(isJson ? { "Content-Type": "application/json" } : {}) },
+    headers: Object.fromEntries(headers),
     body: method === "GET" || method === "HEAD" ? undefined : (bodyBytes as BodyInit),
     signal,
   });

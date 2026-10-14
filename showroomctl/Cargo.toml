@@ -5,7 +5,8 @@ edition = "2021"
 
 [dependencies]
 showroom-common = { path = "../showroom-common" }
-axum = "0.7"
+axum = { version = "0.7", features = ["ws"] }
+tower = { version = "0.5", features = ["util"] } # srtp_ws 内层分发 Service::call # ws：/_srtp 载波端点（plan-18）
 tokio = { version = "1", features = ["macros", "rt-multi-thread", "fs", "io-util", "sync", "time"] }
 futures-util = { version = "0.3", default-features = false }
 clap = { version = "4", features = ["derive"] }
@@ -32,4 +33,5 @@ reqwest = { version = "0.12", default-features = false, features = ["rustls-tls"
 toml = "0.8"
 
 [dev-dependencies]
-rsa = "0.9" # 网关回环测试：以平台公钥构造 SRTP 上行 wrap（版本随 common 锁定一致）
+rsa = "0.9"
+tokio-tungstenite = "0.23" # /_srtp 真socket 单测 # 网关回环测试：以平台公钥构造 SRTP 上行 wrap（版本随 common 锁定一致）

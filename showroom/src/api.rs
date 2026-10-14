@@ -172,14 +172,27 @@ pub fn signed_probe<'a>(user: &'a str, key: &'a UserKey) -> impl Fn(&str) -> boo
     }
 }
 
+// —— SRTP 一级凭据（plan-18 §3.3：登录经 OPAQUE 绑定下发；进程内存持有）——
+
+static SRTP_CREDS: std::sync::Mutex<Option<([u8; 8], String)>> = std::sync::Mutex::new(None);
+
+/// 登录成功后注入（auth.rs 验完 key_mac 调用）；进程生命周期内有效。
+pub fn set_srtp_creds(id: [u8; 8], pub_pem: String) {
+    *SRTP_CREDS.lock().unwrap() = Some((id, pub_pem));
+}
+
+pub fn srtp_creds() -> Option<([u8; 8], String)> {
+    SRTP_CREDS.lock().unwrap().clone()
+}
+
 // —— 客户端 ——
 
 pub struct Api {
     pub base: String,
     /// 本通道是否公网：Public 时启用 SRTP 一级传输（SPEC §2.1 两级处理）。
     which: Which,
-    /// 平台公钥（一级 wrap 用；缺失=二级明文，行为与既往完全一致）。
-    platform_pub: Option<showroom_common::rsa::RsaPublicKey>,
+    /// 一级凭据（登录下发的 srtp_id + per-user 公钥；缺失=二级明文，行为与既往一致）。
+    srtp: Option<([u8; 8], showroom_common::rsa::RsaPublicKey)>,
     tier_noted: std::cell::Cell<bool>,
     user: String,
     key: UserKey,
@@ -223,8 +236,11 @@ impl Api {
         } else {
             Which::Lan
         };
-        let platform_pub = load_platform_pub().ok();
-        Ok(Api { base, which, platform_pub, tier_noted: std::cell::Cell::new(false), user: cfg.user.clone(), key, http })
+        let srtp = srtp_creds().and_then(|(id, pem)| {
+            use showroom_common::rsa::pkcs8::DecodePublicKey as _;
+            showroom_common::rsa::RsaPublicKey::from_public_key_pem(&pem).ok().map(|k| (id, k))
+        });
+        Ok(Api { base, which, srtp, tier_noted: std::cell::Cell::new(false), user: cfg.user.clone(), key, http })
     }
 
     /// 错误渲染收口：E_AUTH 附登记/时间偏差提示与公钥串，其余原样。
@@ -245,12 +261,12 @@ impl Api {
         if self.which != Which::Public {
             return None;
         }
-        let pubk = self.platform_pub.as_ref()?;
+        let (id, pubk) = self.srtp.as_ref()?;
         let mut headers = vec![("Authorization", auth)];
         if let Some(ct) = content_type {
             headers.push(("Content-Type", ct));
         }
-        let resp = crate::srtp_transport::request(&self.base, method, path_q, &headers, body, pubk)?;
+        let resp = crate::srtp_transport::request(&self.base, id, pubk, method, path_q, &headers, body)?;
         if !self.tier_noted.get() {
             self.tier_noted.set(true);
             eprintln!("srtp: 公网通道协议层密封已启用（中转只见密文；不可用时自动回退明文）");

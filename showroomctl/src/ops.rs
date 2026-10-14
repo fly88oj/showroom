@@ -1089,7 +1089,7 @@ mod tests {
         let (st, ke1) = showroom_common::opaque::login_start(&mut rng, &login_pw, "carol").unwrap();
         let (ke2, sst) =
             showroom_common::opaque::server_login_start(&mut rng, &setup, Some(&record), &ke1, "carol").unwrap();
-        let ke3 = showroom_common::opaque::login_finish(st, &login_pw, "carol", &ke2).unwrap();
+        let (ke3, _) = showroom_common::opaque::login_finish(st, &login_pw, "carol", &ke2).unwrap();
         assert!(showroom_common::opaque::server_login_finish(&sst, &ke3).is_ok());
     }
 
@@ -1126,7 +1126,7 @@ mod tests {
         let (st3, ke1c) = showroom_common::opaque::login_start(&mut rng, "new-pw", "alice").unwrap();
         let (ke2c, sst) = showroom_common::opaque::server_login_start(
             &mut rng, &setup, Some(&rec2), &ke1c, "alice").unwrap();
-        let ke3 = showroom_common::opaque::login_finish(st3, "new-pw", "alice", &ke2c).unwrap();
+        let (ke3, _) = showroom_common::opaque::login_finish(st3, "new-pw", "alice", &ke2c).unwrap();
         assert!(showroom_common::opaque::server_login_finish(&sst, &ke3).is_ok(), "新密码可用");
         // 既有钥匙与账号级 admin 不受影响（R4）
         assert!(state::tokens_dir(&root, "alice").join(format!("{kid}.pub")).exists());

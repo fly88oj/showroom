@@ -262,6 +262,10 @@ pub fn render_caddyfile(mw: &BTreeSet<String>, lan: &str, public: &str) -> Strin
          \t\t\tprecompressed zstd gzip\n\
          \t\t}\n\
          \t}\n\
+         \t# SRTP WS 载波端点（plan-18：浏览器协议层密封；Caddy 只反代升级）\n\
+         \thandle /_srtp {\n\
+         \t\treverse_proxy 127.0.0.1:8090\n\
+         \t}\n\
          \t# 展项路由（showroomctl 按项目生成到 state/routes/<project>.caddy 并 reload）\n\
          \timport /srv/showroom/state/routes/*.caddy\n\
          \t# 根路径与未匹配路径返回真 404（零信息暴露：不重定向、不暴露站点信息；空体）\n\
@@ -1372,6 +1376,7 @@ mod tests {
         assert!(a.contains("reverse_proxy 127.0.0.1:5000"));
         assert!(a.contains("http://:8081 {") && !a.contains(":8080"), "site B 仅监听 8081（用户裁决：双 frp 隧道都打 8081，无 8080 访问来源；R7：8081 曾因重渲染丢失致公网断连）");
         assert!(a.contains("precompressed zstd gzip"), "file_server precompressed 恒渲染（zstd+gzip 双格式：代理客户端常只发 gzip）");
+        assert!(a.contains("handle /_srtp {"), "SRTP WS 载波端点反代恒渲染（plan-18）");
         assert!(a.contains("import /srv/showroom/state/routes/*.caddy"));
         assert!(a.contains("\trespond 404"), "未匹配路径补真 404（共用片段尾部；此前仅注释宣称 404，Caddy 实回空 200）");
         assert!(!a.contains("handle_path /_bootstrap"), "R8 用户裁决：CLI/Skill 仅登录后经 /_api/tool/* 可下载——静态匿名分发不进任何面");
@@ -1400,6 +1405,10 @@ mod tests {
              \t\tfile_server {\n\
              \t\t\tprecompressed zstd gzip\n\
              \t\t}\n\
+             \t}\n\
+             \t# SRTP WS 载波端点（plan-18：浏览器协议层密封；Caddy 只反代升级）\n\
+             \thandle /_srtp {\n\
+             \t\treverse_proxy 127.0.0.1:8090\n\
              \t}\n\
              \t# 展项路由（showroomctl 按项目生成到 state/routes/<project>.caddy 并 reload）\n\
              \timport /srv/showroom/state/routes/*.caddy\n\

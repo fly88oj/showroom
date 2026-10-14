@@ -97,12 +97,14 @@ pub fn login_start(
 }
 
 /// 登录第三步（本地）：ke2 → ke3。密码错误在此 Err（本地提示，不产生第三请求）。
+/// 返回 (ke3_b64, session_key)：session_key=AKE 双侧同源输出，plan-18 用作 SRTP
+/// 密钥下发的 HMAC 绑定密钥（对端伪造不得，MITM 换钥即验签失败）。
 pub fn login_finish(
     state: ClientLogin<Suite>,
     pw: &str,
     user: &str,
     ke2_b64: &str,
-) -> Result<String> {
+) -> Result<(String, Vec<u8>)> {
     let r = rwd(pw, user)?;
     let ke2 = CredentialResponse::<Suite>::deserialize(&unb64(ke2_b64)?)
         .map_err(|e| format!("bad ke2: {e}"))?;
@@ -113,7 +115,7 @@ pub fn login_finish(
             ClientLoginFinishParameters { context: None, identifiers: ids(user), ksf: None },
         )
         .map_err(|e| format!("login finish: {e}"))?;
-    Ok(b64(&out.message.serialize()))
+    Ok((b64(&out.message.serialize()), out.session_key.to_vec()))
 }
 
 /// 注册第一步（改密码流程）：产出 m1（发 `/_api/auth/pw-begin`）与本地状态。
@@ -211,13 +213,24 @@ pub fn server_login_start(
 }
 
 /// 登录第三步（服务端）：ke3 验证（MAC）；Err = 密码错误/伪造 → 调用方按 E_AUTH 同体 404。
-pub fn server_login_finish(state_bytes: &[u8], ke3_b64: &str) -> Result<()> {
+pub fn server_login_finish(state_bytes: &[u8], ke3_b64: &str) -> Result<Vec<u8>> {
     let state = ServerLogin::<Suite>::deserialize(state_bytes)
         .map_err(|e| format!("bad pending login state: {e}"))?;
     let ke3 = CredentialFinalization::<Suite>::deserialize(&unb64(ke3_b64)?)
         .map_err(|e| format!("bad ke3: {e}"))?;
-    state.finish(ke3).map_err(|e| format!("login finish (ke3 rejected): {e}"))?;
-    Ok(())
+    let out = state.finish(ke3).map_err(|e| format!("login finish (ke3 rejected): {e}"))?;
+    Ok(out.session_key.to_vec())
+}
+
+/// plan-18 §3.3：SRTP 密钥下发绑定标签。域分离前缀 + id + pub 一起 MAC——
+/// 任一字段被换即验签失败（客户端 fail-closed）。
+pub fn srtp_key_mac(session_key: &[u8], srtp_id: &[u8], pub_pem: &str) -> [u8; 32] {
+    use hmac::{Hmac, Mac};
+    let mut m = <Hmac<sha2::Sha256>>::new_from_slice(session_key).expect("hmac any key len");
+    m.update(b"srtp-key-v1");
+    m.update(srtp_id);
+    m.update(pub_pem.as_bytes());
+    m.finalize().into_bytes().into()
 }
 
 #[cfg(test)]
@@ -241,7 +254,7 @@ mod tests {
         let (lstate, ke1) = login_start(&mut rng, "hunter2", "alice").unwrap();
         let (ke2, sstate) =
             server_login_start(&mut rng, &setup, Some(&record), &ke1, "alice").unwrap();
-        let ke3 = login_finish(lstate, "hunter2", "alice", &ke2).unwrap();
+        let ke3 = login_finish(lstate, "hunter2", "alice", &ke2).unwrap().0;
         assert!(server_login_finish(&sstate, &ke3).is_ok());
     }
 
@@ -286,7 +299,7 @@ mod tests {
         let (ls3, ke1c) = login_start(&mut rng, "pw-a", "alice").unwrap();
         let (ke2c, _s3) =
             server_login_start(&mut rng, &setup, Some(&record_a), &ke1c, "alice").unwrap();
-        let ke3c = login_finish(ls3, "pw-a", "alice", &ke2c).unwrap();
+        let (ke3c, _) = login_finish(ls3, "pw-a", "alice", &ke2c).unwrap();
         assert!(server_login_finish(&sstate_b, &ke3c).is_err());
         let _ = ls2;
     }

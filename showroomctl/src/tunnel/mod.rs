@@ -14,6 +14,8 @@
 
 pub mod chmlfrp;
 pub mod gateway;
+pub mod srtpkeys;
+pub mod srtp_ws;
 
 use std::path::PathBuf;
 use std::time::Duration;
@@ -111,11 +113,6 @@ pub async fn supervise(root: PathBuf) {
     if host0.frp != crate::middleware::FrpMode::None && host0.public_host.is_empty() {
         eprintln!("showroomctl: tunnel: 警告：PUBLIC_HOST 为空（site B 未渲染），隧道流量将无处落地");
     }
-    // 平台私钥（serve 启动序列已确保生成；此处缺失只禁用密封通道，不拦明文直通）
-    let keys = showroom_common::PlatformKeys::load_pem(&root.join("state")).ok();
-    if keys.is_none() {
-        eprintln!("showroomctl: tunnel: 警告：state/platform_rsa 缺失，SRTP 密封通道不可用（明文直通不受影响）");
-    }
     // 网关（上游=Caddy site B）
     let listener = match TcpListener::bind(("127.0.0.1", GATEWAY_PORT)).await {
         Ok(l) => l,
@@ -127,8 +124,7 @@ pub async fn supervise(root: PathBuf) {
     eprintln!(
         "showroomctl: tunnel: 网关 127.0.0.1:{GATEWAY_PORT} → 127.0.0.1:{UPSTREAM_PORT}（SRTP/明文混合）"
     );
-    let keys = keys.map(std::sync::Arc::new);
-    tokio::spawn(gateway::serve(listener, UPSTREAM_PORT, keys));
+    tokio::spawn(gateway::serve(listener, UPSTREAM_PORT, root.clone()));
     // 热重载（用户裁决）：每 2s 对比 FRP 签名（mode/token/tunnels/toml）——变化即中止旧会话
     // 任务、按新源重建。控制台保存（admin POST 落盘 host.env）、setup --apply、手工编辑
     // 三种途径统一走此路径，无需重启 serve。try_load 失败（如 setup 非原子写的中间态）

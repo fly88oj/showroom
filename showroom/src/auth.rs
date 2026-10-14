@@ -144,12 +144,29 @@ pub fn login(
         .as_str()
         .ok_or("登录失败：服务端未返回 ke2")?
         .to_string();
-    let ke3 = opaque::login_finish(state, &pw, &user, &ke2).map_err(|_| LOGIN_FAIL_TEXT.to_string())?;
+    let (ke3, session_key) =
+        opaque::login_finish(state, &pw, &user, &ke2).map_err(|_| LOGIN_FAIL_TEXT.to_string())?;
     let v = post_json(&c, &base, "/_api/auth/login-finish", &json!({"user": user, "ke3": ke3}), &[])?;
     let bind_token = v["bind_token"]
         .as_str()
         .ok_or("登录失败：服务端未返回 bind_token")?
         .to_string();
+    // plan-18 §3.3：SRTP 密钥下发（OPAQUE 绑定）——三项齐备才启用一级；
+    // key_mac 验签失败 = 链路篡改，fail-closed（不降级——降级正是 MITM 所愿）
+    if let (Some(id_hex), Some(pub_pem), Some(mac_hex)) = (
+        v["srtp_id"].as_str(),
+        v["srtp_pub"].as_str(),
+        v["key_mac"].as_str(),
+    ) {
+        let id = hex::decode(id_hex).map_err(|e| format!("srtp_id 解析失败: {e}"))?;
+        let id: [u8; 8] = id.try_into().map_err(|_| "srtp_id 须 8 字节".to_string())?;
+        let want = showroom_common::opaque::srtp_key_mac(&session_key, &id, pub_pem);
+        if hex::encode(want) != mac_hex {
+            return Err("检测到传输链路篡改（SRTP 密钥下发校验失败），已中止。请检查网络或联系管理员".into());
+        }
+        crate::api::set_srtp_creds(id, pub_pem.to_string());
+        eprintln!("srtp: 登录下发密钥已验证（协议层密封就绪）");
+    }
 
     // key-bind：候选钥匙签名（服务端按 body 公钥验签）+ X-Sr-Bind
     let key = UserKey::generate();

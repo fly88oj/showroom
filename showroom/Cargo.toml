@@ -14,5 +14,6 @@ zstd = "0.13"
 rand = "0.8"
 sha2 = "0.10"
 base64 = "0.22"
+hex = "0.4" # plan-18：srtp_id/key_mac 十六进制
 # plan-16 §4 login：交互读密码（不回显、不进 argv/env/ps；仅 libc/win 依赖）
 rpassword = "7"
