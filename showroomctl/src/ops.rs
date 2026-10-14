@@ -770,7 +770,7 @@ pub struct UserInfo {
     pub projects: usize,
     /// 管理员（R4 裁决：账号级，钥匙无级）。
     pub admin: bool,
-    /// 是否已设登录密码（pass.opaque 存在；plan-16 §1.5 面板「未设密码」徽标→一键补发）。
+    /// 是否已设登录密码（pass.opaque 存在；plan-16 §1.5 has_password=false 时管理端可经 passwd-set 一键重置（账号表无密码徽标——has_password 仅 JSON 字段））。
     pub has_password: bool,
 }
 

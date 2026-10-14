@@ -37,7 +37,7 @@ body= wrap || aes256gcm(k, zstd(docker_save_tar))
 | POST /_api/import | query `?project=&tag=`，body=信封 | `{ok,digest}` |
 | POST /_api/import-check | `{image_id}` | `{present:bool}` |
 
-错误统一：HTTP 4xx/5xx + `{"error":"E_CODE","msg":"..."}`；错误码 `E_AUTH/E_NAME/E_QUOTA/E_NOTFOUND/E_STATE/E_NET`（msg 不得包含未登记公钥串以外的内部信息；验签失败与路径不存在不可区分）。
+错误统一：HTTP 4xx/5xx + `{"error":"E_CODE","msg":"..."}`；错误码 `E_AUTH/E_NAME/E_QUOTA/E_NOTFOUND/E_STATE/E_CONFIRM/E_NET`（msg 不得包含未登记公钥串以外的内部信息；验签失败与路径不存在不可区分）。
 user 归属校验：签名 user 必须等于 `<project>.conf` 中归属者（磁盘键名 owner=，见 §5；publish 时 project 归属首个创建者）。`GET /_api/projects` 恒只回签名用户本人项目（R4 裁决——跨用户项目名/账号名不对普通登录者枚举）；管理员跨用户全量走 `GET /_api/admin/projects`（§12.2）。
 
 **静态面（Caddy）**：`/{project}/*` 项目页面公开；`_bootstrap/` 目录仅作 `/_api/tool` 工具源——CLI/Skill/公钥登录后控制台内下载（R8 裁决：无静态匿名分发面，`/_bootstrap/*` 不进任何站点）；`/_console` 仅暴露最小登录壳（登录成功前不加载任何管理资源）。
@@ -59,7 +59,7 @@ state/tokens/<user>/<kid>.pub    （ed25519 公钥，可多把）
 state/users/<user>/reg.cred     registry basic_auth user:hash（bcrypt）
 state/projects/<project>.conf   key=value: owner tag port cport mem cpu redisdb updated（磁盘键名沿用 owner=）
 state/projects/<project>.env    见下方环境变量契约
-state/projects/<project>.last2  上一 tag
+state/projects/<project>.last2  上一 tag（老项目回滚兜底；现行=versions.json 发布历史）
 _middleware/{postgres,redis,registry}/  数据卷(bind)
 _tmp/                   import 暂存（即用即删）
 ```
@@ -80,7 +80,7 @@ SHOWROOM_PROJECT=<project>   SHOWROOM_BASE_PATH=/<project>/
 
 ## 7. 行为约定
 - publish：校验名/配额→registry 镜像存在→分配端口→供给 DB/Redis→起容器（滚动：`-new` 后缀起新、健康后删旧改名）→写路由 `reload caddy`→更新 last2。健康=TCP 127.0.0.1:port 可连或 60s 超时放行。
-- rollback：读 last2，按其 tag 重跑 publish 内核，旧 tag 写回 last2。
+- rollback：按发布历史 versions.json（append-only；`{project, version?}`，缺省=上一版本）以该版镜像重跑 publish 内核；版本号继续向前分配不消耗；last2 仅老项目（无历史文件）兜底。
 - reconcile：遍历 `state/projects/<project>.conf`，容器缺失/路由缺失则按 conf 重建（幂等）。
 - import：验签→解密到 _tmp（IMPORT_MAX_GB 帽）→`docker load`→`docker tag`→push 127.0.0.1:5000→删临时。
 - gc-images/gc-registry/registry-gc/snapshot/autoheal：见设计文档 §6，由 systemd timer 调 `showroomctl <sub>`。disksentinel（磁盘哨兵）：**待实现**——当前无实现，磁盘水位以 `/_api/space` 与 admin/status 面板为准。
@@ -109,7 +109,7 @@ POST /_api/import-end?upload=<id>             → 拼接后走单发 import 同�
 **库名归一化**：db_ident = `sr_` + project 中 `-`→`_`（psql -d、CREATE、env 的 DB_NAME/DB_USER/DATABASE_URL 一律用它）；v1.4 前的存量库（含旧槽位名 `sr_<p>_<s>` 与带连字符名）在供给/访问时检测旧名存在则沿用，直到 db-reset 重建为新名。
 | 端点 | 请求 | 行为 |
 |---|---|---|
-| POST /_api/db-sql | `{project,sql,confirm}` | `docker exec -i sr-postgres psql -d sr_<p> -v ON_ERROR_STOP=1` 执行（stdin 传 sql，禁 argv）；confirm!=true 且语句含 DROP/TRUNCATE/DELETE 时拒（E_STATE 提示确认）；返回 `{out}`（psql 文本输出）|
+| POST /_api/db-sql | `{project,sql,confirm}` | `docker exec -i sr-postgres psql -d sr_<p> -v ON_ERROR_STOP=1` 执行（stdin 传 sql，禁 argv）；confirm!=true 且语句含 DROP/TRUNCATE/DELETE/ALTER 时拒（**E_CONFIRM**，谓词服务端单源 `sql_needs_confirm`）；返回 `{out, csv}`——单条 SELECT 用 `psql --csv` 执行（out=csv 同文；控制台按 csv 渲染结果表格/多结果 Tab，多语句按分号状态机拆分逐条发送、确认后从断点续发）|
 | GET /_api/db-tables | `?project=` | 列表查询（\dt 等价 SQL）→ `{"tables":[...]}`（控制台 ComboBox 数据源）|
 | POST /_api/db-preview | `{project,table,limit≤200}` | `SELECT * LIMIT n` → `{columns,rows}` |
 | POST /_api/db-dump-begin | `{project,client_pub_pem}` | v1.3 起改为三段式（begin/chunk/status，见 §10.4）；本行旧单发 base64 形式已移除 |
@@ -163,7 +163,7 @@ CLI 对应：`showroom db sql|tables|preview|dump|restore|reset`。公网全可�
 ## 12. v1.5：一键部署 + 管理员体系
 ### 12.1 上传发布一体
 - CLI：`showroom deploy [项目] <tag> [--mem --cpu --container-port]` = push（压缩上传）+ publish --wait + 打印 URL 的原子命令（任一步失败即停，报错含已完成的步骤）。
-- 控制台：发布表单「一键部署」按钮——选 tar → 前端压缩 → 分片上传 → 自动 publish → 展示 URL；分步状态条（压缩中/上传 x%/发布中/完成）。
+- 控制台：发布表单「发布」按钮——选 tar → 前端压缩 → 分片上传 → 自动 publish → 展示 URL；分步状态条（压缩中/上传 x%/发布中/完成）。
 ### 12.2 管理员（账号级，R4 裁决；原文「标记在 Key 上」模型已反转）
 - state：`users/<user>/admin`（空文件存在=管理员账号）为**唯一真相**；旧钥匙级 `tokens/<user>/<kid>.admin` 与 `users/<user>/admin.pending` 仅作存量迁移输入（serve 启动一次性迁移清除）。
 - 引导：主机 CLI `showroomctl user-add <名> --gen-password --admin` 建立首个管理员（`--admin` 即刻落账号级标记；统一账号密码认证，B7）；此后管理员可远程授权。
@@ -181,11 +181,11 @@ CLI 对应：`showroom db sql|tables|preview|dump|restore|reset`。公网全可�
 
 ## 13. v1.6：部署入口并存 + 镜像选择 + Redis 浏览隔离
 ### 13.1 发布入口三存（v1.6 原始描述；UI 现状由 §17 单表单取代，端点与 CLI 三命令不变）
-- 「一键部署」：tar→压缩→上传→立即发布（快捷路径）。
+- 「一键部署」（现发布页 tar 源同一路径）：tar→压缩→上传→立即发布。
 - 「仅上传」：只入 registry，不入库部署（发布者择时部署）。
 - 「部署」：独立表单——**镜像 ComboBox**（datalist 搜索）列当前可选镜像，默认仅当前用户的（admin 可看全部）；选中后填内存需求/端口→发布（旧版本单独部署即从此入口）。
 - 新端点 `GET /_api/images`（签名）→ `{"images":["<user>/<project>:<tag>",...]}`：registry catalog+tags 合并；按签名用户 user 前缀过滤；管理员不过滤。
-- **§17 修订**：三入口在 UI 上收敛为发布页**单表单双镜像源**（本地 tar 文件 / 镜像库下拉；镜像库源=原「部署」入口，仅上传=提交旁次要按钮）；`GET /_api/images` 与 CLI `showroom deploy|push|publish` 三命令不变。
+- **§17 修订**：三入口在 UI 上收敛为发布页**单表单双镜像源**（本地 tar 文件 / 镜像库下拉；镜像库源=原「部署」入口，仅上传=镜像库页「上传镜像」区块（与项目无关））；`GET /_api/images` 与 CLI `showroom deploy|push|publish` 三命令不变。
 ### 13.2 Redis 浏览按用户隔离（低成本实现，不动 Redis 本体）
 - 隔离单位=Redis 逻辑库：`state` 已按项目分配 redisdb（池 REDIS_DBS，§13.3）。`/_api/redis-dbs|keys|get` 增加校验：请求 db ∈ 当前用户名下项目的 redisdb 集合；管理员放开全量。控制台 DB 下拉**显示项目名而非库号**（`/_api/redis-dbs` 附 entries=db→project 映射；管理员全池，未分配库显示占位）。
 - 诚实边界（文档注明）：容器内应用持有原始连接仍可 SELECT 任意库——这是**界面级/协作级隔离**（防误看防误操作），非安全边界；应用级强隔离需独实例或 Redis ACL+rewrite，成本过高不做。
@@ -295,9 +295,9 @@ C→S GET  /_api/reg-cred [SR-SIG1] → {"user","registry_password"}  # 暴露�
   时序分析）；限流按 user 计（代理后取不到可信 IP），全局桶+rwd 计算成本抬高单价。
 
 ## 17. v2.0：控制台信息架构重设计（plan-17 定稿）
-取代 §9.1「四区」与 §13.1「三入口并存」的控制台侧 UI 描述（两节的端点与 CLI 语义不变）；零框架/零构建/零外部资源不变，登录前零信息暴露不变（管理壳仍走 template 惰性克隆）。
+取代 §9.1「四区」与 §13.1「三入口并存」的控制台侧 UI 描述（两节的端点与 CLI 语义不变）；控制台现为 Vite+React+TS+shadcn/ui 工程（`showroom-web/console/`，懒加载分包、`base=/_console/`；产物 dist/ 入库），wasm 垫片装载/密码学约定不变（零 wasm-bindgen，登录前零信息暴露不变（管理壳仍走 template 惰性克隆）。
 ### 17.1 导航与层级
-- 顶栏单行（≤56px sticky）：账号徽标（管理员加「管」角标，无角色徽标——R4 去冗余）+ 设置 + 退出（无常驻 CTA，发布入口即「发布」标签）。
+- 顶栏单行（≤56px sticky）：账号徽标（管理员加「管」角标，无角色徽标——R4 去冗余）+ 用户菜单（设置 / 修改密码… / 退出登录——改密入口归菜单，设置弹窗只剩对外域名+PEM 两字段）（无常驻 CTA，发布入口即「发布」标签）。
 - 五标签（role=tablist 方向键）：**我的项目**（默认落地）/**发布**/**镜像库**/**数据**（DB+Redis 合并）/**帮助**（二级菜单五面板：账号/CLI 使用/镜像规范/工具下载/错误码）；「管理」标签仅 whoami admin=true 渲染，内部同为五面板（账号/全部项目/平台状态/宿主配置/实时事件；docker events 原始流降为管理员工具）。
 - 三级封顶：顶栏→标签→卡片；卡片=标题+副题（纯状态文本，自动刷新兜底，无「已加载 N 项」可点重取入口）+内容；卡片内禁嵌 fieldset。
 ### 17.2 数据自动加载（显式刷新按钮全站归零）
@@ -320,8 +320,8 @@ C→S GET  /_api/reg-cred [SR-SIG1] → {"user","registry_password"}  # 暴露�
 | 发布中 | 黄●发布中… | 等待 | 本地 publish 在途 |
 状态标识=●+文字双通道（非仅颜色）；无「打开」按钮——URL 列即外链；行操作固定序「发布（更新）/停止(启动)/更多▾」行尾+日志列「▾」。
 ### 17.4 发布单表单与参数单源（取代三入口）
-- 发布页单表单 5 字段：项目（留空自动随机 8 位）+ 镜像源 radio（**本地 tar 文件**/**镜像库**下拉）+ 标签 + 内存需求 + 监听端口；「仅上传」为提交旁次要按钮（tar 源可用）。
-- 镜像库源=原「部署」入口：选中镜像自动带出项目/标签，①压缩②上传跳过直接 publish；tar 源=原「一键部署」。
+- 发布页单表单 5 字段：项目（留空自动随机 8 位）+ 镜像源 radio（**本地 tar 文件**/**镜像库**下拉）+ 标签 + 内存需求 + 监听端口；「仅上传/上传入库」在镜像库页（与项目无关——镜像名取自 tar；发布页恒完整发布）（tar 源可用）。
+- 镜像库源=原「部署」入口：选中源镜像带出 tag 与项目，①压缩②上传跳过直接 publish；tar 源=原「一键部署」（版本恒由服务端自增分配，表单只读预览）。
 - 预填：项目命中已有行 → 内存=服务端 conf（GET /_api/projects 权威）、标签/端口=本机 `sr.conf.*` 记忆（publish 成功写 `{tag,cport,ts}`）+ 注记「沿用上次发布参数（MM-DD），可修改」；行「更新」跳发布页预填同一套。
 ### 17.5 URL 展示策略
 主链接一律 `externalUrl()=base+/<project>/`：base ① 设置 `sr.publicBase`（设置对话框「对外访问域名」）→ ② `location.origin`（host 非私网）→ ③ 兜底 origin+列表「正在用内网地址展示 URL」提示条。服务端登记 `p.url` 永不作主链接，仅 tooltip。

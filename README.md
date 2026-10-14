@@ -19,7 +19,7 @@ showroom deploy v1          # 推镜像 + 发布 + 打印 URL，一步到位
 | OPAQUE 密码登录 | 控制台一步登录（账号+密码）、CLI `showroom login` 一次后全命令免密码（gh/ssh 模型）；密码经 OPRF 盲化**永不上线**（RFC 9380 / Ristretto255），登录自动绑定本机钥匙并配好 registry 凭据；密钥生成/登记全程无感 |
 | 安全模型 | 所有管理请求经 **SR-SIG1**（Ed25519 请求签名）认证；镜像与数据库备份以**加密信封**（RSA-3072-OAEP 包裹 AES-256-GCM 密钥）在明文链路上端到端加密；管理员为账号级属性。详见 [docs/security.md](docs/security.md) |
 | 零信息暴露 | 未认证请求对 `/_api/*` 一律返回 `404 {"error":"E_AUTH"}`——不泄露路径存在性、项目名、版本等任何管理侧信息 |
-| 一键发布 | `showroom deploy`（push + publish --wait + URL 横幅一步到位）与控制台发布页**单表单双镜像源**（本地 tar 文件 / 镜像库下拉选已有镜像发旧版本；「仅上传」为次要按钮） |
+| 一键发布 | `showroom deploy`（push + publish --wait + URL 横幅一步到位）与控制台发布页**单表单双镜像源**（本地 tar 文件 / 镜像库下拉选已有镜像发旧版本；「仅上传」归镜像库页） |
 | 自愈 | systemd timer 驱动 `reconcile`（状态比对、幂等重建）与 `autoheal`（退出拉起、unhealthy 重启）；容器 `--restart unless-stopped` 兜底 |
 | 多通道发布 | 内网走 registry 直推（快通道），公网走加密 import 通道（大文件分片断点续传）；CLI 自动探测、失败自动回落 |
 | 磁盘准入与镜像管理 | 上传前按 `膨胀因子×密封体积 ≤ 可用−预留` 准入（`showroom space` 三数可见）；`showroom rm-image` 删除即内联 GC **立即**回收空间，闭环「上传不够→删除→立即可传」 |
@@ -37,8 +37,8 @@ showroom deploy v1          # 推镜像 + 发布 + 打印 URL，一步到位
                    │   │  │   /v2          → registry (127.0.0.1:5000，推拉快通道)     │ │
                    │   │  │   /<project>/* → 项目容器 (127.0.0.1:8100–8199)           │ │
                    │   │  │   /_console/*  → 静态 WASM 控制台                          │ │
-                   │   │  │ site B（:8080 纯端口匹配，公网面）                          │ │
- 访客（项目页面）──┘   │  │   公网隧道（frp→127.0.0.1:8080）命中的站点；无 /v2                │ │
+                   │   │  │ site B（:8081 纯端口匹配，公网面）                          │ │
+ 访客（项目页面）──┘   │  │   公网隧道（frp→127.0.0.1:8081）命中的站点；无 /v2                │ │
                        │  └───────────────────────────────────────────────────────────┘ │
                        │     ┌─ showroomctl ─┐   ┌─ sr-postgres ─┬─ sr-redis ─┐        │
                        │     │ 状态+控制面    ├──▶│ 共享中间件（docker 网络 showroom-net）│
@@ -109,7 +109,7 @@ cargo build -p showroom-common --target wasm32-unknown-unknown --release   # 控
 cd showroom-web && node smoke.mjs && node smoke-wizard.mjs                 # 控制台冒烟（node ≥ 18，需系统 zstd）
 ```
 
-测试基线与五规则（独立临时目录/禁全局状态/禁固定端口/显式入参/超时预算）见 **[TESTING.md](TESTING.md)**：138 个单元测试约 1.6s，无 flaky。
+测试基线与五规则（独立临时目录/禁全局状态/禁固定端口/显式入参/超时预算）见 **[TESTING.md](TESTING.md)**：cargo 147 个单元测试 + 控制台 vitest 41 个纯函数测试（CI 同款），无 flaky。
 
 工作区包含四个模块：`showroom-common`（SR-SIG1、加密信封与 OPAQUE 的契约实现）、`showroom`（发布者 CLI）、`showroomctl`（主机控制面与运维）、`showroom-web`（WASM 控制台静态资源）。提交流程与规范见 [CONTRIBUTING.md](CONTRIBUTING.md)。
 

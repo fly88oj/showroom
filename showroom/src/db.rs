@@ -18,7 +18,7 @@ use crate::config::Config;
 
 #[derive(Subcommand)]
 pub enum DbCmd {
-    /// 执行 SQL（stdin 或 --file；含 DROP/TRUNCATE/DELETE 需 --confirm）
+    /// 执行 SQL（stdin 或 --file；含 DROP/TRUNCATE/DELETE/ALTER 需 --confirm）
     Sql {
         project: String,
         /// SQL 文件（缺省读 stdin）

@@ -11,7 +11,7 @@ import { api } from "@/lib/api";
 import { opaqueEnd, opaqueFinish, opaqueRegEnd, opaqueRegFinish, opaqueRegStart, opaqueStart, postAuthJson } from "@/lib/auth";
 import { state } from "@/lib/state";
 
-/** 设置：对外访问域名 + 平台公钥 PEM 收纳 + 修改密码入口（真链路） */
+/** 设置：对外访问域名 + 平台公钥 PEM 收纳（修改密码入口在顶栏用户菜单，非本对话框） */
 export function SettingsDialog({
   open, onOpenChange, base, onBaseChange,
 }: {

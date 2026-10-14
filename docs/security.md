@@ -168,7 +168,7 @@ SR-SIG1 签名已覆盖 `sha256(body)`（整个信封的哈希）——Encrypt-t
 | `GET /_api/projects` 项目列表 | 仅本人项目 | 仅本人项目（跨用户全量走 `GET /_api/admin/projects`，每行附 owner） |
 | 镜像列表 `/_api/images` | 仅自己命名空间 | 全量 |
 | Redis 浏览 | 仅自己项目的逻辑库（协作级隔离） | 全量（下拉显示项目名，未分配库占位） |
-| 发卡 / 补发密码 / 吊销 / 收权 / 主机状态与编排面板 | ✗ | ✓ |
+| 发卡 / 重置密码 / 吊销 / 收权 / 主机状态与编排面板 | ✗ | ✓ |
 | 管理员直发任意项目（`showroomctl publish <user> …`，仅主机 CLI） | — | 仅主机 |
 
 - 授权/收权：`showroomctl user-admin <USER> --admin true|false` / `POST /_api/admin/user-admin {user,admin}`（账号级，对该账号**全部钥匙**生效；旧钥匙级端点已移除）；

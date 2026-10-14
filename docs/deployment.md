@@ -1,6 +1,6 @@
 # Showroom 部署指南（三步自举）
 
-目标：在一台 Linux 主机上部署完整的 Showroom 控制面。完成后你将拥有：Caddy 双面入口（内网面 :80 / 公网面 :8080）、控制面 API、共享 PostgreSQL/Redis/registry、systemd timers 自愈、首个管理员账号。
+目标：在一台 Linux 主机上部署完整的 Showroom 控制面。完成后你将拥有：Caddy 双面入口（内网面 :80 / 公网面 :8081）、控制面 API、共享 PostgreSQL/Redis/registry、systemd timers 自愈、首个管理员账号。
 
 > 本文所有 `your-host`、`<USER>`、`<PROJECT>`、`<…>` 均为占位符，替换为你的实际值。协议与安全背景见 [security.md](security.md)；日常运维见 [operations.md](operations.md)。
 > 手工全步骤（原理参考/排障用，setup 已自动化）见[附录 A](#附录-a-手工全步骤原理参考)；调优参数全集见[附录 B](#附录-b-调优参数表)。
@@ -13,7 +13,7 @@
 | Docker | ≥ 20（含 `docker exec`） | 展项与中间件容器 |
 | 权限 | root | 写 /etc、/usr/local/bin、systemd 单元 |
 | 文件系统 | btrfs | 快照（`snapshot hourly/daily`）依赖子卷 |
-| 端口 | 80 对外（site A 内网面）；8080 为公网隧道目标（site B，frpc → 127.0.0.1:8080）；8100–8199 仅本机 | 展项端口不直接暴露 |
+| 端口 | 80 对外（site A 内网面）；8081 为公网隧道目标（site B，frpc → 127.0.0.1:8081）；8100–8199 仅本机 | 展项端口不直接暴露 |
 
 **唯一保留的手工步**：btrfs 子卷创建与挂载（setup 的 BtrfsSubvol Action 只覆盖「父目录即 btrfs」的顺手场景，子卷与 fstab 属磁盘布局，不自动化）：
 
@@ -93,7 +93,7 @@ curl -s -o /dev/null -w '%{http_code}\n' http://127.0.0.1:8090/_api/health   # �
 
 **ChmlFrp（自举）**：编辑 `state/host.env` 置 `FRP=chmlfrp`、`FRP_TOKEN=<usertoken>`、`FRP_TUNNEL=<隧道ID>` → `showroomctl setup --apply`。setup 将下载 frpc 到 `/usr/local/frpc/frpc`（下载源 `https://chmlfrp.cn/dw/linux/amd64/frpc`）并以 `chmlfrp.service` 常驻（凭据经 0600 的 host.env 以 EnvironmentFile 注入，不落单元明文）。**如实降级**：该下载源当前可能返回 HTML 壳——setup 下载后以 `file` 校验 ELF，非 ELF 即报错并提示「手工放置 linux/amd64 frpc 二进制到 `/usr/local/frpc/frpc` 后重跑 `showroomctl setup --apply`」；`/_api/admin/host` 的 `frp.service` 字段常驻反馈 is-active 状态。
 
-**自建 frp（主机无公网 IP）**：在公网服务器跑 frps（占位配置），在 Showroom 主机跑 frpc 把 Caddy 的公网面（site B，恒听 `:8080`）暴露出去：
+**自建 frp（主机无公网 IP）**：在公网服务器跑 frps（占位配置），在 Showroom 主机跑 frpc 把 Caddy 的公网面（site B，恒听 `:8081`）暴露出去：
 
 ```toml
 # /etc/frp/frpc.toml（Showroom 主机）
@@ -104,12 +104,12 @@ auth.token = "<FRP-TOKEN>"
 [[proxies]]
 name = "showroom-http"
 type = "tcp"
-localPort = 8080          # 转发目标 = site B（Caddy 恒听 8080，纯端口匹配）
+localPort = 8081          # 转发目标 = site B（Caddy 恒听 8081，纯端口匹配）
 remotePort = 28080         # 公网访问端口
 transport.useEncryption = true
 ```
 
-frpc 以 systemd 常驻后，公网面即 `http://<FRP-SERVER>:28080`；同时把该地址写入 `state/host.env` 的 `PUBLIC_HOST=` 再 `setup --apply`（渲染 site B——PUBLIC_HOST 非空是开关，地址仅作元数据展示；frp 流量按 :8080 端口命中，不按 Host 匹配）。发布者 CLI 配置公网通道（`login` 只写 server_lan，public 需补一条）：
+frpc 以 systemd 常驻后，公网面即 `http://<FRP-SERVER>:28080`；同时把该地址写入 `state/host.env` 的 `PUBLIC_HOST=` 再 `setup --apply`（渲染 site B——PUBLIC_HOST 非空是开关，地址仅作元数据展示；frp 流量按 :8081 端口命中，不按 Host 匹配）。发布者 CLI 配置公网通道（`login` 只写 server_lan，public 需补一条）：
 
 ```sh
 showroom login <USER> --server-lan http://showroom-lan.your-host
@@ -234,7 +234,7 @@ http://showroom-lan.your-host {
 
 # ————— site B：公网面（frp 等公网隧道流量命中的站点）—————
 # 公网发布走加密 import 通道，不放 /v2。
-http://:8080, :8081 {
+http://:8081（respond 404 兜底） {
 	import showroom-app
 }
 ```
@@ -315,6 +315,6 @@ journald drop-in（`/etc/systemd/journald.conf.d/showroom.conf`）：`SystemMaxU
 | 展项容器起不来、`DB_HOST` 解析失败 | 中间件容器没接 `showroom-net`；网络名是常量不可改 |
 | `snapshot` 报错 | `/srv/showroom` 不是 btrfs 子卷，或父卷无空间创建 `@showroom-snaps` |
 | CLI 公网通道 `E_AUTH` 但内网正常 | 公网面 Caddy 站点未反代 `/_api/*`，或中间代理改写了路径/方法（签名覆盖 path_with_query） |
-| **公网页面空白 / 一律 404（frp 隧道）** | site B 是 `:8080` **纯端口匹配**：frp 流量 Host 是公网 IP，若 Caddyfile 仍按 Host 匹配会全部漏掉。确认 site B 为 `http://:8080`（重跑 `setup --apply`）、隧道本地目标 = 8080、`PUBLIC_HOST` 非空 |
+| **公网页面空白 / 一律 404（frp 隧道）** | site B 是 `:8081` **纯端口匹配**：frp 流量 Host 是公网 IP，若 Caddyfile 仍按 Host 匹配会全部漏掉。确认 site B 为 `http://:8081`（重跑 `setup --apply`）、隧道本地目标 = 8081、`PUBLIC_HOST` 非空 |
 | setup 黄条「redis 实例 databases=16 < policy」 | 手工部署遗留实例：`showroomctl middleware set redis databases=256 --confirm` 收编（§5 扩容流） |
 | frpc 下载报「非 ELF」 | ChmlFrp 下载源回了 HTML 壳：手工放置 linux/amd64 frpc 到 `/usr/local/frpc/frpc` 后重跑 `setup --apply` |

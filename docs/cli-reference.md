@@ -37,7 +37,7 @@ showroom login [<账号>] [--server-lan URL] [--ephemeral]
 - `<账号>` 缺省用 config 里的 user；`--server-lan` 缺省用 config 的 server_lan（回落 server_public）；
 - `--ephemeral`：临时会话，**不落任何盘**（进程退出即弃，服务端 keep-N GC 收尾）——一次性/共享机器用；
 - 本机已有有效钥匙时自动跳过（提示「已是登录态」）；钥匙被服务端删除/GC 后重新 login 即视为找回/换设备，自动落新钥匙重绑；
-- 密码错误与「账号未设密码」返回同一文案（防枚举；未设密码请联系管理员补发）。
+- 密码错误与「账号未设密码」返回同一文案（防枚举；未设密码请联系管理员重置）。
 
 ```text
 登录成功：账号 alice，kid 1a2b3c4d [ADMIN]
@@ -207,7 +207,7 @@ showroom skill [install]     # install 为缺省动作，当前唯一动作（�
 | 命令 | 说明 |
 |---|---|
 | `showroomctl user-add <USER> (--password '<初始密码>'\|--gen-password) [--admin]` | 发账号：设初始登录密码（必填其一）+ 生成 registry 凭据（bcrypt）。`--gen-password` 自动生成初始密码一次性返回；`--admin` 授管理员（账号级，即刻落 `users/<u>/admin` 生效——对整账号全部钥匙生效；旧 `admin.pending` 仅作存量迁移输入）。统一账号密码认证（B7）：预登记公钥路径已删除 |
-| `showroomctl user-passwd <USER> [--password '<新密码>'\|--gen-password]` | 重置/补发登录密码（替换 `pass.opaque`，**不动既有钥匙**）；一次性返回新密码 |
+| `showroomctl user-passwd <USER> [--password '<新密码>'\|--gen-password]` | 重置登录密码（替换 `pass.opaque`，**不动既有钥匙**）；一次性返回新密码 |
 | `showroomctl user-key-rm <USER> <KID>` | 删除某把公钥（admin 是账号级属性，删钥匙**不影响**该账号的管理员身份） |
 | `showroomctl user-admin <USER> --admin true\|false` | 授/收管理员权限（账号级） |
 | `showroomctl user-revoke <USER>` | 吊销账号（签名与 registry 登录全失效，项目不动；users 目录整删） |

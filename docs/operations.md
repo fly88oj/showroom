@@ -7,7 +7,7 @@
 | 场景 | 主机 CLI | 等价远程 API / 控制台 |
 |---|---|---|
 | 发新账号（初始密码 + registry 密码两把分开发放，均仅显示一次） | `showroomctl user-add <USER> --gen-password [--admin]` | `POST /_api/admin/user-add`；控制台「管理 → 发放新账号」 |
-| 补发/重置登录密码（一次性返回，原密码即刻失效，**不动既有钥匙**） | `showroomctl user-passwd <USER> --gen-password` | `POST /_api/admin/passwd-set`；控制台账号表「补发密码」 |
+| 补发/重置登录密码（一次性返回，原密码即刻失效，**不动既有钥匙**） | `showroomctl user-passwd <USER> --gen-password` | `POST /_api/admin/passwd-set`；控制台账号表「重置密码」（点击先确认，确认后生成并一次性展示） |
 | 删除泄露的某把钥匙 | `showroomctl user-key-rm <USER> <KID>` | `POST /_api/admin/key-rm`；控制台账号表快捷动作 |
 | 收/授管理员权限（账号级属性，对整账号全部钥匙生效） | `showroomctl user-admin <USER> --admin false\|true` | `POST /_api/admin/user-admin`；控制台账号行「设为/取消管理员」 |
 | 吊销整账号（签名 + registry 全失效，项目不动） | `showroomctl user-revoke <USER>` | `POST /_api/admin/user-revoke` |
@@ -25,9 +25,9 @@
 | 服务 | 作用 | 备注 |
 |---|---|---|
 | `showroom-api.service` | 控制面 HTTP（127.0.0.1:8090） | root 运行，`Restart=always`（3s）；本机健康检查用 `systemctl is-active`，**不要**依赖 HTTP health（未签名恒 404） |
-| `caddy` | 静态面 + 反代（site A :80 内网面；site B :8080 公网面） | 项目路由变更由 showroomctl 自动 `caddy reload` |
+| `caddy` | 静态面 + 反代（site A :80 内网面；site B :8081 公网面） | 项目路由变更由 showroomctl 自动 `caddy reload` |
 | `docker` / `containerd` | 容器运行时 | 项目容器 `--restart unless-stopped` |
-| `chmlfrp.service`（可选） | frpc 隧道（FRP=chmlfrp 时 setup 启用） | 转发公网流量到 127.0.0.1:8080（site B） |
+| `chmlfrp.service`（可选） | frpc 隧道（FRP=chmlfrp 时 setup 启用） | 转发公网流量到 127.0.0.1:8081（site B） |
 
 ### systemd timers（部署单元见 `deploy/*.timer`，setup 自动启用）
 
@@ -162,7 +162,7 @@ sudo vi /srv/showroom/state/policy.env
 | 症状 | 诊断命令 | 动作 |
 |---|---|---|
 | 项目 502 / 打不开 | `curl -s http://127.0.0.1:8100/`（conf 里登记的端口）；`docker ps -a \| grep sr-<PROJECT>` | 容器挂了等 autoheal（≤5min）或手动 `showroomctl start <PROJECT>`；端口连不通看 `showroomctl logs <PROJECT>` |
-| **公网页面空白/404（frp 隧道）** | `curl -s -H 'Host: x' http://127.0.0.1:8080/_console/` | site B 是 `:8080` **纯端口匹配**——frp 流量 Host 是公网 IP，按 Host 匹配会全部漏掉（实弹教训）。确认：① Caddyfile site B 为 `http://:8080`（`showroomctl setup --apply` 重渲染）；② 隧道本地目标指向 127.0.0.1:8080；③ `PUBLIC_HOST` 非空（否则不渲染 site B） |
+| **公网页面空白/404（frp 隧道）** | `curl -s -H 'Host: x' http://127.0.0.1:8081/_console/` | site B 是 `:8081` **纯端口匹配**——frp 流量 Host 是公网 IP，按 Host 匹配会全部漏掉（实弹教训）。确认：① Caddyfile site B 为 `http://:8081`（`showroomctl setup --apply` 重渲染）；② 隧道本地目标指向 127.0.0.1:8081；③ `PUBLIC_HOST` 非空（否则不渲染 site B） |
 | **登录失败（CLI/控制台）** | `journalctl -u showroom-api \| grep -i 'login\|rate'` | 密码错与未设密码同文案（防枚举）。若提示「服务端拒绝（E_AUTH：限流或请求被拒）」：login-begin 双令牌桶超限（按账号 10 次/10 分 + 全局 120 次/10 分），等 10 分钟；服务重启会丢在途登录态与限流计数，重试即可 |
 | 项目漂移（容器/路由被误删） | `systemctl start showroom-reconcile.service` | reconcile 幂等重建；确认 timer 在跑 |
 | publish 报 `E_QUOTA`（内存） | `grep MemAvailable /proc/meminfo` | 对比 `RESERVE_MEM_MB`；扩内存或调低需求 `--mem` |
@@ -186,7 +186,7 @@ sudo vi /srv/showroom/state/policy.env
 # 1. 删除泄露的那把钥匙（kid 从清单查：showroomctl admin users）
 sudo showroomctl user-key-rm <USER> <KID>
 
-# 2. 疑似盗号：补发登录密码（原密码即刻失效，已绑定钥匙不受影响）
+# 2. 疑似盗号：重置登录密码（原密码即刻失效；被重置者若在控制台改密，其本机钥匙会被吊销需重新登录）
 sudo showroomctl user-passwd <USER> --gen-password
 
 # 3. 整账号失能（签名 + registry 登录全失效，项目不动）

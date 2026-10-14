@@ -6,20 +6,13 @@ export const CLI_TABLE: { web: string; cli: string; adminOnly?: boolean }[] = [
   { web: "修改密码（登录态自助）", cli: "控制台菜单「修改密码…」入口（CLI 暂无）" },
   { web: "生成/重置本机签名密钥（调试用）", cli: "showroom keygen" },
   { web: "发放新账号（初始密码 / 管理员）", cli: "showroomctl user-add <账号> --gen-password [--admin]", adminOnly: true },
-  { web: "补发 / 重置密码（管理员）", cli: "showroomctl user-passwd <账号> --gen-password", adminOnly: true },
+  { web: "重置密码（管理员，账号表行内）", cli: "showroomctl user-passwd <账号> --gen-password", adminOnly: true },
   { web: "项目列表", cli: "showroom ps" },
   { web: "发布（上传镜像 / 镜像库）/ 上传入库", cli: "showroom publish / push" },
   { web: "启动 / 停止 / 回滚 / 删除", cli: "showroom start / stop / rollback / rm" },
   { web: "日志 / 环境变量", cli: "showroom logs / showroom env" },
   { web: "SQL 执行 / 表清单 / 预览", cli: "showroom db sql / tables / preview" },
   { web: "备份下载 / 恢复上传 / 重置", cli: "showroom db dump / restore / reset" },
-];
-
-export const HELP_ENV_TABLE: { key: string; desc: string }[] = [
-  { key: "SHOWROOM_BASE_PATH", desc: "子路径前缀（恒为 /<project>/），页面内链接据此适配" },
-  { key: "SR_DB_URL", desc: "项目专属 PostgreSQL 连接串" },
-  { key: "SR_REDIS_URL", desc: "项目专属 Redis 逻辑库" },
-  { key: "SR_DB_USER / SR_DB_PASS", desc: "数据库凭据（自动注入）" },
 ];
 
 export const TOOLS_TABLE: { file: string; desc: string }[] = [
@@ -29,11 +22,12 @@ export const TOOLS_TABLE: { file: string; desc: string }[] = [
 ];
 
 export const ERROR_TABLE: { code: string; desc: string }[] = [
+  { code: "E_CONFIRM", desc: "危险 SQL（DROP/TRUNCATE/DELETE/ALTER）需二次确认：控制台弹出确认框后自动续发；CLI 加 --confirm 重发。" },
   { code: "E_AUTH", desc: "登录凭据校验未通过（常见于本设备登录状态过期或被收回、更换设备）。重新用账号密码登录即可自动修复（CLI 同：showroom login 重登）；仍失败可用 showroom doctor 排查时钟偏差。" },
   { code: "E_NAME", desc: "命名不符合规则 ^[a-zA-Z0-9][a-zA-Z0-9-]{0,30}$ 或使用了保留名（v2/_api/_bootstrap/_console）。" },
   { code: "E_QUOTA", desc: "超出限额：内存配额 / 导入体积 / 磁盘空间（扣除预留）不足；请调低内存配置、精简镜像，磁盘不足时可在「镜像库」删除旧镜像后重试。" },
   { code: "E_NOTFOUND", desc: "项目或上传/下载会话不存在。" },
-  { code: "E_STATE", desc: "当前状态不允许该操作（如危险 SQL 未确认、容器状态冲突）。" },
+  { code: "E_STATE", desc: "当前状态不允许该操作（如容器状态冲突、恢复/重置缺确认标记）。" },
   { code: "E_NET", desc: "网络或服务不可用，稍后重试。" },
   { code: "502", desc: "项目服务异常（容器未就绪或已崩溃），请联系管理员。" },
 ];

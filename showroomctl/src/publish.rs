@@ -1,5 +1,5 @@
 //! publish / import 内核（SPEC §7 全流程 + §11 v1.4 无槽位模型）：serve 与 CLI 子命令共用的唯一入口。
-//! publish：校验→归属→配额→registry 存在→端口/redisdb→DB 供给→env→容器（-new 滚动）→路由→conf/last2。
+//! publish：校验→归属→配额→registry 存在→端口/redisdb→DB 供给→env→容器（-new 滚动）→路由→conf(version/version_seq)/versions.json(last2 老项目兜底)。
 
 use std::fs;
 use std::io::{self, Read, Write};

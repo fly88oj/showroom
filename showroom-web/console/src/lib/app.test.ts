@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { externalUrl, publicBase, isPrivateHost, pageList, fmtTime } from "@/lib/app";
+import { externalUrl, publicBase, pageList, fmtTime } from "@/lib/app";
 
 describe("对外 URL 三档策略（plan-17 §6）", () => {
   it("① sr.publicBase 优先（去尾斜杠）", () => {
