@@ -103,6 +103,9 @@ enum Cmd {
         /// 附加服务（plan-19，可重复）：name=image[:tag],port[,mem[,cpu]]——镜像须已在平台镜像库
         #[arg(long = "svc", value_name = "SPEC")]
         services: Vec<String>,
+        /// 自定义环境变量（plan-20，可重复）：KEY=VALUE——注入容器；同键后值胜出、可覆写平台默认
+        #[arg(long = "env", value_name = "KEY=VALUE")]
+        envs: Vec<String>,
         /// 等待 status=running（2s 轮询，90s 超时）后打印完整 URL
         #[arg(long)]
         wait: bool,
@@ -345,11 +348,12 @@ showroom db reset <项目> --confirm                    # 清库重建（破坏�
             let project = pick_project(project);
             deploy(&cfg, cli.server, &project, &tag, mem.as_deref(), *cpu, *container_port)
         }
-        Cmd::Publish { project_tag, mem, cpu, container_port, services, wait } => {
+        Cmd::Publish { project_tag, mem, cpu, container_port, services, envs, wait } => {
             let (project, tag) = split_project_tag(project_tag);
             let project = pick_project(project);
             let svcs = parse_svc_specs(services)?;
-            publish(&cfg, cli.server, &project, &tag, mem.as_deref(), *cpu, *container_port, &svcs, *wait)?;
+            let envs = parse_env_specs(envs)?;
+            publish(&cfg, cli.server, &project, &tag, mem.as_deref(), *cpu, *container_port, &svcs, &envs, *wait)?;
             Ok(())
         }
         Cmd::Ps { json } => ps(&cfg, cli.server, *json),
@@ -630,6 +634,7 @@ fn publish(
     cpu: Option<f64>,
     container_port: Option<u16>,
     services: &[serde_json::Value],
+    envs: &[(String, String)],
     wait: bool,
 ) -> Result<String, String> {
     check_project(project)?;
@@ -638,6 +643,11 @@ fn publish(
     let mut body = json!({ "project": project, "tag": tag });
     if !services.is_empty() {
         body["services"] = json!(services);
+    }
+    if !envs.is_empty() {
+        let m: serde_json::Map<String, serde_json::Value> =
+            envs.iter().map(|(k, v)| (k.clone(), json!(v))).collect();
+        body["env"] = json!(m);
     }
     if let Some(x) = mem {
         body["mem"] = json!(x);
@@ -715,7 +725,7 @@ fn deploy(
     if let Err(e) = push(cfg, force, project, tag, Via::Auto) {
         return Err(deploy_err(1, "push", &e));
     }
-    match publish(cfg, force, project, tag, mem, cpu, container_port, &[], true) {
+    match publish(cfg, force, project, tag, mem, cpu, container_port, &[], &[], true) {
         Ok(url) => {
             println!("{}", banner(&url));
             Ok(())
@@ -752,6 +762,21 @@ fn ps(cfg: &Config, force: Option<Which>, json_out: bool) -> Result<(), String> 
         );
     }
     Ok(())
+}
+
+/// --env KEY=VALUE 解析（plan-20）；键 POSIX 形状本地预检（服务端终审）。
+fn parse_env_specs(specs: &[String]) -> Result<Vec<(String, String)>, String> {
+    let mut out = Vec::new();
+    for sp in specs {
+        let (k, v) = sp
+            .split_once('=')
+            .ok_or_else(|| format!("--env 须 KEY=VALUE，got '{sp}'"))?;
+        if k.is_empty() || !k.bytes().next().is_some_and(|c| c.is_ascii_alphabetic() || c == b'_') {
+            return Err(format!("--env 键非法: '{k}'（^[A-Za-z_][A-Za-z0-9_]*$）"));
+        }
+        out.push((k.to_string(), v.to_string()));
+    }
+    Ok(out)
 }
 
 /// --svc SPEC 解析（plan-19）：name=image[:tag],port[,mem[,cpu]]

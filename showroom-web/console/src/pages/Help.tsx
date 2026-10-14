@@ -178,6 +178,8 @@ export function Help() {
           </div>
           <h3 className="text-sm font-semibold mt-2">多容器项目（附加服务）</h3>
           <p className="text-xs text-muted-foreground">发布页「部署参数 → 附加服务」或 CLI <code className="font-mono">showroom publish … --svc api=my/api:3000,3000</code> 添加；附加服务仅内网（不出公网端口），与主服务同网络可按容器名互访；日志 <code className="font-mono">showroom logs &lt;项目&gt; --svc api</code>。</p>
+          <h3 className="text-sm font-semibold mt-2">自定义环境变量</h3>
+          <p className="text-xs text-muted-foreground">发布页「部署参数 → 自定义环境变量」或 CLI <code className="font-mono">showroom publish … --env WORKER_ADDRESS=http://sr-other:8080</code>——任意 KEY=VALUE 注入容器，同键覆写平台默认值（如程序用自有键名或需指向外部服务时）；配置随版本走，回滚恢复该版本发布时的配置。</p>
           <h3 className="text-sm font-semibold mt-2">镜像内配置文件替换</h3>
           <p className="text-xs text-muted-foreground">推荐入口脚本 <code className="font-mono">envsubst &lt; config.tpl &gt; config</code>——模板占位符（<code className="font-mono">${'$'}{'{'}DB_PASSWORD{'}'}</code> 等）在容器启动时由注入的真实值替换。</p>
         </TabsContent>

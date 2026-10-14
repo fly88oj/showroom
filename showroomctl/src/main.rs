@@ -319,7 +319,7 @@ fn dispatch(cli: &Cli) -> R<()> {
                 user,
                 project,
                 tag,
-                publish::PublishOpts { services: None, mem: mem.clone(), cpu: *cpu, cport: *container_port },
+                publish::PublishOpts { services: None, env: None, mem: mem.clone(), cpu: *cpu, cport: *container_port },
             )?;
             out(
                 j,

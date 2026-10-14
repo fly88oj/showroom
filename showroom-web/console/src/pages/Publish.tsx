@@ -36,6 +36,8 @@ export function Publish({
   const [project, setProject] = useState("");
   // 附加服务行（plan-19）：name/image/cport/mem/cpu
   const [svcs, setSvcs] = useState<{ name: string; image: string; cport: string; mem: string; cpu: string }[]>([]);
+  // 自定义环境变量行（plan-20）：KEY/VALUE——注入容器；同键可覆写平台默认
+  const [uenvs, setUenvs] = useState<{ k: string; v: string }[]>([]);
   const [projErr, setProjErr] = useState("");
   const [projOpen, setProjOpen] = useState(false);
   const [src, setSrc] = useState<"tar" | "registry">("tar");
@@ -88,6 +90,12 @@ export function Publish({
     setStep(2, "run");
     setText("③ 发布中…");
     const body: Record<string, unknown> = { project: project2, tag, container_port: parseInt(cport, 10) || 8080 };
+    const validUenvs = uenvs.filter((u) => u.k.trim());
+    if (validUenvs.length) {
+      const m: Record<string, string> = {};
+      for (const u of validUenvs) m[u.k.trim()] = u.v; // 同键后值胜出
+      body.env = m;
+    }
     const validSvcs = svcs.filter((v) => v.name.trim() && v.image.trim() && parseInt(v.cport, 10) > 0);
     if (validSvcs.length) {
       body.services = validSvcs.map((v) => ({
@@ -373,6 +381,20 @@ export function Publish({
                     <span className="text-xs text-muted-foreground">
                       镜像须已在「镜像库」；互相以 SHOWROOM_SVC_&lt;名称&gt;_HOST/_PORT 发现（详见项目行「环境变量」）
                     </span>
+                  )}
+                </div>
+                {uenvs.map((u, i) => (
+                  <div key={`e${i}`} className="grid gap-2 sm:grid-cols-[1fr_3fr_auto]">
+                    <Input placeholder="变量名（如 WORKER_ADDRESS）" value={u.k} onChange={(e) => setUenvs((a) => a.map((x, j) => (j === i ? { ...x, k: e.target.value } : x)))} />
+                    <Input placeholder="值（跨项目连接用 http://sr-&lt;对方项目&gt;:&lt;端口&gt;）" value={u.v} onChange={(e) => setUenvs((a) => a.map((x, j) => (j === i ? { ...x, v: e.target.value } : x)))} />
+                    <Button type="button" variant="ghost" size="sm" onClick={() => setUenvs((a) => a.filter((_, j) => j !== i))}>移除</Button>
+                  </div>
+                ))}
+                <div className="flex items-center gap-2">
+                  <span className="text-sm font-medium">自定义环境变量</span>
+                  <Button type="button" variant="outline" size="sm" onClick={() => setUenvs((a) => [...a, { k: "", v: "" }])}>+ 添加变量</Button>
+                  {uenvs.length > 0 && (
+                    <span className="text-xs text-muted-foreground">注入容器；同键覆写平台默认值；配置随版本走（回滚恢复）</span>
                   )}
                 </div>
                 {svcs.map((v, i) => (

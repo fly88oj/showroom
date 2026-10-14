@@ -151,7 +151,7 @@ impl From<SvcReq> for Svc {
 
 /// 附加服务（plan-19 §B.1）：镜像为平台镜像库引用（无 `/` 前缀自动补 `<user>/`）。
 /// conf 序列化=`svc=<name>|<image>|<cport>|<mem>|<cpu>` 重复行（与 conf kv 风格一致）。
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct Svc {
     pub name: String,
     pub image: String,
@@ -179,6 +179,9 @@ pub struct Conf {
     /// 附加服务（plan-19 B：多容器项目）。默认空=现状单容器（旧 conf 零迁移）。
     /// 主服务=既有容器（sr-<project>，公网端口）；附加=sr-<project>-<name>（仅内网）。
     pub services: Vec<Svc>,
+    /// 自定义环境变量（plan-20：发布者任意 KEY=VALUE；追加在平台默认块之后 =
+    /// Docker --env-file 后者覆盖前者语义，可覆写任意默认值）。conf 行 `uenv=K|V`。
+    pub uenv: Vec<(String, String)>,
     /// 版本计数器（单调递增，绝不复用）：每次发布 +1；回滚不改它（回滚后再发布 = v{seq+1}）。
     /// 存量 conf 无此键 → 0。
     pub version_seq: u32,
@@ -199,6 +202,9 @@ impl Conf {
         }
         for v in &self.services {
             s.push_str(&format!("svc={}|{}|{}|{}|{}\n", v.name, v.image, v.cport, v.mem, v.cpu));
+        }
+        for (k, v) in &self.uenv {
+            s.push_str(&format!("uenv={k}|{v}\n"));
         }
         s
     }
@@ -224,6 +230,7 @@ impl Conf {
             version: map.get("version").cloned().unwrap_or_default(),
             version_seq: map.get("version_seq").and_then(|v| v.parse().ok()).unwrap_or(0),
             services: parse_svc_lines(text)?,
+            uenv: parse_uenv_lines(text),
         })
     }
 
@@ -276,6 +283,25 @@ fn parse_svc_lines(text: &str) -> R<Vec<Svc>> {
     Ok(out)
 }
 
+/// conf 的 uenv= 重复行解析（plan-20）；坏行（无 `|`）跳过（值可含任何字符除换行）。
+fn parse_uenv_lines(text: &str) -> Vec<(String, String)> {
+    text.lines()
+        .filter(|l| l.starts_with("uenv="))
+        .filter_map(|l| {
+            let v = &l[5..];
+            v.split_once('|').map(|(k, val)| (k.to_string(), val.to_string()))
+        })
+        .collect()
+}
+
+/// 环境变量键合法性（plan-20）：^[A-Za-z_][A-Za-z0-9_]*$（POSIX env 名）。
+pub fn check_env_key(k: &str) -> bool {
+    !k.is_empty()
+        && k.len() <= 128
+        && k.bytes().next().is_some_and(|c| c.is_ascii_alphabetic() || c == b'_')
+        && k.bytes().all(|c| c.is_ascii_alphanumeric() || c == b'_')
+}
+
 pub fn read_last2(root: &Path, p: &str) -> Option<String> {
     fs::read_to_string(last2_path(root, p))
         .ok()
@@ -293,6 +319,26 @@ pub struct VersionRec {
     pub version: String,
     pub image: String,
     pub time: u64,
+    /// 该版本发布时的完整配置快照（plan-20：回滚恢复对应版本配置）。旧记录无此字段
+    /// → serde default 空值 = 回滚按「当前 conf 配置」兜底（与旧行为一致）。
+    #[serde(default)]
+    pub services: Vec<Svc>,
+    #[serde(default)]
+    pub uenv: Vec<(String, String)>,
+    #[serde(default)]
+    pub mem: Option<String>,
+    #[serde(default)]
+    pub cpu: Option<f64>,
+    #[serde(default)]
+    pub cport: Option<u16>,
+}
+
+impl VersionRec {
+    /// 是否带配置快照（plan-20 起的新记录；旧记录全空 = false）。
+    pub fn has_snapshot(&self) -> bool {
+        self.mem.is_some() || self.cpu.is_some() || self.cport.is_some()
+            || !self.services.is_empty() || !self.uenv.is_empty()
+    }
 }
 
 pub fn versions_path(root: &Path, p: &str) -> PathBuf {
@@ -434,6 +480,7 @@ pub fn env_file_contents(
     redis_db: u8,
     mw: &BTreeSet<String>,
     services: &[(&str, &str, u16)],
+    uenv: &[(String, String)],
 ) -> String {
     let redis = if mw.contains("redis") {
         format!(
@@ -455,9 +502,15 @@ pub fn env_file_contents(
          {redis}\
          SHOWROOM_PROJECT={p}\n\
          SHOWROOM_BASE_PATH={bp}\n\
-         {disc}",
+         {disc}\
+         {custom}",
         bp = base_path(p),
         disc = svc_discovery_lines(services),
+        // 自定义块在最后：Docker --env-file 同键后者覆盖前者 → 可覆写任意平台默认值
+        custom = uenv
+            .iter()
+            .map(|(k, v)| format!("{k}={v}\n"))
+            .collect::<String>(),
     )
 }
 
@@ -1435,6 +1488,7 @@ mod tests {
     fn base_conf(updated: u64) -> Conf {
         Conf {
             services: Vec::new(),
+            uenv: Vec::new(),
             user: "alice".into(),
             tag: "v1".into(),
             port: 8100,
@@ -1533,10 +1587,12 @@ mod tests {
         assert!(read_versions(&root, "demo").is_empty(), "无历史文件 → 空");
         append_version(&root, "demo", VersionRec {
             version: "v1".into(), image: "127.0.0.1:5000/alice/demo:u1a2b3c4".into(), time: 100,
-        }).unwrap();
+            services: Vec::new(), uenv: Vec::new(), mem: None, cpu: None, cport: None,
+}).unwrap();
         append_version(&root, "demo", VersionRec {
             version: "v2".into(), image: "127.0.0.1:5000/alice/demo:u5d6e7f8".into(), time: 200,
-        }).unwrap();
+            services: Vec::new(), uenv: Vec::new(), mem: None, cpu: None, cport: None,
+}).unwrap();
         let all = read_versions(&root, "demo");
         assert_eq!(all.len(), 2, "append-only：两条按序保留");
         assert_eq!(all[0].version, "v1");
@@ -1556,7 +1612,7 @@ mod tests {
     #[test]
     fn env_file_roundtrip() {
         let full_mw: BTreeSet<String> = ["postgres", "redis", "registry"].iter().map(|s| s.to_string()).collect();
-        let txt = env_file_contents("demo", &db_ident("demo"), "s3cret", 3, &full_mw, &[]);
+        let txt = env_file_contents("demo", &db_ident("demo"), "s3cret", 3, &full_mw, &[], &[]);
         let m = parse_kv(&txt);
         assert_eq!(m["DB_HOST"], "sr-postgres");
         assert_eq!(m["DB_PORT"], "5432");
@@ -1572,11 +1628,11 @@ mod tests {
         assert_eq!(m["SHOWROOM_BASE_PATH"], "/demo/");
         assert!(!m.contains_key("SHOWROOM_SLOT"), "§11 移除 SHOWROOM_SLOT");
         // 大写/连字符项目：库名归一化，BASE_PATH 原样
-        let up = parse_kv(&env_file_contents("Demo-9", &db_ident("Demo-9"), "pw", 0, &full_mw, &[]));
+        let up = parse_kv(&env_file_contents("Demo-9", &db_ident("Demo-9"), "pw", 0, &full_mw, &[], &[]));
         assert_eq!(up["DB_NAME"], "sr_Demo_9");
         assert_eq!(up["SHOWROOM_BASE_PATH"], "/Demo-9/");
         // legacy 库名沿用时 env 同样指向旧名（§9→§11 过渡期）
-        let lg = parse_kv(&env_file_contents("skill-demo", "sr_skill-demo_stable", "pw", 1, &full_mw, &[]));
+        let lg = parse_kv(&env_file_contents("skill-demo", "sr_skill-demo_stable", "pw", 1, &full_mw, &[], &[]));
         assert_eq!(lg["DB_NAME"], "sr_skill-demo_stable");
         for k in [
             "DB_HOST", "DB_PORT", "DB_NAME", "DB_USER", "DB_PASSWORD", "DATABASE_URL",
@@ -1588,7 +1644,7 @@ mod tests {
 
         // §15.2：redis 禁用 → REDIS_* 组不再注入（DB_* 照常，publish 照常）
         let no_redis: BTreeSet<String> = ["postgres", "registry"].iter().map(|s| s.to_string()).collect();
-        let nr = env_file_contents("demo", &db_ident("demo"), "s3cret", 3, &no_redis, &[]);
+        let nr = env_file_contents("demo", &db_ident("demo"), "s3cret", 3, &no_redis, &[], &[]);
         assert!(!nr.contains("REDIS_"), "{nr}");
         let nrm = parse_kv(&nr);
         assert_eq!(nrm["DB_NAME"], "sr_demo");

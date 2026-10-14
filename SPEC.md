@@ -117,6 +117,14 @@ SHOWROOM_PROJECT=<project>   SHOWROOM_BASE_PATH=/<project>/
 SHOWROOM_SVC_<NAME>_HOST=<容器名>   SHOWROOM_SVC_<NAME>_PORT=<端口>   # plan-19：全体服务含 main
 ```
 
+**自定义环境变量（plan-20）**：发布时可带任意 `KEY=VALUE`（CLI `--env` 可重复 /
+API `env:{K:V}` / 控制台发布页重复行），追加在平台默认块**之后**——Docker
+--env-file 同键后者覆盖前者语义 → 可覆写任意默认值（如指向外部 DB 时覆写
+DATABASE_URL）。键 POSIX 形状 `^[A-Za-z_][A-Za-z0-9_]*$`；同键后值胜出；禁换行。
+**配置随版本走（plan-20 用户裁决）**：每次发布把当时的完整配置
+（services/uenv/mem/cpu/cport）快照进 versions.json 对应记录；回滚按**目标版本的
+快照**恢复（旧记录无快照 → 按当前 conf 兜底，与旧行为一致）。
+
 **多容器项目（plan-19 §B）**：主服务=既有容器 `sr-<project>`（公网端口+Caddy 路由）；
 附加服务 `--svc name=image:tag,port[,mem[,cpu]]`（CLI 可重复 / 控制台发布页重复行 /
 API `services[]`）→ 容器 `sr-<project>-<name>`（仅内网），同 `showroom-net` 按容器名

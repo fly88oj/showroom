@@ -43,6 +43,7 @@ pub fn start(root: &Path, p: &str) -> R<()> {
     } else {
         publish::redeploy(root, &c.user, p, &c.tag, PublishOpts {
             services: Some(c.services.clone()),
+            env: Some(c.uenv.clone()),
             mem: Some(c.mem.clone()),
             cpu: Some(c.cpu),
             cport: Some(c.cport),
@@ -121,6 +122,7 @@ pub fn rollback(root: &Path, p: &str) -> R<PublishOut> {
         .ok_or_else(|| ApiError::new("E_NOTFOUND", format!("no last2 for '{p}'")))?;
     publish::redeploy(root, &c.user, p, &prev, PublishOpts {
         services: Some(c.services.clone()),
+            env: Some(c.uenv.clone()),
         mem: Some(c.mem.clone()),
         cpu: Some(c.cpu),
         cport: Some(c.cport),
@@ -135,11 +137,31 @@ pub fn rollback_to(root: &Path, p: &str, version: &str) -> R<PublishOut> {
         .ok_or_else(|| ApiError::new("E_NOTFOUND", format!("no version '{version}' for '{p}'")))?;
     let tag = state::tag_of_image(&rec.image)
         .ok_or_else(|| ApiError::new("E_STATE", format!("version '{version}' 记录的镜像引用无 tag：{}", rec.image)))?;
+    // 配置随版本走（plan-20 用户裁决）：目标版本记录有配置快照 → 按快照恢复；
+    // 旧记录（升级前）无快照 → 按当前 conf（与旧行为一致，如实语义）
+    let (svc_set, env_set, mem, cpu, cport) = if rec.has_snapshot() {
+        (
+            Some(rec.services.clone()),
+            Some(rec.uenv.clone()),
+            rec.mem.clone().or(Some(c.mem.clone())),
+            rec.cpu.or(Some(c.cpu)),
+            rec.cport.or(Some(c.cport)),
+        )
+    } else {
+        (
+            Some(c.services.clone()),
+            Some(c.uenv.clone()),
+            Some(c.mem.clone()),
+            Some(c.cpu),
+            Some(c.cport),
+        )
+    };
     publish::redeploy(root, &c.user, p, &tag, PublishOpts {
-        services: Some(c.services.clone()),
-        mem: Some(c.mem.clone()),
-        cpu: Some(c.cpu),
-        cport: Some(c.cport),
+        services: svc_set,
+        env: env_set,
+        mem,
+        cpu,
+        cport,
     }, Some(version.to_string()))
 }
 
@@ -301,6 +323,7 @@ pub fn reconcile(root: &Path) -> Vec<String> {
         match statuses.get(&name).map(|s| s.as_str()).map(str::to_string) {
             None => match publish::redeploy(root, &c.user, &p, &c.tag, PublishOpts {
                 services: Some(c.services.clone()),
+            env: Some(c.uenv.clone()),
                 mem: Some(c.mem.clone()),
                 cpu: Some(c.cpu),
                 cport: Some(c.cport),
@@ -346,6 +369,7 @@ pub fn autoheal(root: &Path) -> Vec<String> {
         match statuses.get(&name).map(|s| s.as_str()).map(str::to_string) {
             None => match publish::redeploy(root, &c.user, &p, &c.tag, PublishOpts {
                 services: Some(c.services.clone()),
+            env: Some(c.uenv.clone()),
                 mem: Some(c.mem.clone()),
                 cpu: Some(c.cpu),
                 cport: Some(c.cport),
@@ -984,6 +1008,11 @@ mod tests {
             version: v.into(),
             image: format!("127.0.0.1:5000/alice/demo:u{v}"),
             time: 1,
+            services: Vec::new(),
+            uenv: Vec::new(),
+            mem: None,
+            cpu: None,
+            cport: None,
         };
         let all: Vec<_> = ["v1", "v2", "v3"].iter().map(|v| rec(v)).collect();
         // 当前 v3 → 上一版本 v2；当前 v2（已回滚态）→ 最近一个非当前 = v3
@@ -998,7 +1027,7 @@ mod tests {
         let root = troot("rollback-ver");
         fs::create_dir_all(state::projects_dir(&root)).unwrap();
         let c = state::Conf {
-            services: Vec::new(),
+            services: Vec::new(), uenv: Vec::new(),
             user: "alice".into(), tag: "u3".into(), port: 8100, cport: 8080,
             mem: "256m".into(), cpu: 1.0, redisdb: 1, updated: 1, stopped: false,
             legacyslot: None, version: "v3".into(), version_seq: 3,
@@ -1282,7 +1311,7 @@ mod tests {
         // 两个项目归 alice、一个归 bob（user_list 只读 conf，不碰 docker）
         for (p, user) in [("demo1", "alice"), ("demo2", "alice"), ("demo3", "bob")] {
             let mut c = crate::state::Conf {
-            services: Vec::new(),
+            services: Vec::new(), uenv: Vec::new(),
                 user: user.into(), tag: "v1".into(), port: 8100, cport: 8080,
                 mem: "256m".into(), cpu: 1.0, redisdb: 0, updated: 1,
                 stopped: false, legacyslot: None,

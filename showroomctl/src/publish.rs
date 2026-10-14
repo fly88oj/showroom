@@ -18,6 +18,8 @@ use crate::state::{self, ApiError, R};
 pub struct PublishOpts {
     /// 附加服务（plan-19 §B；None=沿用旧 conf，Some=按此对齐）。
     pub services: Option<Vec<state::Svc>>,
+    /// 自定义环境变量（plan-20；None=沿用旧 conf，Some=按此设置——可覆写平台默认键）。
+    pub env: Option<Vec<(String, String)>>,
     pub mem: Option<String>,
     pub cpu: Option<f64>,
     pub cport: Option<u16>,
@@ -239,6 +241,24 @@ fn publish_mode(
             ));
         }
     }
+    // 自定义环境变量归一化（plan-20）：键 POSIX 合法、去重（后值胜出——显式语义）。
+    let mut uenv = opts.env.clone().unwrap_or_else(|| {
+        old.as_ref().map(|c| c.uenv.clone()).unwrap_or_default()
+    });
+    {
+        use std::collections::BTreeMap;
+        let mut m: BTreeMap<String, String> = BTreeMap::new();
+        for (k, v) in &uenv {
+            if !state::check_env_key(k) {
+                return Err(ApiError::new("E_NAME", format!("环境变量键非法: '{k}'（^[A-Za-z_][A-Za-z0-9_]*$）")));
+            }
+            if v.contains('\n') {
+                return Err(ApiError::new("E_NAME", format!("环境变量值不得含换行: '{k}'")));
+            }
+            m.insert(k.clone(), v.clone());
+        }
+        uenv = m.into_iter().collect();
+    }
     let mem = state::effective_mem(&policy, opts.mem.as_deref().or(old.as_ref().map(|c| c.mem.as_str())))?;
     // 内存准入（SPEC §10.2）：MemAvailable − RESERVE_MEM_MB ≥ 本次需求才放行，否则 E_QUOTA。
     // 只查**本次请求**的 need（当前可用减预留是否满足本次需求），不累加存量项目——
@@ -314,7 +334,7 @@ fn publish_mode(
     }
     fs::write(
         state::env_path(root, project),
-        state::env_file_contents(project, &db, &db_pass, redisdb, &mw, &disc),
+        state::env_file_contents(project, &db, &db_pass, redisdb, &mw, &disc, &uenv),
     )?;
 
     // 容器：同项目唯一 host 端口 → 先停旧、以 -new 起新、健康后删旧改名
@@ -363,7 +383,17 @@ fn publish_mode(
             state::append_version(
                 root,
                 project,
-                state::VersionRec { version: v.clone(), image: image.clone(), time: state::unix_now() },
+                state::VersionRec {
+                    version: v.clone(),
+                    image: image.clone(),
+                    time: state::unix_now(),
+                    // 配置随版本走（plan-20 用户裁决）：回滚恢复该版本发布时的完整配置
+                    services: services.clone(),
+                    uenv: uenv.clone(),
+                    mem: Some(mem.clone()),
+                    cpu: Some(cpu),
+                    cport: Some(cport),
+                },
             )?;
             (v, seq)
         }
@@ -374,6 +404,7 @@ fn publish_mode(
     };
     let conf = state::Conf {
         services,
+        uenv,
         user: user.to_string(),
         tag: tag.to_string(),
         port,

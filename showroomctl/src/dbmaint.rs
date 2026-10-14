@@ -567,7 +567,8 @@ pub fn reset(root: &Path, p: &str, confirm: bool) -> R<()> {
     for (v, c) in conf.services.iter().zip(svc_c.iter()) {
         disc.push((v.name.as_str(), c.as_str(), v.cport));
     }
-    fs::write(state::env_path(root, p), state::env_file_contents(p, &new_db, &db_pass, redisdb, &mw, &disc))?;
+    let uenv = conf.uenv.clone();
+    fs::write(state::env_path(root, p), state::env_file_contents(p, &new_db, &db_pass, redisdb, &mw, &disc, &uenv))?;
     Ok(())
 }
 

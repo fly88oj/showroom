@@ -930,7 +930,7 @@ mod tests {
 
     fn put_conf(root: &Path, p: &str) {
         let c = state::Conf {
-            services: Vec::new(),
+            services: Vec::new(), uenv: Vec::new(),
             user: "alice".into(),
             tag: "v1".into(),
             port: 8100,
