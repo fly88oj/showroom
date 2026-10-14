@@ -42,7 +42,7 @@
 | `showroom-common` | rlib + **wasm32 cdylib** | SPEC §1/§2/§16 的契约实现：SR-SIG1 签名/验签、加密信封 seal/open、OPAQUE 登录双端包装（Suite/argon2id rwd）、命名校验、一次性 RSA 密钥对。原生侧被 ctl/cli 复用；wasm 垫片（C ABI，不用 wasm-bindgen）给浏览器控制台——**CLI 与 Web 走同一 crate 同一 Suite，无互操作缝隙**。密码学依赖（ed25519-dalek / rsa / aes-gcm / opaque-ke / argon2）锁定在本 crate 并重导出，避免下游类型分裂 |
 | `showroom` | 发布者 CLI（`showroom`） | 登录/登出（`login`/`logout`，密码一次密钥常驻）、配置管理（`~/.showroom/`）、push 双通道、publish/deploy、查询与生命周期命令、db 维护子命令、镜像与磁盘（images/space/rm-image）、doctor 体检。除 `push` 需要 docker CLI 外零运行时依赖 |
 | `showroomctl` | 主机工具（`showroomctl`） | HTTP 控制面（`serve`，仅监听 127.0.0.1:8090）+ 全部运维子命令：user 管理（含密码发放）、发布内核、生命周期、reconcile/autoheal/gc、快照、导入、主机自举（`setup`/`middleware`/`upgrade`）。状态存 `/srv/showroom`，全部外部世界调用集中在 `dockerops`（docker CLI / psql / caddy / 裸 TCP registry 客户端） |
-| `showroom-web` | 静态资源（`dist/`） | 控制台单页：`index.html` + `showroom_bg.wasm`（由 showroom-common cdylib 构建产物改名）。一步登录（账号+密码，OPAQUE）+ 五标签信息架构（**我的项目**/发布/镜像库/数据/帮助，帮助页二级菜单五面板：账号/CLI 使用/镜像规范/工具下载/错误码）+ 管理页五面板（账号/全部项目/平台状态/宿主配置/实时事件；仅管理员账号可见，admin 按账号级判定）。「管理→状态」面板与「钥匙登录」折叠区等旧结构已随五标签改版删除。产物入库（部署通道依赖静态文件），与垫片源码同一提交内重建 |
+| `showroom-web` | 静态资源（`dist/`） | React 单页工程（Vite+TS+shadcn/ui，产物 `console/dist/` 入库：index.html + assets/* 哈希分包 + wasm 于 public/ 复制；与垫片源码同一提交内重建）。一步登录（账号+密码，OPAQUE）+ 五标签信息架构（**我的项目**/发布/镜像库/数据/帮助，帮助页二级菜单五面板：账号/CLI 使用/镜像规范/工具下载/错误码）+ 管理页五面板（账号/全部项目/平台状态/宿主配置/实时事件；仅管理员账号可见，admin 按账号级判定） |
 
 内部深模块（showroomctl）：`state`（状态读写+纯函数：命名/policy/conf/端口/redisdb 分配/caddy 片段）、`dockerops`（外部世界）、`publish`（publish/import 内核，serve 与 CLI 子命令共用）、`ops`（生命周期、user/key 管理、key-bind 继承与 GC）、`serve`（axum 统一 fallback 分发、`/_api/auth/*` 免签族与限流）、`dbmaint`（db-sql/dump 三段式）、`streams`（ndjson 实时流）、`setup`（声明式期望状态引擎与 Action 体系）、`middleware`（host.env 契约与编排/扩容状态机）、`unpack`（信封解包）。
 
@@ -70,17 +70,18 @@ C→S GET /_api/reg-cred [SR-SIG1] → registry 凭据（login 免手工 config�
 - `/_api/auth/*` 是唯一应答未签名请求的端点族；畸形/限流/族内未知路径一律 404 `{"error":"E_AUTH"}`；login-begin 双令牌桶（账号 10 次/10 分 + 全局 120 次/10 分）；
 - 改密码（控制台）：先输入**当前密码本地校验**（复用 login-begin+本地 finish，不调 login-finish、不产生登录态），通过后才走 `pw-begin`/`pw-commit` 两段（SR-SIG1 常规签名，旧密码不上线——签名即会话证明）；自助下线 `/_api/key-selfrm` 仅能删当前签名所用 kid。
 
-### 2.1 发布双通道（push）与三入口（SPEC §13.1）
+### 2.1 发布双通道（push）与发布入口（SPEC §13.1/§17.4）
 
-CLI 自动探测内网可达性：优先 lan，探不通回落 public。控制台无 lan 概念，恒走公网加密通道。**发布入口三存（一键不取代分步）**：
+CLI 自动探测内网可达性：优先 lan，探不通回落 public。控制台无 lan 概念，恒走公网加密通道。发布入口：
 
 ```text
-入口 1「一键部署」：tar → 压缩 → 分片上传 → 立即 publish → 展示 URL
+发布页（单表单双镜像源）：版本服务端自增只读预览；部署参数选已有项目回填+变更高亮
+  tar 源：tar → 压缩 → 分片上传 → 立即 publish → 展示 URL
         CLI：showroom deploy（push auto + publish --wait + URL 横幅，任一步失败即停）
-        控制台：状态条（压缩中/上传 x%/发布中/完成），断点续传
-入口 2「仅上传」：只入 registry 不部署（发布者择时部署）
-入口 3「部署」：独立表单——镜像 ComboBox（datalist，GET /_api/images 按签名用户过滤；
-        admin 全量）选中已有镜像 → 填内存需求/端口 → publish（旧版本单独部署从此入口）
+        控制台：四步状态条（压缩/上传/发布/完成），失败断点续传重试
+  镜像库源：选已有镜像（GET /_api/images 按签名用户过滤；admin 全量）直接 publish
+镜像库页「上传入库」：只入 registry 不部署（与项目无关——镜像名取自 tar）
+        CLI：showroom push（分步通道，发布者择时 publish）
 ```
 
 ```text
@@ -202,11 +203,11 @@ diff = 期望 − 实际 → Action 列表（有序、可命名，幂等判定�
 | D2 | **不用 WebSocket，统一 ndjson 流（SSE 风格，fetch 流式消费）** | 控制台上行全是短请求，无需双向通道；少一条长连接状态机与升级路径（SPEC §10.4 方向性决策） | 事件流靠 30s 心跳防代理空闲断连 |
 | D3 | **移除槽位（slot）模型**（v1.4） | 简化概念——Demo 定向展示不需要 stable/next/pr42 并存；多版本并存 = 发布者自建多个相近名称项目；项目名默认随机 8 位提升字典遍历门槛（SPEC §11） | 同项目多环境需多个项目名承载；存量多槽位数据由 reconcile 幂等迁移（最新 updated 者上提） |
 | D4 | **加密信封 = RSA-OAEP 包裹 + AES-GCM 分段流式**，而非整包 RSA/TLS 风格握手 | 镜像 tar 可达数 GB，必须流式（内存恒定 ~4MiB）；一次性对称密钥 + 定长 384B 头，无握手状态 | 一次成包才能解（生成整体单次、过程流式）；dump 下行因此也要三段式拉取 |
-| D5 | **db-dump 旧单发 base64 直接移除，不做兼容** | 未发布给外部、无存量消费者；整包进内存有 4× 放大问题（SPEC §10.4） | — |
+| D5 | **db-dump 恒三段式分片（无整包 base64 形式）** | 整包进内存有 4× 放大问题（SPEC §10.4）；形式未发布给外部 | — |
 | D6 | **WASM 垫片不用 wasm-bindgen/wasm-pack** | 零新工具链：`rustup target add wasm32-unknown-unknown` 即可构建；JS 侧直接 instantiate 调 C ABI（指针+长度进出） | ABI 手工维护（容量不足返回负数所需字节的约定） |
 | D7 | **零信息暴露：未认证一律 404 E_AUTH** | 管理面不给枚举素材：路径存在性、项目名、版本全部不可探测（SPEC §3） | 404 同时是"没这路径"与"没权限"，排障要靠服务端 journal；本机健康检查用 `systemctl is-active` 而非 HTTP health |
 | D8 | **管理员标记在账号上（`users/<user>/admin`），R4 反转**——早期版本曾放在钥匙上（`tokens/<u>/<kid>.admin`） | 实证教训：清扫过期钥匙曾连带清走账号的管理员——权限挂临时钥匙上天生不稳；R4 用户裁决「管理员按用户设置，不按密钥」，账号标记为唯一真相（`user_is_admin`/`user_set_admin`），`whoami` 与管理端点一律按账号判定 | 旧钥匙级标记（kid `.admin`/`admin.pending`）仅为存量迁移输入（serve 启动一次性迁移清除）；账号凭据泄露=平台最高权限泄露，按 SECURITY.md 处置 |
-| D9 | **publish 首建不重建数据库**（v1.2 起） | 发布者重新 publish 不应意外清库；显式重置走 `db reset`（DROP+重建+凭据不变） | 迁移 schema 是发布者自己的责任（db sql/restore 工具齐备） |
+| D9 | **publish 首建不重建数据库** | 发布者重新 publish 不应意外清库；显式重置走 `db reset`（DROP+重建+凭据不变） | 迁移 schema 是发布者自己的责任（db sql/restore 工具齐备） |
 | D10 | **nonce 查重服务重启清零** | 窗口仅 ±300s，重启后旧 nonce 早已过期；避免持久化（SPEC §1 明示可接受） | — |
 | D11 | **registry v2 客户端用裸 TCP HTTP/1.0 手写** | 控制面对 localhost 单一 registry，引第三方 async HTTP 栈不划算（ctl 内部约定） | 仅覆盖本机 registry 场景 |
 | D12 | **统一 zstd 压缩（CLI 与控制台上传、dump）** | 压缩在加密之前，先压缩后加密不泄露熵；zstd-19 高压缩；服务端魔数自适应兼容原生 -Fc | — |
