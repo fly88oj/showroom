@@ -3,6 +3,7 @@
 //! §11 v1.4：无槽位模型——project 即展项唯一键，URL 恒 /<project>/；publish 省略项目名时自动随机。
 
 mod api;
+mod srtp_transport;
 mod auth;
 mod config;
 mod db;

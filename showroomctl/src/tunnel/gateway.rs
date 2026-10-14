@@ -14,8 +14,65 @@ use std::net::SocketAddr;
 use std::sync::Arc;
 
 use showroom_common::srtp::{
-    is_srtp, header, FLAG_UPLINK, HDR_LEN, OpenStream, SealStream, SrtpError,
+    is_srtp, header, FLAG_UPLINK, HDR_LEN, SrtpError, TReader, TWriter,
 };
+
+/// 上行记录分帧（SRTP v1）：解封明文 = 重复的 `[8B 大端长度][载荷]`。中继不支持
+/// 客户端半关闭（用户侧 EOF 即拆整流，真机实弹），网关不能靠 EOF 判请求完结——
+/// 故由帧界驱动转发：读满一帧即转发，无需等流尾。单帧上限 1GiB 防御坏帧。
+const MAX_FRAME: u64 = 1 << 30;
+
+/// 分帧转发状态机：喂入解封明文 → 返回本次应写给上游的字节（帧头已剥，调用方写完即弃）。
+/// `finish` 在客户端 EOF 时校验无残帧。
+#[derive(Default)]
+struct FrameFwd {
+    buf: Vec<u8>,
+    /// None=等帧头；Some(n)=当前帧剩余载荷字节
+    pending: Option<u64>,
+}
+
+impl FrameFwd {
+    fn feed(&mut self, data: &[u8]) -> Result<Vec<u8>, SrtpError> {
+        self.buf.extend_from_slice(data);
+        let mut out = Vec::new();
+        loop {
+            match self.pending {
+                None => {
+                    if self.buf.len() < 8 {
+                        break;
+                    }
+                    let n = u64::from_be_bytes(self.buf[..8].try_into().expect("8B"));
+                    if n > MAX_FRAME {
+                        return Err(SrtpError::Truncated);
+                    }
+                    self.pending = Some(n);
+                    self.buf.drain(..8);
+                }
+                Some(0) => {
+                    self.pending = None; // 帧完结 → 立即进入下一帧头态（多帧流水线）
+                }
+                Some(n) => {
+                    let take = (n as usize).min(self.buf.len());
+                    out.extend_from_slice(&self.buf[..take]);
+                    self.buf.drain(..take);
+                    self.pending = Some(n - take as u64);
+                    if take == 0 {
+                        break;
+                    }
+                }
+            }
+        }
+        Ok(out)
+    }
+
+    fn finish(&self) -> Result<(), SrtpError> {
+        if self.buf.is_empty() && self.pending.is_none() {
+            Ok(())
+        } else {
+            Err(SrtpError::Truncated)
+        }
+    }
+}
 use showroom_common::PlatformKeys;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
@@ -70,27 +127,24 @@ async fn handle(mut conn: TcpStream, upstream: SocketAddr, keys: Option<Arc<Plat
     }
 }
 
-/// 密封通道：阶段① 读至 wrap 解出 k（期间解出的明文即时转上游）；阶段② 全双工泵。
-async fn sealed(mut conn: TcpStream, mut up: TcpStream, keys: &PlatformKeys) -> Result<(), SrtpError> {
-    let mut open = OpenStream::begin_wrap(&keys.priv_pkcs8_pem())?;
-    let mut plain = Vec::with_capacity(PUMP_BUF);
+/// 密封通道：字节级取 384B wrap 解出 k（不与 §2 流式状态机混交接，杜绝混包窗口），
+/// 其后全部字节进传输记录层 TReader → 帧转发（FrameFwd）→ 上游；下行 TWriter 对称
+/// 封装。中继无半关闭语义（真机实弹）：请求完结只由帧界驱动，连接关闭即整体收束。
+async fn sealed(mut conn: TcpStream, up: TcpStream, keys: &PlatformKeys) -> Result<(), SrtpError> {
+    use showroom_common::{srtp::unwrap_key, WRAP_LEN};
+    let mut raw: Vec<u8> = Vec::with_capacity(PUMP_BUF);
+    let mut chunk = [0u8; PUMP_BUF];
     let k = loop {
-        let mut chunk = [0u8; PUMP_BUF];
-        // 阶段① 的读失败/EOF 都按截断处理（wrap 未解出即断流）
         let n = tokio::time::timeout(HEADER_TIMEOUT, conn.read(&mut chunk))
             .await
-            .map_err(|_| SrtpError::Truncated)? // wrap 到齐前停滞：同 20s 上限，不养滞留任务
+            .map_err(|_| SrtpError::Truncated)?
             .map_err(|_| SrtpError::Truncated)?;
         if n == 0 {
-            return Err(SrtpError::Truncated);
+            return Err(SrtpError::Truncated); // wrap 未到齐即断流
         }
-        open.push(&chunk[..n], &mut plain)?;
-        if !plain.is_empty() {
-            up.write_all(&plain).await.map_err(|_| SrtpError::Truncated)?;
-            plain.clear();
-        }
-        if let Some(k) = open.session_key() {
-            break k;
+        raw.extend_from_slice(&chunk[..n]);
+        if raw.len() >= WRAP_LEN {
+            break unwrap_key(&keys.priv_pkcs8_pem(), &raw[..WRAP_LEN])?;
         }
     };
     eprintln!("showroomctl: tunnel: SRTP 会话建立（wrap 已解，下行对称封装开始）");
@@ -102,37 +156,39 @@ async fn sealed(mut conn: TcpStream, mut up: TcpStream, keys: &PlatformKeys) -> 
     cw.write_all(&header(true)).await.map_err(|_| SrtpError::Truncated)?;
 
     let up_task = async move {
+        let mut reader = TReader::new(k);
+        let mut fwd = FrameFwd::default();
+        let mut plain = Vec::with_capacity(PUMP_BUF);
         let mut chunk = [0u8; PUMP_BUF];
+        // wrap 之后的残余字节（同包到达的记录）先喂入
+        reader.push(&raw[WRAP_LEN..], &mut plain)?;
         loop {
+            let out = fwd.feed(&plain)?;
+            if !out.is_empty() {
+                uw.write_all(&out).await.map_err(|_| SrtpError::Truncated)?;
+            }
+            plain.clear();
             match cr.read(&mut chunk).await {
                 Ok(0) => break,
-                Ok(n) => {
-                    open.push(&chunk[..n], &mut plain)?;
-                    if !plain.is_empty() {
-                        uw.write_all(&plain).await.map_err(|_| SrtpError::Truncated)?;
-                        plain.clear();
-                    }
-                }
+                Ok(n) => reader.push(&chunk[..n], &mut plain)?,
                 Err(_) => return Err(SrtpError::Truncated),
             }
         }
-        open.finish(&mut plain)?; // 上行 EOF：flush 尾段 + 半关闭上游写侧
-        if !plain.is_empty() {
-            uw.write_all(&plain).await.map_err(|_| SrtpError::Truncated)?;
-        }
+        reader.finish()?;
+        fwd.finish()?;
         let _ = uw.shutdown().await;
         Ok(())
     };
 
     let down_task = async move {
-        let mut seal = SealStream::new(k, Box::new(rand::rngs::OsRng));
+        let mut writer = TWriter::new(k, Box::new(rand::rngs::OsRng));
         let mut wire = Vec::with_capacity(PUMP_BUF);
         let mut chunk = [0u8; PUMP_BUF];
         loop {
             match ur.read(&mut chunk).await {
                 Ok(0) => break,
                 Ok(n) => {
-                    seal.push(&chunk[..n], &mut wire)?;
+                    writer.record(&chunk[..n], &mut wire)?;
                     if !wire.is_empty() {
                         cw.write_all(&wire).await.map_err(|_| SrtpError::Truncated)?;
                         wire.clear();
@@ -141,18 +197,12 @@ async fn sealed(mut conn: TcpStream, mut up: TcpStream, keys: &PlatformKeys) -> 
                 Err(_) => return Err(SrtpError::Truncated),
             }
         }
-        seal.finish(&mut wire)?; // 下行 EOF：flush 尾段 + 半关闭客户端写侧
-        if !wire.is_empty() {
-            cw.write_all(&wire).await.map_err(|_| SrtpError::Truncated)?;
-        }
         let _ = cw.shutdown().await;
         Ok(())
     };
 
-    // 收束语义（评审二轮修正）：正常链 = 客户端 EOF → 上行 flush+半关 → 上游 EOF →
-    // 下行 flush+半关，两分支自然先后结束（等齐）；任一分支**错误**则立即返回——
-    // 对侧 future 被 drop，其 socket 随之关闭，两端读到 EOF/FIN 级联拆除，无滞留任务
-    // （join! 会把错误侧的对侧无限挂住：上游不关就永不返回，实锤）。
+    // 收束语义：任一分支完成/错误即整体结束（对侧 drop → socket 关闭级联拆除；
+    // join! 会把先完成侧的对侧挂到对端关闭为止，滞留任务——评审二轮实锤）
     tokio::pin!(up_task);
     tokio::pin!(down_task);
     let up_first = tokio::select! {
@@ -162,4 +212,41 @@ async fn sealed(mut conn: TcpStream, mut up: TcpStream, keys: &PlatformKeys) -> 
     };
     up_first?;
     down_task.await
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn frame_fwd_multiframe_and_partial_feed() {
+        let mut f = FrameFwd::default();
+        let frame = |p: &[u8]| {
+            let mut v = (p.len() as u64).to_be_bytes().to_vec();
+            v.extend_from_slice(p);
+            v
+        };
+        let wire = [frame(b"hello"), frame(b"world!")].concat();
+        let mut got = Vec::new();
+        for c in wire.chunks(3) {
+            got.extend_from_slice(&f.feed(c).unwrap());
+        }
+        assert_eq!(got, b"helloworld!");
+        f.finish().unwrap();
+    }
+
+    #[test]
+    fn frame_fwd_trailing_partial_rejected() {
+        let mut f = FrameFwd::default();
+        let mut v = (5u64).to_be_bytes().to_vec();
+        v.extend_from_slice(b"abc");
+        assert_eq!(f.feed(&v).unwrap(), b"abc");
+        assert_eq!(f.finish().unwrap_err(), SrtpError::Truncated);
+    }
+
+    #[test]
+    fn frame_fwd_oversize_frame_rejected() {
+        let mut f = FrameFwd::default();
+        assert_eq!(f.feed(&(MAX_FRAME + 1).to_be_bytes()).unwrap_err(), SrtpError::Truncated);
+    }
 }

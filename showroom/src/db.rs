@@ -191,8 +191,7 @@ fn dump(
         let mut offset = 0u64;
         while offset < total {
             let want = api::DUMP_CHUNK_LEN.min(total - offset);
-            let resp = api.signed_get_raw(&api::dump_chunk_query(&dump_id, offset, want))?;
-            let bytes = resp.bytes().map_err(|e| format!("下载切片失败: {e}"))?;
+            let bytes = api.signed_get_raw(&api::dump_chunk_query(&dump_id, offset, want))?;
             if bytes.len() as u64 != want {
                 return Err(format!("切片长度不符：请求 {want} 字节，收到 {}", bytes.len()));
             }

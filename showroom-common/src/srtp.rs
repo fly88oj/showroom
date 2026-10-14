@@ -77,6 +77,15 @@ impl fmt::Display for SrtpError {
 }
 impl std::error::Error for SrtpError {}
 
+/// wrap 头解封（网关用：384B RSA-OAEP → 会话密钥 k）。
+pub fn unwrap_key(priv_pem: &str, wrap: &[u8]) -> Result<[u8; KEY_LEN], SrtpError> {
+    let k = RsaPrivateKey::from_pkcs8_pem(priv_pem)
+        .map_err(|_| SrtpError::BadKey)?
+        .decrypt(Oaep::new::<Sha256>(), wrap)
+        .map_err(|_| SrtpError::BadKey)?;
+    k.as_slice().try_into().map_err(|_| SrtpError::BadKey)
+}
+
 /// 下行封装流（已知会话密钥 k；段=4MiB 缓冲，nonce 每段随机）。
 pub struct SealStream {
     cipher: Aes256Gcm,
@@ -235,6 +244,82 @@ impl OpenStream {
     }
 }
 
+
+// —— 传输记录层（TLS 式自定界记录；与上面 §2 流式状态机并存的传输专用形态）——
+// §2 信封的定长段（4MiB 全段 + EOF 尾段）适合整包上传，不适合流式小请求：尾段只在
+// 流结束时才可解密，而中继又不支持半关闭（真机实弹）——记录必须逐条即时可解。
+// 记录 = [12B nonce][4B 大端密文长][密文||16B tag]，密文长=明文长+16。
+
+/// 传输记录写入端（已知会话密钥；每条记录独立随机 nonce，无跨记录状态）。
+pub struct TWriter {
+    cipher: Aes256Gcm,
+    rng: Box<dyn SessionRng + Send>,
+}
+
+impl TWriter {
+    pub fn new(k: [u8; KEY_LEN], rng: Box<dyn SessionRng + Send>) -> Self {
+        TWriter { cipher: Aes256Gcm::new(GenericArray::from_slice(&k)), rng }
+    }
+
+    /// 把一段明文封成一条完整记录追加到 out（立即产出，无缓冲）。
+    pub fn record(&mut self, plain: &[u8], out: &mut Vec<u8>) -> Result<(), SrtpError> {
+        let mut nonce = [0u8; NONCE_LEN];
+        self.rng.fill_bytes(&mut nonce);
+        let ct = self
+            .cipher
+            .encrypt(GenericArray::from_slice(&nonce), plain)
+            .map_err(|_| SrtpError::AuthFailed)?;
+        out.extend_from_slice(&nonce);
+        out.extend_from_slice(&(ct.len() as u32).to_be_bytes());
+        out.extend_from_slice(&ct);
+        Ok(())
+    }
+}
+
+/// 传输记录读取端（任意分片喂入；完整记录即时解出）。
+pub struct TReader {
+    cipher: Aes256Gcm,
+    buf: Vec<u8>,
+}
+
+impl TReader {
+    pub fn new(k: [u8; KEY_LEN]) -> Self {
+        TReader { cipher: Aes256Gcm::new(GenericArray::from_slice(&k)), buf: Vec::new() }
+    }
+
+    /// 喂入网络字节；每解出一条记录即把明文追加到 out。
+    pub fn push(&mut self, data: &[u8], out: &mut Vec<u8>) -> Result<(), SrtpError> {
+        self.buf.extend_from_slice(data);
+        loop {
+            if self.buf.len() < NONCE_LEN + 4 {
+                return Ok(());
+            }
+            let ct_len =
+                u32::from_be_bytes(self.buf[NONCE_LEN..NONCE_LEN + 4].try_into().expect("4B")) as usize;
+            if ct_len < TAG_LEN {
+                return Err(SrtpError::Truncated); // 坏长度：密文至少含 tag
+            }
+            let total = NONCE_LEN + 4 + ct_len;
+            if self.buf.len() < total {
+                return Ok(()); // 记录未到齐
+            }
+            let mut nonce = [0u8; NONCE_LEN];
+            nonce.copy_from_slice(&self.buf[..NONCE_LEN]);
+            let pt = self
+                .cipher
+                .decrypt(GenericArray::from_slice(&nonce), &self.buf[NONCE_LEN + 4..total])
+                .map_err(|_| SrtpError::AuthFailed)?;
+            out.extend_from_slice(&pt);
+            self.buf.drain(..total);
+        }
+    }
+
+    /// 流结束校验：无残字节。
+    pub fn finish(&self) -> Result<(), SrtpError> {
+        if self.buf.is_empty() { Ok(()) } else { Err(SrtpError::Truncated) }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -313,6 +398,29 @@ mod tests {
         // 连 nonce+tag 都不齐。这里截到 27B（< 12+16）验证后者。
         r3.push(&wire3[..NONCE_LEN + TAG_LEN - 1], &mut o3).unwrap();
         assert_eq!(r3.finish(&mut o3), Err(SrtpError::Truncated));
+    }
+
+    #[test]
+    fn transport_records_streaming_roundtrip() {
+        let k = [0x1fu8; KEY_LEN];
+        let mut w = TWriter::new(k, seeded());
+        let mut wire = Vec::new();
+        for chunk in [b"GET /".as_slice(), b"_api/he", b"alth HTTP/1.1\r\n\r\n"] {
+            w.record(chunk, &mut wire).unwrap(); // 每小块独立成记录
+        }
+        let mut r = TReader::new(k);
+        let mut out = Vec::new();
+        for c in wire.chunks(7) {
+            r.push(c, &mut out).unwrap();
+        }
+        r.finish().unwrap();
+        assert_eq!(out, b"GET /_api/health HTTP/1.1\r\n\r\n");
+        // 损坏检测
+        let mut bad = wire.clone();
+        let mid = bad.len() / 2;
+        bad[mid] ^= 0xff;
+        let mut r2 = TReader::new(k);
+        assert!(r2.push(&bad, &mut Vec::new()).is_err());
     }
 
     #[test]

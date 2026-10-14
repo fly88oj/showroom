@@ -9,7 +9,7 @@ use rsa::pkcs8::DecodePublicKey;
 use rsa::Oaep;
 use sha2::Sha256;
 
-use showroom_common::srtp::{header, OpenStream, SealStream, SessionRng, HDR_LEN};
+use showroom_common::srtp::{header, SessionRng, HDR_LEN};
 use showroom_common::{PlatformKeys, KEY_LEN};
 
 use super::{resolve, Source, GATEWAY_PORT};
@@ -96,12 +96,16 @@ async fn srtp_sealed_full_duplex_roundtrip() {
         .encrypt(&mut rng, Oaep::new::<Sha256>(), &k)
         .unwrap();
 
+    // SRTP v1 上行 = wrap + 传输记录层；记录内层 = [8B 大端长度][载荷] 应用帧
     let payload: Vec<u8> = (0..200_000u32).map(|i| (i % 241) as u8).collect();
+    let mut framed = (payload.len() as u64).to_be_bytes().to_vec();
+    framed.extend_from_slice(&payload);
     let mut wire: Vec<u8> = header(false).to_vec();
     wire.extend_from_slice(&wrapped);
-    let mut seal = SealStream::new(k, Box::new(rng) as Box<dyn SessionRng + Send>);
-    seal.push(&payload, &mut wire).unwrap();
-    seal.finish(&mut wire).unwrap();
+    let mut tw = showroom_common::srtp::TWriter::new(k, Box::new(rng) as Box<dyn SessionRng + Send>);
+    for piece in framed.chunks(64 * 1024) {
+        tw.record(piece, &mut wire).unwrap(); // 多条记录（分块），验证流式解密
+    }
 
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
     let mut c = tokio::net::TcpStream::connect(("127.0.0.1", gw)).await.unwrap();
@@ -117,10 +121,10 @@ async fn srtp_sealed_full_duplex_roundtrip() {
         .expect("读下行出错");
     assert!(resp.len() > HDR_LEN, "下行须含头+段: {}", resp.len());
     assert_eq!(&resp[..HDR_LEN], &header(true)[..]);
-    let mut open = OpenStream::begin_key(k);
+    let mut rd = showroom_common::srtp::TReader::new(k);
     let mut plain = Vec::new();
-    open.push(&resp[HDR_LEN..], &mut plain).unwrap();
-    open.finish(&mut plain).unwrap();
+    rd.push(&resp[HDR_LEN..], &mut plain).unwrap();
+    rd.finish().unwrap();
     assert_eq!(plain, payload, "下行解封须还原上行载荷（echo）");
 }
 

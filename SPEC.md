@@ -23,19 +23,29 @@ body= wrap || aes256gcm(k, zstd(docker_save_tar))
 完整性：SR-SIG1 签名已覆盖 sha256(body)（EtM）。
 密钥文件：用户 `~/.showroom/id_ed25519`（PEM/PKCS8 或裸 32B seed+pub，实现自定但 CLI 与服务端经 common 互认）；平台对 `/srv/showroom/state/platform_rsa{.pub}`——公钥经 whoami `platform_pem` 自动下发（§12.2）/控制台工具下载页，控制台见 §17。
 
-### 2.1 传输信封 SRTP v1（隧道内全流密封；server 端网关已实装，客户端采用为后续项）
+### 2.1 传输信封 SRTP v1（隧道内全流密封；服务端网关 + CLI 客户端已实装）
 
-隧道（frp）是载荷无关的透明字节管道，端点可自行分层。SRTP 复用 §2 信封段格式，加 6B 传输头：
+隧道（frp）是载荷无关的透明字节管道，端点可自行分层。SRTP = 6B 帧头 + TLS 式自定界记录：
 
 ```
-帧头 = "SRTP" 0x01 <flags>        # flags bit0：0=上行（首段前有 384B wrap）/ 1=下行（无 wrap）
-上行 = 帧头(flags=0) || wrap || 段流        # 客户端以平台公钥 seal（即 §2 信封原样加头）
-下行 = 帧头(flags=1) || 段流                # 网关以**上行解出的同一 k** 对称封装（TLS 式会话）
+帧头 = "SRTP" 0x01 <flags>        # flags bit0：0=上行（含 384B wrap）/ 1=下行（无 wrap）
+记录 = [12B nonce][4B 大端密文长][密文||16B tag]     # 每条即时可解（逐记录随机 nonce）
+上行 = 帧头(0) || 384B wrap || 记录流；记录明文 = 应用帧 [8B 大端长度][载荷]
+下行 = 帧头(1) || 记录流（记录明文 = 上游响应原样字节）
 ```
 
-- 拓扑：客户端(wasm/cli) → [标准 frps 中转，只见高熵字节] → serve 内 frp 客户端 → 网关(127.0.0.1:8082) → Caddy site B(:8081)。中转方零配合、零选项。
-- 混合模式（兼容铁律）：网关按连接首批 6B 探测——非 SRTP 头一律**字节级明文直通**。原有 Docker Push（公网加密 import 通道）与匿名公开访问零变化。
-- 实现位：`showroom-common/src/srtp.rs`（流式状态机，格式单源）+ `showroomctl/src/tunnel/gateway.rs`；实测依据与分层顺序（先压后封恒优）见 docs/architecture.md 隧道段。
+- 设计依据（两条真机实弹教训）：①§2 定长段（4MiB 全段+EOF 尾段）不适合流式请求——
+  尾段只在流结束时可解；②frp 中继无半关闭语义（用户侧 EOF 即拆整流）。故记录自定界、
+  请求完结由应用帧界驱动，均不依赖 TCP 流尾。
+- 两级处理（客户端裁决）：CLI 公网通道自动探测——协议层可用即全程密封（中转只见
+  高熵字节：URL/账号/JSON 体全覆盖）；不可用（非 SRTP 应答/RST，如旧服务端）粘性降级
+  为原 reqwest 明文逻辑（本进程内），LAN 通道恒走二级。零配置零感知。
+- 混合模式（兼容铁律）：网关按连接首批 6B 探测——非 SRTP 头一律字节级明文直通。
+  原有 Docker Push（公网加密 import 通道）与匿名公开访问零变化（import 通道在一级下
+  为应用信封外再套传输密封，双重独立）。
+- 实现位：`showroom-common/src/srtp.rs`（TWriter/TReader + unwrap_key，格式单源）、
+  `showroomctl/src/tunnel/gateway.rs`（FrameFwd 帧转发）、`showroom/src/srtp_transport.rs`
+  （CLI 一级 + 粘性降级）。浏览器侧（WS 载波）为后续项。
 
 ## 3. HTTP API（server=showroomctl serve，127.0.0.1:8090，经 Caddy /_api/* 代理）
 **零信息暴露原则：/_api/* 下所有端点（含 health/projects）一律要求 SR-SIG1 签名；未认证或验签失败的任何请求（无论路径是否存在、方法是否支持）统一返回 404 + `{"error":"E_AUTH"}`——不泄露路径存在性、版本、项目名等任何管理侧信息。**

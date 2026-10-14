@@ -130,8 +130,14 @@ fn net_err(msg: String) -> ApiError {
 
 /// 非 2xx 响应 → ApiError（取 {"error","msg"}；非 JSON 退回 E_NET 带状态与片段）。
 fn error_from(resp: reqwest::blocking::Response) -> ApiError {
-    let status = resp.status();
+    let status = resp.status().as_u16();
     let text = resp.text().unwrap_or_default();
+    error_from_status(status, text.as_bytes())
+}
+
+/// 纯错误装配（reqwest 与 SRTP 两管线共用）。
+fn error_from_status(status: u16, body: &[u8]) -> ApiError {
+    let text = String::from_utf8_lossy(body);
     match serde_json::from_str::<Value>(&text) {
         Ok(v) => ApiError {
             code: v["error"].as_str().unwrap_or("E_NET").to_string(),
@@ -170,6 +176,11 @@ pub fn signed_probe<'a>(user: &'a str, key: &'a UserKey) -> impl Fn(&str) -> boo
 
 pub struct Api {
     pub base: String,
+    /// 本通道是否公网：Public 时启用 SRTP 一级传输（SPEC §2.1 两级处理）。
+    which: Which,
+    /// 平台公钥（一级 wrap 用；缺失=二级明文，行为与既往完全一致）。
+    platform_pub: Option<showroom_common::rsa::RsaPublicKey>,
+    tier_noted: std::cell::Cell<bool>,
     user: String,
     key: UserKey,
     http: reqwest::blocking::Client,
@@ -205,7 +216,15 @@ impl Api {
             .timeout(Duration::from_secs(180)) // publish 服务端滚动发布可能较慢
             .build()
             .map_err(|e| format!("HTTP 客户端构造失败：{e}"))?;
-        Ok(Api { base, user: cfg.user.clone(), key, http })
+        // 通道形态按 base 推断：与 server_public 一致即公网（SRTP 候选；connect/push 共用）
+        let norm = |s: &str| s.trim_end_matches('/').to_string();
+        let which = if cfg.server_public.as_deref().is_some_and(|p| norm(p) == norm(&base)) {
+            Which::Public
+        } else {
+            Which::Lan
+        };
+        let platform_pub = load_platform_pub().ok();
+        Ok(Api { base, which, platform_pub, tier_noted: std::cell::Cell::new(false), user: cfg.user.clone(), key, http })
     }
 
     /// 错误渲染收口：E_AUTH 附登记/时间偏差提示与公钥串，其余原样。
@@ -213,8 +232,46 @@ impl Api {
         r.map_err(|e| e.render(&self.key.pub_string()))
     }
 
+    /// SRTP 一级尝试（仅公网通道且平台公钥在位）：None = 不可用/未启用 → 调用方走二级。
+    /// 协议层失败自动回落原有 reqwest 逻辑（粘性降级见 srtp_transport）；一次性打印判定。
+    fn srtp(
+        &self,
+        method: &str,
+        path_q: &str,
+        auth: &str,
+        content_type: Option<&str>,
+        body: &[u8],
+    ) -> Option<crate::srtp_transport::Response> {
+        if self.which != Which::Public {
+            return None;
+        }
+        let pubk = self.platform_pub.as_ref()?;
+        let mut headers = vec![("Authorization", auth)];
+        if let Some(ct) = content_type {
+            headers.push(("Content-Type", ct));
+        }
+        let resp = crate::srtp_transport::request(&self.base, method, path_q, &headers, body, pubk)?;
+        if !self.tier_noted.get() {
+            self.tier_noted.set(true);
+            eprintln!("srtp: 公网通道协议层密封已启用（中转只见密文；不可用时自动回退明文）");
+        }
+        Some(resp)
+    }
+
+    /// 一级响应 → 统一 JSON/错误管线（与二级 check/error_from 同语义）。
+    fn check_srtp(r: crate::srtp_transport::Response) -> Result<Value, ApiError> {
+        if !r.is_success() {
+            return Err(error_from_status(r.status, &r.body));
+        }
+        serde_json::from_slice(&r.body)
+            .map_err(|e| net_err(format!("HTTP {}: 非 JSON 响应: {e}", r.status)))
+    }
+
     pub fn signed_get(&self, path_q: &str) -> Result<Value, String> {
         let auth = sign(&self.user, &self.key, "GET", path_q, b"", now_unix(), &nonce_hex());
+        if let Some(r) = self.srtp("GET", path_q, &auth, None, b"") {
+            return self.finish(Self::check_srtp(r));
+        }
         self.finish(
             self.http
                 .get(format!("{}{}", self.base, path_q))
@@ -232,6 +289,9 @@ impl Api {
     fn post_json_inner(&self, path_q: &str, body: &Value) -> Result<Value, ApiError> {
         let bytes = serde_json::to_vec(body).map_err(|e| net_err(e.to_string()))?;
         let auth = sign(&self.user, &self.key, "POST", path_q, &bytes, now_unix(), &nonce_hex());
+        if let Some(r) = self.srtp("POST", path_q, &auth, Some("application/json"), &bytes) {
+            return Self::check_srtp(r);
+        }
         self.http
             .post(format!("{}{}", self.base, path_q))
             .header("Authorization", auth)
@@ -244,12 +304,15 @@ impl Api {
 
     /// signed GET，2xx 时返回**原始响应**供调用方流式读取（db-dump-chunk 切片下载用）。
     /// 下载走 24h 宽超时客户端（同大传输语义）。
-    pub fn signed_get_raw(&self, path_q: &str) -> Result<reqwest::blocking::Response, String> {
+    pub fn signed_get_raw(&self, path_q: &str) -> Result<Vec<u8>, String> {
         self.finish(self.signed_get_raw_inner(path_q))
     }
 
-    fn signed_get_raw_inner(&self, path_q: &str) -> Result<reqwest::blocking::Response, ApiError> {
+    fn signed_get_raw_inner(&self, path_q: &str) -> Result<Vec<u8>, ApiError> {
         let auth = sign(&self.user, &self.key, "GET", path_q, b"", now_unix(), &nonce_hex());
+        if let Some(r) = self.srtp("GET", path_q, &auth, None, b"") {
+            return if r.is_success() { Ok(r.body) } else { Err(error_from_status(r.status, &r.body)) };
+        }
         let resp = reqwest::blocking::Client::builder()
             .timeout(Duration::from_secs(24 * 3600))
             .build()
@@ -259,7 +322,7 @@ impl Api {
             .send()
             .map_err(|e| net_err(format!("{}{path_q}: {e}", self.base)))?;
         if resp.status().is_success() {
-            Ok(resp)
+            resp.bytes().map(|b| b.to_vec()).map_err(|e| net_err(e.to_string()))
         } else {
             Err(error_from(resp))
         }
@@ -279,6 +342,12 @@ impl Api {
         let auth = sign_prehashed(
             &self.user, &self.key, "POST", path_q, &hash, now_unix(), &nonce_hex(),
         );
+        // 一级（SRTP）：整片进内存（调用方已按 ≤8MB 分片）；失败回落二级流式
+        if let Ok(bytes) = fs::read(file) {
+            if let Some(r) = self.srtp("POST", path_q, &auth, Some("application/octet-stream"), &bytes) {
+                return Self::check_srtp(r);
+            }
+        }
         let f = File::open(file).map_err(|e| net_err(e.to_string()))?;
         let resp = reqwest::blocking::Client::new() // 上传走独立无超时语义：单请求放宽到 24h
             .post(format!("{}{}", self.base, path_q))
