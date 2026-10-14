@@ -796,13 +796,24 @@ fn parse_svc_specs(specs: &[String]) -> Result<Vec<serde_json::Value>, String> {
             .ok_or_else(|| format!("--svc 缺 port：'{sp}'"))?
             .parse()
             .map_err(|_| format!("--svc port 非法：'{sp}'"))?;
-        let mem = it.next().unwrap_or("128m").to_string();
-        let cpu: f64 = it.next().unwrap_or("0.5").parse().unwrap_or(0.5);
-        // 其余段=本服务专属变量 K=V（可多个；CLI 简写形态）
+        // 段自动识别：含 = 的段=专属变量；纯值按位置依次 mem→cpu（其余段=变量，可多个）
+        let mut mem = "128m".to_string();
+        let mut cpu: f64 = 0.5;
+        let mut mem_set = false;
+        let mut cpu_set = false;
         let mut env: Vec<(String, String)> = Vec::new();
-        for pair in it {
-            let (k, v) = pair.split_once('=').ok_or_else(|| format!("--svc 变量须 K=V：'{pair}'"))?;
-            env.push((k.trim().to_string(), v.to_string()));
+        for seg in it {
+            if let Some((k, v)) = seg.split_once('=') {
+                env.push((k.trim().to_string(), v.to_string()));
+            } else if !mem_set {
+                mem = seg.to_string();
+                mem_set = true;
+            } else if !cpu_set {
+                cpu = seg.parse().unwrap_or(0.5);
+                cpu_set = true;
+            } else {
+                return Err(format!("--svc 多余段（非 K=V 也非 mem/cpu）：'{seg}'"));
+            }
         }
         let env_obj: serde_json::Map<String, serde_json::Value> =
             env.into_iter().map(|(k, v)| (k, serde_json::json!(v))).collect();
