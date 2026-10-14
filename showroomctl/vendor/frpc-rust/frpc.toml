@@ -1,0 +1,20 @@
+# 本地开发示例：先启动 examples/frps.toml 对应的官方 frps。
+serverAddr = "127.0.0.1"
+serverPort = 7000
+loginFailExit = false
+auth.token = "local-development-only"
+
+transport.tls.enable = true
+transport.tcpMux = true
+transport.heartbeatInterval = 30
+transport.heartbeatTimeout = 90
+
+webServer.addr = "127.0.0.1"
+webServer.port = 7400
+
+[[proxies]]
+name = "web"
+type = "tcp"
+localIP = "127.0.0.1"
+localPort = 8080
+remotePort = 18080

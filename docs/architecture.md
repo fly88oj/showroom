@@ -7,6 +7,8 @@
 ```text
 ┌─────────────────────────── your-host（Linux + Docker + btrfs）──────────────────────────┐
 │                                                                                          │
+│   showroomctl serve（控制面 + 隧道）─ 隧道模块：frp 客户端(内嵌 frpc-rust) + 网关 :8082    │
+│   │    ▲ 公网隧道流量（SRTP 解封 / 明文直通，混合探测）                                    │
 │   Caddy（静态面 + 反代，setup 渲染）                                                       │
 │   ├─ site A（:80，内网面 LAN_HOST）                                                        │
 │   │   ├─ /_api/*        → showroomctl serve（127.0.0.1:8090）                             │
@@ -17,6 +19,10 @@
 │   │                                       ▼                                               │
 │   │   └─ /_api/* /_console/* /<project>/*（与 site A 同 import showroom-app 片段）        │
 │   └─ /_console/*        → /srv/showroom/_console（WASM 控制台静态资源）                    │
+│                                                                                            │
+│   公网链路：访客 → [标准 frps 中转（chmlfrp 节点/原生 frps，载荷无关字节管道）] → serve 内  │
+│   隧道客户端 → 网关 127.0.0.1:8082（首批 6B 探测）→ Caddy :8081（site B）。配置源：          │
+│   chmlfrp=getcfg 拉面板 ini；native=FRP_TOML 直载（Source 抽象；会话重建时重读）。          │
 │                                                                                          │
 │   showroomctl serve（控制面）── docker CLI/exec ──▶ 展项容器 · sr-postgres · sr-redis     │
 │        │  状态读写                                                                        │
@@ -41,10 +47,10 @@
 |---|---|---|
 | `showroom-common` | rlib + **wasm32 cdylib** | SPEC §1/§2/§16 的契约实现：SR-SIG1 签名/验签、加密信封 seal/open、OPAQUE 登录双端包装（Suite/argon2id rwd）、命名校验、一次性 RSA 密钥对。原生侧被 ctl/cli 复用；wasm 垫片（C ABI，不用 wasm-bindgen）给浏览器控制台——**CLI 与 Web 走同一 crate 同一 Suite，无互操作缝隙**。密码学依赖（ed25519-dalek / rsa / aes-gcm / opaque-ke / argon2）锁定在本 crate 并重导出，避免下游类型分裂 |
 | `showroom` | 发布者 CLI（`showroom`） | 登录/登出（`login`/`logout`，密码一次密钥常驻）、配置管理（`~/.showroom/`）、push 双通道、publish/deploy、查询与生命周期命令、db 维护子命令、镜像与磁盘（images/space/rm-image）、doctor 体检。除 `push` 需要 docker CLI 外零运行时依赖 |
-| `showroomctl` | 主机工具（`showroomctl`） | HTTP 控制面（`serve`，仅监听 127.0.0.1:8090）+ 全部运维子命令：user 管理（含密码发放）、发布内核、生命周期、reconcile/autoheal/gc、快照、导入、主机自举（`setup`/`middleware`/`upgrade`）。状态存 `/srv/showroom`，全部外部世界调用集中在 `dockerops`（docker CLI / psql / caddy / 裸 TCP registry 客户端） |
+| `showroomctl` | 主机工具（`showroomctl`） | HTTP 控制面（`serve`，仅监听 127.0.0.1:8090）+ 隧道（D22：frp 客户端内嵌 vendored frpc-rust，SRTP/明文混合网关 :8082→:8081，凭据经 host.env，无独立 frpc 单元）+ 全部运维子命令：user 管理（含密码发放）、发布内核、生命周期、reconcile/autoheal/gc、快照、导入、主机自举（`setup`/`middleware`/`upgrade`）。状态存 `/srv/showroom`，全部外部世界调用集中在 `dockerops`（docker CLI / psql / caddy / 裸 TCP registry 客户端） |
 | `showroom-web` | 静态资源（`dist/`） | React 单页工程（Vite+TS+shadcn/ui，产物 `console/dist/` 入库：index.html + assets/* 哈希分包 + wasm 于 public/ 复制；与垫片源码同一提交内重建）。一步登录（账号+密码，OPAQUE）+ 五标签信息架构（**我的项目**/发布/镜像库/数据/帮助，帮助页二级菜单五面板：账号/CLI 使用/镜像规范/工具下载/错误码）+ 管理页五面板（账号/全部项目/平台状态/宿主配置/实时事件；仅管理员账号可见，admin 按账号级判定） |
 
-内部深模块（showroomctl）：`state`（状态读写+纯函数：命名/policy/conf/端口/redisdb 分配/caddy 片段）、`dockerops`（外部世界）、`publish`（publish/import 内核，serve 与 CLI 子命令共用）、`ops`（生命周期、user/key 管理、key-bind 继承与 GC）、`serve`（axum 统一 fallback 分发、`/_api/auth/*` 免签族与限流）、`dbmaint`（db-sql/dump 三段式）、`streams`（ndjson 实时流）、`setup`（声明式期望状态引擎与 Action 体系）、`middleware`（host.env 契约与编排/扩容状态机）、`unpack`（信封解包）。
+内部深模块（showroomctl）：`state`（状态读写+纯函数：命名/policy/conf/端口/redisdb 分配/caddy 片段）、`dockerops`（外部世界）、`publish`（publish/import 内核，serve 与 CLI 子命令共用）、`ops`（生命周期、user/key 管理、key-bind 继承与 GC）、`serve`（axum 统一 fallback 分发、`/_api/auth/*` 免签族与限流）、`dbmaint`（db-sql/dump 三段式）、`streams`（ndjson 实时流）、`setup`（声明式期望状态引擎与 Action 体系）、`middleware`（host.env 契约与编排/扩容状态机）、`unpack`（信封解包）、`tunnel`（隧道主管：`Source` 配置源抽象 + `chmlfrp` getcfg/ini 映射 + `gateway` SRTP/明文混合网关 + 状态落盘 state/tunnel.status）。
 
 ## 2. 数据流
 
@@ -220,6 +226,7 @@ diff = 期望 − 实际 → Action 列表（有序、可命名，幂等判定�
 | D19 | **host.env（设施形状）与 policy.env（业务限额）分层不合并** | 两类键的变更主体与风险等级不同：限额=管理员日常调节，设施=setup 幂等收敛；合并会造成双写漂移、setup diff 混入限额噪声（SPEC §15.1 勘误） | 改限额不触发 setup；改形状必须走 setup --apply |
 | D20 | **Redis 逻辑库池 256（`--databases 256`），每项目一库；浏览视图按用户隔离** | 逻辑库仅命名空间无内存代价；每项目一库使客户端 URL 零配合、项目间不串键；用户隔离只作用于浏览视图（请求 db ∈ 本人项目 redisdb 集合，admin 全量）——诚实边界：容器内应用持原始连接仍可 SELECT 任意库，这是界面级/协作级隔离非安全边界 | 强隔离需独实例或 Redis ACL+rewrite，成本过高不做；池耗尽 E_QUOTA 附扩容命令建议 |
 | D21 | **镜像删除内联触发 registry-gc（停-收-启，秒级）** | 删除即释放空间（不等每周 GC），闭环「上传 E_QUOTA→删除→立即可传」；live-restore 保护运行中容器；共享 blob 由 --delete-untagged 天然保留仍被引用者 | 每次删除有一次秒级 registry 重启窗口 |
+| D22 | **隧道并入 serve：内嵌 vendored frpc-rust + SRTP/明文混合网关（:8082→:8081），废除独立 chmlfrp.service 与 frpc 二进制下载** | tcp 型 frp 中转是载荷无关字节管道（D18 实证载荷原样到达）→ 端点自分层即可、中转零配合；单一服务单元简化部署（用户裁决 C2，对标 Caddy 内置 ACME 的自举体验）；扩展位=`Source` 配置源（chmlfrp getcfg / native FRP_TOML / 后续中转商）。互操作实测：frpc-rust tcp 传输 × 官方 frps 0.70.0，7 类代理 × 4 组合全绿（wss 变体失败，与本集无关）；chmlfrp 节点同方言由社区原版 0.70.1 实证，真机联调留验收。压缩分层实测（本仓真实载荷）：先压后封恒优（JS 包 102.7K vs 先封后压 369K）→ SRTP 传输层不压缩，内层 HTTP gzip 天然落正确顺序；384B wrap 每连接一次（会话密钥摊销） | SRTP 客户端侧（wasm/cli 全流密封）为后续项；明文路径零变化（兼容铁律：Docker Push 加密 import 通道 + 匿名公开访问走直通）；serve 重启即隧道瞬断（frpc-rust 自动重连） |
 
 ## 4. 环境变量契约（publish 自动注入）
 

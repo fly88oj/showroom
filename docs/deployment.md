@@ -13,7 +13,7 @@
 | Docker | ≥ 20（含 `docker exec`） | 展项与中间件容器 |
 | 权限 | root | 写 /etc、/usr/local/bin、systemd 单元 |
 | 文件系统 | btrfs | 快照（`snapshot hourly/daily`）依赖子卷 |
-| 端口 | 80 对外（site A 内网面）；8081 为公网隧道目标（site B，frpc → 127.0.0.1:8081）；8100–8199 仅本机 | 展项端口不直接暴露 |
+| 端口 | 80 对外（site A 内网面）；8081 为公网面（site B）；8082 仅本机（serve 内隧道网关 → 8081）；8100–8199 仅本机 | 展项端口不直接暴露 |
 
 **唯一保留的手工步**：btrfs 子卷创建与挂载（setup 的 BtrfsSubvol Action 只覆盖「父目录即 btrfs」的顺手场景，子卷与 fstab 属磁盘布局，不自动化）：
 
@@ -50,8 +50,9 @@ sudo showroomctl setup --apply    # 幂等执行；二次运行期望 `plan: 0 a
 | `PUBLIC_HOST` | 地址/空 | 空 | site B（公网面）地址；空=纯内网主机 |
 | `TUNING` | sysctl/none | sysctl | 内核调优（sysctl.d 全表见附录 B） |
 | `DEDUP` | weekly/none | weekly | 周日 05:00 duperemove timer |
-| `FRP` | none/chmlfrp | none | ChmlFrp 隧道自举（见 §3 frp） |
-| `FRP_TOKEN` / `FRP_TUNNEL` | 字符串 | 空 | ChmlFrp usertoken 与隧道 ID |
+| `FRP` | none/chmlfrp/native | none | 隧道形态（并入 serve 常驻，见 §3 frp） |
+| `FRP_TOKEN` / `FRP_TUNNEL` | 字符串 | 空 | chmlfrp：usertoken 与隧道 ID（多隧道=逗号列表；历史键 FRP_TUNNEL2 解析时自动折叠） |
+| `FRP_TOML` | 文件路径 | 空 | native：指向 0600 的 frpc TOML 文件（自建 frps/其它中转商；路径非凭据可回显，凭据在该文件里） |
 
 setup 做的事：目录/policy.env（缺键补默认、已有键保留）/host.env 落盘、docker 网络 `showroom-net`、所选中间件容器（pg 12 参数/redis `--databases=policy.REDIS_DBS`/registry 全旗标，规格见附录 B）、Caddy 安装+Caddyfile 渲染（registry ∈ 集合才有 `/v2`）、systemd 单元（api+7 timers+dedup）安装启用、sysctl/journald(400M+30d)/watchdog(10s) 调优、`showroom-precompress` 预压缩脚本与首跑执行。现网 redis 实例 `--databases` 低于 policy 时**不重建**（数据安全优先），只报黄条引导走 §3 扩容流。
 
@@ -91,12 +92,12 @@ curl -s -o /dev/null -w '%{http_code}\n' http://127.0.0.1:8090/_api/health   # �
 
 ### frp 隧道接入
 
-**ChmlFrp（自举）**：编辑 `state/host.env` 置 `FRP=chmlfrp`、`FRP_TOKEN=<usertoken>`、`FRP_TUNNEL=<隧道ID>` → `showroomctl setup --apply`。setup 将下载 frpc 到 `/usr/local/frpc/frpc`（下载源 `https://chmlfrp.cn/dw/linux/amd64/frpc`）并以 `chmlfrp.service` 常驻（凭据经 0600 的 host.env 以 EnvironmentFile 注入，不落单元明文）。**如实降级**：该下载源当前可能返回 HTML 壳——setup 下载后以 `file` 校验 ELF，非 ELF 即报错并提示「手工放置 linux/amd64 frpc 二进制到 `/usr/local/frpc/frpc` 后重跑 `showroomctl setup --apply`」；`/_api/admin/host` 的 `frp.service` 字段常驻反馈 is-active 状态。
+**ChmlFrp（自举）**：编辑 `state/host.env` 置 `FRP=chmlfrp`、`FRP_TOKEN=<usertoken>`、`FRP_TUNNEL=<隧道ID>`（多隧道逗号分隔）→ `showroomctl setup --apply` → `systemctl restart showroom-api`。隧道**内嵌在 showroom-api.service 里**（D22）：serve 启动即拉起隧道模块——经 getcfg（`cf-v2.uapis.cn/cfg`）拉面板 ini，全部代理 local 恒改指网关 127.0.0.1:8082 → Caddy site B :8081。**生效时机（诚实边界）**：面板配置在隧道**会话重建时**重拉（致命错误后的自动重试或服务重启）——frpc 内层网络重连复用旧配置不重拉，改了面板节点/端口后请 `systemctl restart showroom-api`。无独立 frpc 单元、无二进制下载（旧 chmlfrp.service 由 setup 观察到即移除）。日志：`journalctl -u showroom-api -f | grep tunnel`；状态：`/_api/admin/host` 的 `frp.tunnel` 字段（connected/connecting/error/stale，数据源 `state/tunnel.status`）。
 
-**自建 frp（主机无公网 IP）**：在公网服务器跑 frps（占位配置），在 Showroom 主机跑 frpc 把 Caddy 的公网面（site B，恒听 `:8081`）暴露出去：
+**自建 frp / 其它中转商（FRP=native）**：在公网服务器跑 frps（占位配置），Showroom 主机不再另跑 frpc——把客户端配置写进独立 0600 文件（如 `/etc/showroom/frpc-native.toml`，`install -m 600`），`state/host.env` 置 `FRP=native` + `FRP_TOML=/etc/showroom/frpc-native.toml`（**路径而非内联 TOML**——host.env 是单行 kv，多行值存不下来）→ `setup --apply` → `restart showroom-api`。文件在**会话重建时**重读（致命错误后的自动重试 ≤30s，或服务重启）——稳妥起见改完文件后 restart：
 
 ```toml
-# /etc/frp/frpc.toml（Showroom 主机）
+# FRP_TOML 指向文件的内容（完整 frpc TOML；local 无须手改——隧道模块恒改指内部网关）
 serverAddr = "<FRP-SERVER>"
 serverPort = 7000
 auth.token = "<FRP-TOKEN>"
@@ -104,19 +105,18 @@ auth.token = "<FRP-TOKEN>"
 [[proxies]]
 name = "showroom-http"
 type = "tcp"
-localPort = 8081          # 转发目标 = site B（Caddy 恒听 8081，纯端口匹配）
+localPort = 8081          # 任意值均可（被网关改写覆盖）
 remotePort = 28080         # 公网访问端口
-transport.useEncryption = true
 ```
 
-frpc 以 systemd 常驻后，公网面即 `http://<FRP-SERVER>:28080`；同时把该地址写入 `state/host.env` 的 `PUBLIC_HOST=` 再 `setup --apply`（渲染 site B——PUBLIC_HOST 非空是开关，地址仅作元数据展示；frp 流量按 :8081 端口命中，不按 Host 匹配）。发布者 CLI 配置公网通道（`login` 只写 server_lan，public 需补一条）：
+隧道起来后公网面即 `http://<FRP-SERVER>:28080`；同时把该地址写入 `state/host.env` 的 `PUBLIC_HOST=` 再 `setup --apply`（渲染 site B——PUBLIC_HOST 非空是开关，地址仅作元数据展示；frp 流量按 :8081 端口命中，不按 Host 匹配）。发布者 CLI 配置公网通道（`login` 只写 server_lan，public 需补一条）：
 
 ```sh
 showroom login <USER> --server-lan http://showroom-lan.your-host
 showroom config --server-public http://<FRP-SERVER>:28080
 ```
 
-**注意**：frp 仅转发 TCP；管理流量的认证与机密性由 SR-SIG1/信封/OPAQUE 在应用层保证，不依赖 frp 的加密。
+**注意**：frp 仅转发 TCP；管理流量的认证与机密性由 SR-SIG1/信封/OPAQUE 在应用层保证，不依赖 frp 的加密。网关（:8082）按连接首批 6B 混合探测：SRTP 帧头→传输信封解封（SPEC §2.1，wasm/cli 专用，客户端采用为后续项）；其余（含全部现有流量）→ 字节级明文直通。**隧道必须是 tcp 型**（chmlfrp 隧道与 native 示例均满足；http 型按 Host 路由会解析载荷，不适用）。
 
 ---
 
@@ -317,4 +317,4 @@ journald drop-in（`/etc/systemd/journald.conf.d/showroom.conf`）：`SystemMaxU
 | CLI 公网通道 `E_AUTH` 但内网正常 | 公网面 Caddy 站点未反代 `/_api/*`，或中间代理改写了路径/方法（签名覆盖 path_with_query） |
 | **公网页面空白 / 一律 404（frp 隧道）** | site B 是 `:8081` **纯端口匹配**：frp 流量 Host 是公网 IP，若 Caddyfile 仍按 Host 匹配会全部漏掉。确认 site B 为 `http://:8081`（重跑 `setup --apply`）、隧道本地目标 = 8081、`PUBLIC_HOST` 非空 |
 | setup 黄条「redis 实例 databases=16 < policy」 | 手工部署遗留实例：`showroomctl middleware set redis databases=256 --confirm` 收编（§5 扩容流） |
-| frpc 下载报「非 ELF」 | ChmlFrp 下载源回了 HTML 壳：手工放置 linux/amd64 frpc 到 `/usr/local/frpc/frpc` 后重跑 `setup --apply` |
+| 隧道 `error: 面板拒绝` / 连不上节点 | `journalctl -u showroom-api -f \| grep tunnel` 看隧道日志；核 host.env 的 FRP_TOKEN/FRP_TUNNEL 与面板节点状态（旧 chmlfrp.service 若还挂着先 `systemctl disable --now chmlfrp` 再跑一次 `setup --apply` 收敛）。若 getcfg 报证书类错误（cf-v2.uapis.cn 证书与其面板历史配置不合——chmlfrp 官方魔改 frpc 即为此跳过校验），本实现不放宽校验：改走 `FRP=native` + FRP_TOML（从面板手抄节点地址/端口/隧道参数）或等其证书修复 |

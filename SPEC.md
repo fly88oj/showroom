@@ -23,6 +23,20 @@ body= wrap || aes256gcm(k, zstd(docker_save_tar))
 完整性：SR-SIG1 签名已覆盖 sha256(body)（EtM）。
 密钥文件：用户 `~/.showroom/id_ed25519`（PEM/PKCS8 或裸 32B seed+pub，实现自定但 CLI 与服务端经 common 互认）；平台对 `/srv/showroom/state/platform_rsa{.pub}`——公钥经 whoami `platform_pem` 自动下发（§12.2）/控制台工具下载页，控制台见 §17。
 
+### 2.1 传输信封 SRTP v1（隧道内全流密封；server 端网关已实装，客户端采用为后续项）
+
+隧道（frp）是载荷无关的透明字节管道，端点可自行分层。SRTP 复用 §2 信封段格式，加 6B 传输头：
+
+```
+帧头 = "SRTP" 0x01 <flags>        # flags bit0：0=上行（首段前有 384B wrap）/ 1=下行（无 wrap）
+上行 = 帧头(flags=0) || wrap || 段流        # 客户端以平台公钥 seal（即 §2 信封原样加头）
+下行 = 帧头(flags=1) || 段流                # 网关以**上行解出的同一 k** 对称封装（TLS 式会话）
+```
+
+- 拓扑：客户端(wasm/cli) → [标准 frps 中转，只见高熵字节] → serve 内 frp 客户端 → 网关(127.0.0.1:8082) → Caddy site B(:8081)。中转方零配合、零选项。
+- 混合模式（兼容铁律）：网关按连接首批 6B 探测——非 SRTP 头一律**字节级明文直通**。原有 Docker Push（公网加密 import 通道）与匿名公开访问零变化。
+- 实现位：`showroom-common/src/srtp.rs`（流式状态机，格式单源）+ `showroomctl/src/tunnel/gateway.rs`；实测依据与分层顺序（先压后封恒优）见 docs/architecture.md 隧道段。
+
 ## 3. HTTP API（server=showroomctl serve，127.0.0.1:8090，经 Caddy /_api/* 代理）
 **零信息暴露原则：/_api/* 下所有端点（含 health/projects）一律要求 SR-SIG1 签名；未认证或验签失败的任何请求（无论路径是否存在、方法是否支持）统一返回 404 + `{"error":"E_AUTH"}`——不泄露路径存在性、版本、项目名等任何管理侧信息。**
 
@@ -211,8 +225,14 @@ UI：发布页单表单双镜像源（tar 上传→压缩→上传→发布；�
   ```
   MIDDLEWARE="postgres registry redis"     # 集合：按需增减（如无 redis 主机）
   CADDY=yes  LAN_HOST=<内网地址>  PUBLIC_HOST=  TUNING=sysctl  DEDUP=weekly
-  FRP=none  FRP_TOKEN=  FRP_TUNNEL=        # frp 自举（chmlfrp；整文件 0600）
+  FRP=none  FRP_TOKEN=  FRP_TUNNEL=  FRP_TOML=   # 隧道（整文件 0600；见下行注）
   ```
+  > 隧道并入 serve（D22）：`FRP=chmlfrp` 走 getcfg 拉取面板 ini（FRP_TOKEN/FRP_TUNNEL；
+  > 多隧道=FRP_TUNNEL 逗号列表，历史键 FRP_TUNNEL2 解析时折叠）；`FRP=native` 时
+  > FRP_TOML=指向完整 frpc TOML 的**文件路径**（自建 frps/其它中转商；host.env 是单行
+  > kv，内联多行 TOML 存活不了落盘往返——TOML 连同凭据住独立 0600 文件如
+  > /etc/showroom/frpc-native.toml，**会话重建时**重读：frpc 内层重连不重读配置，
+  > 改动须重启 serve 或等致命错误后的外层重试）。不再有独立 frpc 单元与二进制下载。
   > 勘误（plan-15 落地）：REDIS_DBS/DISK_RESERVE_GB/UPLOAD_SPACE_FACTOR/RESERVE_MEM_MB
   > 属业务限额，归 `state/policy.env`（§13.3/§14.4 已落），不在 host.env——两类键的变更主体
   > 与风险等级不同（限额=管理员日常调节；设施=setup 幂等收敛），分层不合并以免双写漂移。

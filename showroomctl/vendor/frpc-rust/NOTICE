@@ -1,0 +1,17 @@
+frpc-rust
+
+This project implements a native Rust client interoperating with the frp v1
+protocol. It is not an official release of the frp project.
+
+Protocol layouts and compatibility behavior were referenced from:
+- frp, https://github.com/fatedier/frp
+  v0.70.0, commit 7b6e01f04f286632f0d23715aa17a3bc41234b5c
+  Copyright 2016-present fatedier and The frp Authors, Apache License 2.0.
+- golib, https://github.com/fatedier/golib
+  v0.7.0, commit c3ed68fa2f49b5820d3c07b3cfc59d0f0ad46468
+  Copyright fatedier and contributors, Apache License 2.0.
+
+The v1 authentication digest, PBKDF2/AES-CFB stream parameters, Snappy framing,
+message field names and transport handshakes intentionally follow those projects.
+Rust dependencies retain their respective licenses; see Cargo.lock and each
+dependency's distributed license for details.

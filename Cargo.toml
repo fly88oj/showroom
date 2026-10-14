@@ -1,6 +1,8 @@
 [workspace]
 resolver = "2"
 members = ["showroom-common", "showroomctl", "showroom"]
+# vendored frpc-rust（隧道客户端）：排除出 workspace——不参与成员解析，其 [profile] 不与本根冲突
+exclude = ["showroomctl/vendor/frpc-rust"]
 
 [profile.release]
 lto = "thin"

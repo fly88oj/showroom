@@ -1,0 +1,10 @@
+# 容器内仍监听 7000；Compose 将其发布为宿主机的 7001。
+bindAddr = "0.0.0.0"
+bindPort = 7000
+proxyBindAddr = "0.0.0.0"
+
+auth.method = "token"
+auth.token = "{{ .Envs.FRP_TOKEN }}"
+
+log.to = "console"
+log.level = "info"

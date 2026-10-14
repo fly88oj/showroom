@@ -1,0 +1,16 @@
+serverAddr = "frps.example.com"
+serverPort = 7000
+loginFailExit = false
+auth.method = "oidc"
+auth.additionalScopes = ["HeartBeats", "NewWorkConns"]
+auth.oidc.clientID = "frpc"
+auth.oidc.clientSecret = "{{ .Envs.OIDC_CLIENT_SECRET }}"
+auth.oidc.tokenEndpointURL = "https://identity.example.com/oauth/token"
+auth.oidc.audience = "frp"
+auth.oidc.scope = "tunnel"
+
+[[proxies]]
+name = "app"
+type = "tcp"
+localPort = 8080
+remotePort = 18080

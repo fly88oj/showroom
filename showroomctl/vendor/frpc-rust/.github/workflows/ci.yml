@@ -1,0 +1,36 @@
+name: Rust checks
+on: [push, pull_request, workflow_dispatch]
+permissions:
+  contents: read
+jobs:
+  test:
+    strategy:
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+      - run: cargo fmt --check
+      - run: cargo clippy --locked --all-targets -- -D warnings
+      - run: cargo test --locked --all-targets
+  interop:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.25.x'
+      - name: Build pinned official frps from source
+        run: |
+          git clone --depth 1 --branch v0.70.0 https://github.com/fatedier/frp.git "$RUNNER_TEMP/frp"
+          cd "$RUNNER_TEMP/frp"
+          test "$(git rev-parse HEAD)" = "7b6e01f04f286632f0d23715aa17a3bc41234b5c"
+          go build -o "$RUNNER_TEMP/frps" ./cmd/frps
+      - name: Run official protocol interoperability tests
+        env:
+          FRPS_BIN: ${{ runner.temp }}/frps
+        run: cargo test --locked --test interop -- --ignored --nocapture

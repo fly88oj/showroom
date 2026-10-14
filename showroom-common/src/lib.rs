@@ -33,6 +33,8 @@ pub use {ed25519_dalek, rsa};
 
 /// wasm32 控制台 C-ABI 垫片（SPEC §8.3）；文件内以 `#![cfg(target_arch = "wasm32")]` 整体隔离。
 pub mod opaque;
+/// 传输层信封流式状态机（隧道网关 / SRTP 帧格式；§2 信封的流式适配）。
+pub mod srtp;
 pub mod wasm_shim;
 
 // wasm32：getrandom 在该目标无默认后端（"js" feature 需 wasm-bindgen，SPEC §8.3 禁引），
@@ -372,6 +374,17 @@ impl PlatformKeys {
             .to_public_key()
             .to_public_key_pem(LineEnding::LF)
             .expect("encode public pem")
+            .as_str()
+            .to_owned()
+    }
+
+    /// 私钥 PKCS#8 PEM（隧道网关 srtp::OpenStream::begin_wrap 用；不下发、不落额外文件）。
+    /// 原生专用：wasm32 目标禁用 EncodePrivateKey（§8.3 依赖面收口）。
+    #[cfg(not(target_arch = "wasm32"))]
+    pub fn priv_pkcs8_pem(&self) -> String {
+        self.0
+            .to_pkcs8_pem(LineEnding::LF)
+            .expect("encode private pem")
             .as_str()
             .to_owned()
     }

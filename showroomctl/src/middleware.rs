@@ -21,11 +21,13 @@ pub fn host_env_path(root: &Path) -> PathBuf {
     root.join("state/host.env")
 }
 
-/// frp 通道形态（补充需求①：FRP=none|chmlfrp）。
+/// frp 通道形态（补充需求① FRP=none|chmlfrp；隧道并入 serve 后增 native=FRP_TOML 路径直载）。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum FrpMode {
     None,
     Chmlfrp,
+    /// 原生 frps / 其它中转商：完整 frpc TOML 经 FRP_TOML 直载（provider 扩展位）。
+    Native,
 }
 
 impl FrpMode {
@@ -33,6 +35,7 @@ impl FrpMode {
         match self {
             FrpMode::None => "none",
             FrpMode::Chmlfrp => "chmlfrp",
+            FrpMode::Native => "native",
         }
     }
 
@@ -40,7 +43,8 @@ impl FrpMode {
         match s {
             "none" => Ok(FrpMode::None),
             "chmlfrp" => Ok(FrpMode::Chmlfrp),
-            _ => Err(ApiError::new("E_NAME", format!("FRP 须为 none/chmlfrp（got '{s}'）"))),
+            "native" => Ok(FrpMode::Native),
+            _ => Err(ApiError::new("E_NAME", format!("FRP 须为 none/chmlfrp/native（got '{s}'）"))),
         }
     }
 }
@@ -61,12 +65,16 @@ pub struct HostEnv {
     pub tuning: bool,
     /// DEDUP=weekly：周日 05:00 duperemove timer
     pub dedup: bool,
-    /// FRP=chmlfrp：frpc 自举（二进制下载 + chmlfrp.service）
+    /// FRP=chmlfrp|native：隧道常驻 serve（网关+客户端，见 tunnel 模块）
     pub frp: FrpMode,
     /// ChmlFrp usertoken（凭据：host.env 整文件 0600）
     pub frp_token: String,
-    /// ChmlFrp 隧道 ID
+    /// ChmlFrp 隧道 ID（可逗号分隔多个——getcfg 原生多 ID；FRP_TUNNEL2 历史键已折叠进此键）
     pub frp_tunnel: String,
+    /// FRP=native 时指向完整 frpc TOML 的**文件路径**（原生 frps/其它中转商）。
+    /// 契约为路径而非内联 TOML：host.env 是单行 kv（parse_kv 逐行切分，多行值存活不了
+    /// 首次落盘往返）；TOML 连同其内嵌凭据住独立 0600 文件（如 /etc/showroom/frpc-native.toml）。
+    pub frp_toml_path: String,
 }
 
 impl HostEnv {
@@ -82,6 +90,7 @@ impl HostEnv {
             frp: FrpMode::None,
             frp_token: String::new(),
             frp_tunnel: String::new(),
+            frp_toml_path: String::new(),
         }
     }
 
@@ -140,8 +149,23 @@ impl HostEnv {
                 "FRP" => out.frp = FrpMode::parse(&v)?,
                 "FRP_TOKEN" => out.frp_token = v,
                 "FRP_TUNNEL" => out.frp_tunnel = v,
+                // 历史键 FRP_TUNNEL2 折叠进 FRP_TUNNEL 逗号列表（修复：setup --apply 重写
+                // host.env 会丢未知键——折叠后单一键存活，多隧道语义统一）
+                "FRP_TUNNEL2" if !v.is_empty() => {
+                    if !out.frp_tunnel.split(',').any(|t| t.trim() == v) {
+                        out.frp_tunnel = if out.frp_tunnel.is_empty() {
+                            v
+                        } else {
+                            format!("{},{}", out.frp_tunnel, v)
+                        };
+                    }
+                }
+                "FRP_TOML" => out.frp_toml_path = v,
                 unknown => eprintln!("showroomctl: host.env: 未知键 {unknown}（忽略）"),
             }
+        }
+        if out.frp == FrpMode::Native && out.frp_toml_path.trim().is_empty() {
+            return Err(ApiError::new("E_NAME", "FRP=native 须配 FRP_TOML（指向 0600 的 frpc TOML 文件路径）"));
         }
         Ok(out)
     }
@@ -149,7 +173,7 @@ impl HostEnv {
     /// 键序固定的序列化（幂等写盘前提）；MIDDLEWARE 按字典序（集合语义，与书写顺序无关）。
     pub fn to_env(&self) -> String {
         format!(
-            "MIDDLEWARE={}\nCADDY={}\nLAN_HOST={}\nPUBLIC_HOST={}\nTUNING={}\nDEDUP={}\nFRP={}\nFRP_TOKEN={}\nFRP_TUNNEL={}\n",
+            "MIDDLEWARE={}\nCADDY={}\nLAN_HOST={}\nPUBLIC_HOST={}\nTUNING={}\nDEDUP={}\nFRP={}\nFRP_TOKEN={}\nFRP_TUNNEL={}\nFRP_TOML={}\n",
             self.middleware.iter().cloned().collect::<Vec<_>>().join(" "),
             if self.caddy { "yes" } else { "no" },
             self.lan_host,
@@ -159,6 +183,7 @@ impl HostEnv {
             self.frp.as_str(),
             self.frp_token,
             self.frp_tunnel,
+            self.frp_toml_path,
         )
     }
 
@@ -199,6 +224,7 @@ impl HostEnv {
             "FRP": self.frp.as_str(),
             "FRP_TUNNEL": self.frp_tunnel,
             "FRP_TOKEN": if self.frp_token.is_empty() { "" } else { "<set>" },
+            "FRP_TOML": self.frp_toml_path, // 路径非凭据，原样展示（凭据在它指向的 0600 文件里）
         })
     }
 }
@@ -591,7 +617,9 @@ pub fn disabled_middleware(root: &Path) -> Vec<String> {
 
 /// host_view 纯核（drift 来源：mw 实况 + redis 漂移 + caddy/单元存在性 via observe）。
 /// mw_actual=(mw, 容器实况)；pool 由调用方喂（redis_pool_snapshot/json）；
-/// frp_status 为 chmlfrp.service is-active（FRP=none 时忽略）。
+/// frp_tunnel 为隧道会话状态字符串（数据源 state/tunnel.status 落盘文件，见
+/// tunnel::status_write/status_poller 与 frp_tunnel_status：connected/connecting/
+/// error/stale/未运行——FRP=none 时忽略）。
 pub fn host_view_json(
     host: &HostEnv,
     policy: &state::Policy,
@@ -652,10 +680,14 @@ pub fn host_view_json(
             "severity": "error", "advice": "showroomctl setup --apply",
         }));
     }
-    if host.frp == FrpMode::Chmlfrp && frp_status != "active" {
+    if host.frp != FrpMode::None
+        && (frp_status.starts_with("error")
+            || frp_status.starts_with("未运行")
+            || frp_status.starts_with("stale"))
+    {
         drift.push(json!({
-            "item": "chmlfrp.service", "expected": "active", "actual": frp_status,
-            "severity": "error", "advice": "showroomctl setup --apply（或检查 frp 凭据/隧道）",
+            "item": "tunnel", "expected": "connected", "actual": frp_status,
+            "severity": "error", "advice": "journalctl -u showroom-api（隧道日志）或检查 FRP 凭据/面板节点",
         }));
     }
 
@@ -683,7 +715,7 @@ pub fn host_view_json(
         "redis_pool": pool,
         "frp": {
             "mode": host.frp.as_str(),
-            "service": if host.frp == FrpMode::Chmlfrp { Value::String(frp_status.to_string()) } else { Value::Null },
+            "tunnel": if host.frp == FrpMode::None { Value::Null } else { Value::String(frp_status.to_string()) },
         },
         "suggestions": suggestions,
     })
@@ -703,9 +735,29 @@ pub fn host_view(root: &Path) -> R<Value> {
             )
         })
         .collect();
-    let frp_status = dockerops::run_tolerant("systemctl", &["is-active", "chmlfrp"]);
-    let frp_status = if frp_status.is_empty() { "unknown" } else { frp_status.as_str() };
-    Ok(host_view_json(&host, &policy, &obs, &mw_actual, &redis_pool_snapshot(root), frp_status))
+    let frp_status = frp_tunnel_status(root);
+    Ok(host_view_json(&host, &policy, &obs, &mw_actual, &redis_pool_snapshot(root), &frp_status))
+}
+
+/// 隧道状态读取（state/tunnel.status）：`connected: …` / `connecting` / `error: …` /
+/// `未运行`（缺文件）/ `stale: …`（>90s 未更新——serve 停摆或隧道循环卡死）。
+pub fn frp_tunnel_status(root: &Path) -> String {
+    let Ok(t) = fs::read_to_string(root.join("state/tunnel.status")) else {
+        return "未运行".into();
+    };
+    let mut it = t.trim_end().splitn(4, '|');
+    let (Some(ts), Some(kind), node, detail) = (it.next(), it.next(), it.next().unwrap_or("-"), it.next().unwrap_or("")) else {
+        return "未运行".into();
+    };
+    let Ok(ts) = ts.parse::<u64>() else { return "未运行".into() };
+    if state::unix_now().saturating_sub(ts) > 90 {
+        return format!("stale: {detail}");
+    }
+    match kind {
+        "ok" => format!("connected: {node}（{detail}）"),
+        "connecting" => "connecting".into(),
+        _ => format!("error: {detail}"),
+    }
 }
 
 #[cfg(test)]
@@ -793,7 +845,7 @@ mod tests {
             keys,
             vec![
                 "MIDDLEWARE", "CADDY", "LAN_HOST", "PUBLIC_HOST", "TUNING", "DEDUP", "FRP",
-                "FRP_TOKEN", "FRP_TUNNEL"
+                "FRP_TOKEN", "FRP_TUNNEL", "FRP_TOML"
             ]
         );
         let with_comment = format!("# 由 hw_defaults(12G/953G/4 核) 推导于 2026-10-11\n{t}");
@@ -822,6 +874,7 @@ mod tests {
             frp: FrpMode::Chmlfrp,
             frp_token: "tk".into(),
             frp_tunnel: "tid".into(),
+            frp_toml_path: String::new(),
         };
         h.save(&root).unwrap();
         assert_eq!(HostEnv::load(&root), h);
@@ -1013,9 +1066,9 @@ mod tests {
         assert_eq!(v["redis_pool"]["used"], 27);
         assert_eq!(v["policy"]["REDIS_DBS"], 256);
         assert_eq!(v["host_env"]["MIDDLEWARE"].as_array().map(Vec::len), Some(3));
-        // FRP=none：frp.service 为 null 且无 chmlfrp 漂移项
-        assert!(v["frp"]["service"].is_null());
-        assert!(!drift.iter().any(|d| d["item"] == "chmlfrp.service"));
+        // FRP=none：frp.tunnel 为 null 且无 tunnel 漂移项
+        assert!(v["frp"]["tunnel"].is_null());
+        assert!(!drift.iter().any(|d| d["item"] == "tunnel"));
 
         // 全绿 Obs + 池紧张 → 无 error 级漂移，黄条建议在 suggestions 首条
         let mut obs_ok = setup::Obs {
@@ -1036,6 +1089,26 @@ mod tests {
         assert_eq!(v2["drift"].as_array().map(Vec::len), Some(0), "{:?}", v2["drift"]);
         let sugg = v2["suggestions"].as_array().unwrap();
         assert!(sugg[0].as_str().unwrap().contains("剩 1/30"), "{sugg:?}");
+
+        // FRP=chmlfrp + 隧道 error → drift 项 + frp.tunnel 透出；connecting 不扰民
+        let mut h3 = HostEnv::default_for("10.0.0.9");
+        h3.frp = FrpMode::Chmlfrp;
+        let v3 = host_view_json(&h3, &policy, &obs_ok, &mw_actual, &tight, "error: 面板拒绝");
+        assert!(v3["drift"].as_array().unwrap().iter().any(|d| d["item"] == "tunnel" && d["severity"] == "error"), "{:?}", v3["drift"]);
+        assert_eq!(v3["frp"]["tunnel"], "error: 面板拒绝");
+        let v4 = host_view_json(&h3, &policy, &obs_ok, &mw_actual, &tight, "connecting");
+        assert!(v4["drift"].as_array().unwrap().iter().all(|d| d["item"] != "tunnel"));
+
+        // frp_tunnel_status：缺文件=未运行；新鲜 ok=connected；过期=stale；坏行容错
+        assert_eq!(frp_tunnel_status(&root), "未运行");
+        fs::create_dir_all(root.join("state")).unwrap();
+        let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_secs();
+        fs::write(root.join("state/tunnel.status"), format!("{now}|ok|node1:7000|2 条代理在线\n")).unwrap();
+        assert_eq!(frp_tunnel_status(&root), "connected: node1:7000（2 条代理在线）");
+        fs::write(root.join("state/tunnel.status"), format!("{}|error|node1|getcfg 失败\n", now - 200)).unwrap();
+        assert_eq!(frp_tunnel_status(&root), "stale: getcfg 失败");
+        fs::write(root.join("state/tunnel.status"), "垃圾行\n").unwrap();
+        assert_eq!(frp_tunnel_status(&root), "未运行");
         let _ = fs::remove_dir_all(&root);
     }
 

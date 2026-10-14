@@ -133,6 +133,10 @@ pub async fn run(root: PathBuf) -> R<()> {
     for l in setup::refresh_bootstrap_public(&root) {
         eprintln!("showroomctl: bootstrap-public: {l}");
     }
+    // 隧道（C2 合并进 serve）：FRP≠none 时网关+frp 客户端常驻。失败只记日志按 30s 重试，
+    // 永不拖累控制面（supervise 内部兜底；serve Restart=always 覆盖进程级故障）。
+    tokio::spawn(crate::tunnel::supervise(root.clone()));
+
     let st: S = Arc::new(AppState {
         root,
         nonces: Mutex::new(HashMap::new()),
@@ -1219,6 +1223,18 @@ fn admin_host_post(root: &Path, body: &[u8]) -> R<serde_json::Value> {
     if let Some(t) = &b.frp_tunnel {
         host.frp_tunnel = t.clone();
     }
+    if let Some(t) = &b.frp_toml {
+        if !t.is_empty() { host.frp_toml_path = t.clone(); } // 值=文件路径（非凭据，无打码回传问题）
+    }
+
+    // 落盘前往返校验（评审二轮实锤）：非法组合（如 native 无 FRP_TOML）或含换行/等号
+    // 破坏 kv 形状的值，在 parse(to_env()) 往返上必然暴露——杜绝「落盘即解析失败→
+    // 静默回退默认形状→隧道悄悄停摆」的链路。预演分支同样被拦（不允许预演非法状态）。
+    let roundtrip = middleware::HostEnv::parse(&host.to_env())
+        .map_err(|e| ApiError::new("E_NAME", format!("host.env 组合校验失败: {}", e.msg)))?;
+    if roundtrip != host {
+        return Err(ApiError::new("E_NAME", "host.env 值无法安全落盘（含换行等会破坏单行 kv 的字符）"));
+    }
 
     let removed: Vec<String> = prev.middleware.difference(&host.middleware).cloned().collect();
     let mut affected: Vec<String> = vec![];
@@ -1277,6 +1293,8 @@ struct AdminHostEnvBody {
     frp_token: Option<String>,
     #[serde(rename = "FRP_TUNNEL", alias = "frp_tunnel")]
     frp_tunnel: Option<String>,
+    #[serde(rename = "FRP_TOML", alias = "frp_toml")]
+    frp_toml: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -1733,6 +1751,14 @@ mod tests {
             admin_host_post(&root, br#"{"host_env":{"MIDDLEWARE":"mysql"}}"#).unwrap_err().code,
             "E_NAME"
         );
+        // 落盘前往返校验（评审二轮）：FRP=native 缺 FRP_TOML → E_NAME（否则落盘即解析失败
+        // → load 静默回退默认 → 隧道悄悄停摆）；值含换行（kv 注入）同样拒绝
+        let e = admin_host_post(&root, br#"{"host_env":{"FRP":"native"}}"#).unwrap_err();
+        assert_eq!(e.code, "E_NAME");
+        assert!(e.msg.contains("FRP_TOML"), "{}", e.msg);
+        let e2 = admin_host_post(&root, br#"{"host_env":{"LAN_HOST":"10.0.0.1
+FRP=none"}}"#).unwrap_err();
+        assert_eq!(e2.code, "E_NAME", "换行注入须被往返校验拦截");
         assert_eq!(
             admin_host_post(&root, br#"{"host_env":{"CADDY":"true"}}"#).unwrap_err().code,
             "E_NAME"

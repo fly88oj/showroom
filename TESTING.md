@@ -1,6 +1,6 @@
 # TESTING.md —— 测试纪律与运行指南
 
-本仓库的测试基线：**138 个单元测试，`cargo test --workspace` 约 1.6s、`cargo nextest run` 约 1.1s（32 核开发机，2026-10 实测），无 flaky**。任何改动若让测试变慢、变 flaky 或破坏下列规则，视为回归。
+本仓库的测试基线：**192 个单元测试（2026-10-14 隧道批后复测），`cargo test --workspace` 约 1.6s、`cargo nextest run` 约 1.1s（32 核开发机，2026-10 实测），无 flaky**。任何改动若让测试变慢、变 flaky 或破坏下列规则，视为回归。
 
 提速与隔离改造的完整背景（审计发现、数字归因、取舍）见本文 §3-§4 与提交 `test: 并行化重构+隔离审计+TESTING.md 纪律`。
 
@@ -8,7 +8,7 @@
 
 1. **独立临时目录**：每个测试的落盘路径必须经由所在文件的 `troot(name)` / `tmp(name)` helper（pid + 原子计数保证每次调用独立），禁止手写 `env::temp_dir().join("固定名")`。教训：`showroom/src/config.rs` 曾用共享父目录 + 固定名，并行测试互相 `remove_dir_all` 造成 flaky（bf542ea 修复）；本次已把全部 helper 统一为计数器化写法（9 个文件），复用该模式即可。目录在 `/tmp` 下由系统清理回收；测试失败时故意不清理（保留现场供排查），成功路径的清理是尽力而为不是义务。
 2. **禁全局状态**：禁止 `env::set_var` / `env::remove_var`（进程内所有并行测试共享 env，libtest 与 nextest 都无法隔离）；禁止跨测试共享的可变静态（`static mut`、无锁的全局 `RefCell`）。只读的进程级缓存可以用 `OnceLock`（如 `showroom-common` 测试里的 `platform()` 平台钥匙）。需要"状态"的就显式构造：`serve.rs` 测试的 `AppState` 每测试自建一份。
-3. **禁固定端口**：不 bind 端口。HTTP 层测试直调 handler（`api_inner`，见 `serve.rs::tests::call`），不 起 socket；端口只作为配置数据出现在字符串断言里。
+3. **禁固定端口**：不 bind 端口。HTTP 层测试直调 handler（`api_inner`，见 `serve.rs::tests::call`），不 起 socket；端口只作为配置数据出现在字符串断言里。**例外（tunnel 网关回环，2026-10-14 登记）**：`tunnel/tests.rs` 的网关/echo 测试必须起真 socket（探测+全双工泵是网络语义，直调无法覆盖）——恒 bind `127.0.0.1:0` 随机口（并行安全，无固定端口）。
 4. **显式入参**：被测函数需要的路径/策略/时间一律参数传入，不读真实 HOME、不读仓库外文件。需要 policy 的用 `troot` + 显式写 `state/policy.env`（参考 `publish.rs::tests::neutral_disk_policy`——测试自定中性配额，不依赖宿主机磁盘余量）。例外（只读且结论与宿主机无关，已逐一审定）：`publish.rs::meminfo_read_wiring` 读 `/proc/meminfo`、`import_begin_disk_quota_gate` 跑真实 `df`（reserve 设成天文数字保证必拒）。
 5. **超时预算**：单测试目标 < 2s。确需等待真实时间的（如 mtime 秒级精度），用最小必要 sleep 并在慢测试清单（§5）登记原因。禁止网络往返、docker/journalctl/systemctl 真实调用进单测——这些属于 `tests/` 下的手工 e2e（fixtures 在 `tests/hello/`）。
 
@@ -53,7 +53,7 @@ RUST_TEST_THREADS=8 cargo test --workspace  # libtest：线程级上限
 
 - 固定 /tmp 路径：除 §1.1 所述 helper 计数器化外，无测试写仓库外固定路径。
 - 共享 env：无 `env::set_var`/`remove_var`。
-- 固定端口：无测试 bind socket；serve 层测试直调 `api_inner`。
+- 固定端口：除 `tunnel/tests.rs` 登记例外（回环 127.0.0.1:0）外，无测试 bind socket；serve 层测试直调 `api_inner`。
 - 真实 docker/journalctl：无（生产代码 `dockerops.rs` 有，测试不触；涉及容器语义的路径均以"校验先于 docker 调用"设计，测试只到校验层）。
 - 跨测试共享状态文件：无；每测试独立 root，`AppState` 每测试自建。
 - 生产代码改动：**零**。本次全部改动在 Cargo.toml、测试 helper 与本文档。

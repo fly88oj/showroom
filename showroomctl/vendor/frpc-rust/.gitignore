@@ -1,0 +1,4 @@
+/target
+/.reference
+/.test-artifacts
+*.log

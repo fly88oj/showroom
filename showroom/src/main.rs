@@ -325,7 +325,7 @@ showroom db reset <项目> --confirm                    # 清库重建（破坏�
 - `rm`/`rollback`/`db reset`/`db restore` 执行前必须获得用户明确确认。
 - 私钥/seed、registry 密码不得写入仓库、日志或聊天记录。
 - 保留名：v2/_api/_bootstrap/_console。
-- 平台侧出问题（502/路由 404 等）：报告用户，让管理员上主机处理（`ssh dejoy@your-host`，服务名 showroom-api/caddy/docker/chmlfrp），不要尝试直接改主机。
+- 平台侧出问题（502/路由 404 等）：报告用户，让管理员上主机处理（`ssh dejoy@your-host`，服务名 showroom-api/caddy/docker；公网隧道在 showroom-api 内，排查看 journalctl -u showroom-api 的 tunnel 行），不要尝试直接改主机。
 "##;
             let skill_path = skill_dir.join("SKILL.md");
             std::fs::write(&skill_path, SKILL_MD).map_err(|e| format!("写入失败：{e}"))?;

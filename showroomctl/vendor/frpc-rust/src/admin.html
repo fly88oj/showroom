@@ -1,0 +1,12 @@
+<!doctype html>
+<html lang="zh-CN"><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>frpc-rust 管理</title>
+<style>:root{color-scheme:light dark;font-family:system-ui,sans-serif}body{max-width:1100px;margin:48px auto;padding:0 24px}header{display:flex;align-items:center;justify-content:space-between;gap:20px}h1{font-size:26px}button{padding:10px 18px;border:1px solid #888;border-radius:7px;cursor:pointer}table{border-collapse:collapse;width:100%;margin:28px 0}th,td{padding:12px 8px;text-align:left;border-bottom:1px solid #8885}#notice{min-height:26px}code{font-size:13px}.table{overflow-x:auto}.muted{opacity:.7}</style>
+<header><div><h1>frpc-rust</h1><p id="connection" role="status">正在连接管理接口…</p></div><button id="reload">重新加载配置</button></header>
+<p id="notice" role="status"></p><div class="table"><table><thead><tr><th>代理</th><th>类型</th><th>状态</th><th>远端地址</th><th>本地地址</th><th>连接数</th><th>发送 / 接收</th></tr></thead><tbody id="proxies"></tbody></table></div>
+<p id="visitors"></p><p class="muted">每 3 秒刷新。重新加载配置会重建会话，活动连接将断开。</p>
+<script>
+const el=id=>document.getElementById(id);const size=n=>n>1048576?(n/1048576).toFixed(1)+' MiB':(n/1024).toFixed(1)+' KiB';
+async function refresh(){try{const r=await fetch('/api/status');if(!r.ok)throw Error('读取状态失败');const s=await r.json();el('connection').textContent=(s.connected?'已连接':'未连接')+' · '+(s.runId||'等待登录')+' · 重连 '+s.reconnects+' 次';el('proxies').replaceChildren();for(const p of Object.values(s.proxies)){const row=document.createElement('tr');for(const text of [p.name,p.type,p.error||p.status,p.remoteAddr,p.localAddr,p.activeConnections,size(p.bytesSent)+' / '+size(p.bytesReceived)]){const cell=document.createElement('td');cell.textContent=text;row.append(cell)}el('proxies').append(row)}el('visitors').textContent='访问者：'+(Object.entries(s.visitors).map(([k,v])=>k+' ('+v+')').join('，')||'无');if(s.lastError)el('notice').textContent=s.lastError}catch(e){el('connection').textContent=e.message}}
+el('reload').onclick=async()=>{el('reload').disabled=true;try{const r=await fetch('/api/reload',{method:'POST'});const b=await r.json();el('notice').textContent=b.error||b.message;await refresh()}catch(e){el('notice').textContent=e.message}finally{el('reload').disabled=false}};refresh();setInterval(refresh,3000);
+</script></html>

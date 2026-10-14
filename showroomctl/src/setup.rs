@@ -9,7 +9,7 @@ use std::path::{Path, PathBuf};
 use serde_json::{json, Value};
 
 use crate::dockerops;
-use crate::middleware::{host_env_path, FrpMode, HostEnv};
+use crate::middleware::{host_env_path, HostEnv};
 use crate::state::{self, ApiError, R};
 
 // —— policy.env 渲染（plan-15 §1：setup 负责缺省生成——缺键补默认、已有键一律保留）——
@@ -175,11 +175,6 @@ find . -type f ! -name '*.zst' ! -name '*.gz' -print0 | xargs -0 -r zstd -19 -k 
 find . -type f ! -name '*.zst' ! -name '*.gz' -print0 | xargs -0 -r gzip -9 -k -f
 ";
 
-/// frpc 下载源（ChmlFrp linux/amd64；URL 可能回 HTML 壳——FrpcFetch 执行时 file 校验 ELF，
-/// 非 ELF 报错并提示手工放置后重跑 setup，如实降级见 docs/deployment.md）。
-pub const FRPC_URL: &str = "https://chmlfrp.cn/dw/linux/amd64/frpc";
-pub const FRPC_BIN: &str = "/usr/local/frpc/frpc";
-
 /// 恒装的 timer 对（plan-15 §2.2：reconcile/autoheal/gc-images/gc-registry/registry-gc/
 /// snapshot-hourly/snapshot-daily；deploy/ 原文内嵌）。
 pub const TIMER_UNITS: &[(&str, &str)] = &[
@@ -227,7 +222,11 @@ pub fn all_unit_names() -> Vec<String> {
     for (n, _) in DEDUP_UNITS {
         v.push(n.to_string());
     }
+    // chmlfrp.service / chmlfrp2.service：仅作迁移探测候选（隧道已并入 serve；
+    // 真机历史=双隧道双单元[chmlfrp2 用 /etc/frpc2/]，观察到即 UnitDisableRm 收敛——
+    // 多隧道现走 FRP_TUNNEL 逗号列表进 serve 内单客户端）
     v.push("chmlfrp.service".to_string());
+    v.push("chmlfrp2.service".to_string());
     v
 }
 
@@ -240,32 +239,6 @@ pub fn render_unit_api(host: &HostEnv) -> String {
     UNIT_API_TEMPLATE.replace(
         "EnvironmentFile=-/etc/showroom/showroom.env",
         &format!("Environment=SHOWROOM_BASE_URL={}", host.base_url()),
-    )
-}
-
-/// chmlfrp 单元渲染（补充需求①）：凭据经 EnvironmentFile=host.env（0600）注入，
-/// 不落明文进 644 的单元文件。
-pub fn render_unit_chmlfrp(root: &Path) -> String {
-    format!(
-        "\
-[Unit]
-Description=ChmlFrp tunnel (frpc)
-After=network-online.target
-Wants=network-online.target
-
-[Service]
-Type=simple
-# 凭据在 host.env（0600，root）：EnvironmentFile 注入 FRP_TOKEN/FRP_TUNNEL
-EnvironmentFile=-{env}
-ExecStart={frpc} -u ${{FRP_TOKEN}} -p ${{FRP_TUNNEL}}
-Restart=always
-RestartSec=5
-
-[Install]
-WantedBy=multi-user.target
-",
-        env = host_env_path(root).display(),
-        frpc = FRPC_BIN,
     )
 }
 
@@ -433,15 +406,13 @@ pub struct Obs {
     pub pkgs: BTreeSet<String>,
     pub units_installed: BTreeSet<String>,
     pub units_enabled: BTreeSet<String>,
-    /// 二进制资产存在性（frpc；文本 map 之外的 ELF）
-    pub binaries: BTreeSet<PathBuf>,
     /// 硬件观测（hw 推导输入；/proc/meminfo MemTotal、df /、nproc）
     pub mem_total_mb: u64,
     pub disk_total_mb: u64,
     pub cores: u32,
 }
 
-// —— Action（plan-15 §2.2 枚举 + 补充需求① FrpcFetch）——
+// —— Action（plan-15 §2.2 枚举；FrpcFetch 已随隧道并入 serve 移除）——
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum Action {
@@ -457,8 +428,6 @@ pub enum Action {
     UnitEnable { name: String },
     UnitDisableRm { name: String },
     Cmd { what: String, argv: Vec<String> },
-    /// frpc 下载（补充需求①）：下载后 file 校验 ELF 再 chmod 0755；非 ELF 报错并提示手工放置。
-    FrpcFetch { url: String, dest: PathBuf },
 }
 
 /// 去掉行首 # 注释行（host.env 审计注释不参与幂等比较）。
@@ -496,7 +465,6 @@ pub fn action_needed(a: &Action, obs: &Obs) -> bool {
         Action::UnitEnable { name } => !obs.units_enabled.contains(name),
         Action::UnitDisableRm { name } => obs.units_installed.contains(name) || obs.units_enabled.contains(name),
         Action::Cmd { .. } => true, // 派生类：只在触发条件成立时进 plan（见 plan_setup）
-        Action::FrpcFetch { dest, .. } => !obs.binaries.contains(dest),
     }
 }
 
@@ -519,9 +487,6 @@ pub fn expected_dirs(root: &Path, host: &HostEnv) -> Vec<(PathBuf, u32)> {
     v.push((root.join("_tmp"), 0o755));
     v.push((root.join("_bootstrap"), 0o755));
     v.push((root.join("_bootstrap/public"), 0o755)); // /_api/tool/* 下发源（控制台内下载）
-    if host.frp == FrpMode::Chmlfrp {
-        v.push((PathBuf::from("/usr/local/frpc"), 0o755));
-    }
     v
 }
 
@@ -650,12 +615,10 @@ pub fn plan_setup(host: &HostEnv, obs: &Obs) -> Vec<Action> {
         full.push(Action::UnitDisableRm { name: "showroom-dedup.timer".into() });
         full.push(Action::UnitDisableRm { name: "showroom-dedup.service".into() });
     }
-    if host.frp == FrpMode::Chmlfrp {
-        full.push(Action::UnitInstall {
-            name: "chmlfrp.service".into(),
-            contents: render_unit_chmlfrp(&root),
-        });
-    }
+    // 隧道已并入 serve（用户裁决 C2）：旧独立 frpc 单元（含真机历史的 chmlfrp2 双隧道单元）
+    // 观察到即移除（迁移收敛；多隧道现走 FRP_TUNNEL 逗号列表进 serve 内单客户端）
+    full.push(Action::UnitDisableRm { name: "chmlfrp.service".into() });
+    full.push(Action::UnitDisableRm { name: "chmlfrp2.service".into() });
 
     // 预压缩脚本（补充需求③：/usr/local/bin/showroom-precompress；file_server precompressed 已渲染进 Caddyfile）
     full.push(Action::WriteFile {
@@ -680,13 +643,6 @@ pub fn plan_setup(host: &HostEnv, obs: &Obs) -> Vec<Action> {
     }
     if host.dedup {
         enables.push(Action::UnitEnable { name: "showroom-dedup.timer".into() });
-    }
-    if host.frp == FrpMode::Chmlfrp {
-        let fetch = Action::FrpcFetch { url: FRPC_URL.to_string(), dest: PathBuf::from(FRPC_BIN) };
-        if action_needed(&fetch, obs) {
-            needed.insert(0, fetch); // 下载先于单元启用
-        }
-        enables.push(Action::UnitEnable { name: "chmlfrp.service".into() });
     }
     let enables: Vec<Action> = enables.into_iter().filter(|a| action_needed(a, obs)).collect();
 
@@ -735,6 +691,10 @@ pub fn plan_setup(host: &HostEnv, obs: &Obs) -> Vec<Action> {
 /// redis 漂移黄条（plan-15 §9 冲突点：现网实例 --databases 16 手工遗留——setup 不重建，只引导走 §5 扩容流）。
 pub fn plan_warnings(root: &Path, obs: &Obs) -> Vec<String> {
     let mut w = vec![];
+    // 隧道迁移（D22）：旧 frpc 单元被收敛移除后，隧道要等 serve 重启才在进程内起来
+    if obs.units_installed.contains("chmlfrp.service") || obs.units_installed.contains("chmlfrp2.service") {
+        w.push("旧 chmlfrp 单元将被移除（隧道已并入 showroom-api）：apply 后须 systemctl restart showroom-api 使公网面恢复".into());
+    }
     let policy = state::Policy::load(root);
     if let Some(actual) = obs.redis_databases {
         if actual < policy.redis_dbs {
@@ -784,9 +744,6 @@ pub fn observe(root: &Path, host: &HostEnv) -> Obs {
     obs.net = dockerops::run_fail_ok("docker", &["network", "inspect", dockerops::DOCKER_NET]);
     obs.containers = dockerops::all_container_names().into_iter().collect();
     obs.redis_databases = dockerops::redis_databases();
-    if Path::new(FRPC_BIN).exists() {
-        obs.binaries.insert(PathBuf::from(FRPC_BIN));
-    }
     if host.caddy && dockerops::run_fail_ok("pacman", &["-Qi", "caddy"]) {
         obs.pkgs.insert("caddy".to_string());
     }
@@ -917,27 +874,9 @@ fn exec_action(a: &Action) -> R<String> {
             dockerops::run(prog, &rest.iter().map(String::as_str).collect::<Vec<_>>())
                 .map(|o| o.trim().to_string())
         }
-        Action::FrpcFetch { url, dest } => exec_frpc_fetch(url, &dest.display().to_string()),
     }
 }
 
-/// frpc 下载（补充需求①）：curl 下载 → `file` 校验 ELF → chmod 0755；
-/// 非 ELF（站点回 HTML 壳等）→ 删除产物并报错，提示手工放置后重跑 setup。
-fn exec_frpc_fetch(url: &str, dest: &str) -> R<String> {
-    let _ = fs::create_dir_all(Path::new(dest).parent().unwrap_or(Path::new("/usr/local/frpc")));
-    dockerops::run("curl", &["-fsSL", "-o", dest, url])?;
-    let file_out = dockerops::run("file", &[dest]).unwrap_or_default();
-    if !file_out.contains("ELF") {
-        let _ = fs::remove_file(dest);
-        return Err(ApiError::state(format!(
-            "frpc 下载内容非 ELF（file 输出：{file_out}；下载源 {url} 可能回 HTML 壳）：\
-             请手工放置 linux/amd64 frpc 二进制到 {dest} 后重跑 `showroomctl setup --apply`"
-        )));
-    }
-    use std::os::unix::fs::PermissionsExt;
-    fs::set_permissions(dest, fs::Permissions::from_mode(0o755))?;
-    Ok(format!("frpc downloaded + ELF verified -> {dest}"))
-}
 
 // —— diff / 报告呈现（人读行 + JSON 同构）——
 
@@ -966,7 +905,6 @@ pub fn action_brief(a: &Action) -> (&'static str, &'static str, String, String) 
         Action::UnitEnable { name } => ("UnitEnable", "enable", name.clone(), "enable --now".into()),
         Action::UnitDisableRm { name } => ("UnitDisableRm", "unit-rm", name.clone(), "disable --now + rm".into()),
         Action::Cmd { what, .. } => ("Cmd", "cmd", what.clone(), what.clone()),
-        Action::FrpcFetch { url, dest } => ("FrpcFetch", "frpc", dest.display().to_string(), url.to_string()),
     }
 }
 
@@ -1164,6 +1102,7 @@ pub fn upgrade(bin: Option<&Path>) -> R<Value> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::middleware::FrpMode;
 
     fn troot(name: &str) -> PathBuf {
         // 隔离纪律（TESTING.md 规则 1）：每次调用独立目录（pid+原子计数），固定名复用会互相 remove_dir_all
@@ -1253,7 +1192,7 @@ mod tests {
         // 快照：kinds 序列稳定（长度 + 首尾锚定，免路径受 SHOWROOM_ROOT 影响的脆断言）
         let kinds: Vec<&str> = plan.iter().map(|a| action_brief(a).0).collect();
         assert_eq!(kinds.first(), Some(&"CreateDir"));
-        assert!(!kinds.contains(&"FrpcFetch"), "FRP=none 不产 frpc 动作");
+        assert!(!kinds.contains(&"UnitDisableRm"), "FRP=none 且无遗留单元不产移除动作");
         assert!(kinds.len() > 30, "全量程序规模合理：{}", kinds.len());
     }
 
@@ -1332,24 +1271,26 @@ mod tests {
         assert!(plan.iter().any(|a| matches!(a, Action::UnitDisableRm { .. })), "DEDUP=none 须产 UnitDisableRm");
         assert!(!plan.iter().any(|a| matches!(a, Action::UnitEnable { name } if name.contains("dedup"))));
 
-        // FRP=chmlfrp：frpc 目录/下载/单元/启用；凭据不落单元明文（EnvironmentFile）
+        // FRP=chmlfrp：隧道并入 serve——不再有独立 frpc 单元/下载；凭据只在 host.env（0600），
+        // 由 serve 内隧道模块经 HostEnv::load 读取（不再经 EnvironmentFile 注入任何单元）
         let mut h = default_host();
         h.frp = FrpMode::Chmlfrp;
         h.frp_token = "tok".into();
         h.frp_tunnel = "tid".into();
         let plan = mk(&h);
-        assert!(plan.iter().any(|a| matches!(a, Action::FrpcFetch { .. })));
-        assert!(plan.iter().any(|a| matches!(a, Action::UnitInstall { name, .. } if name == "chmlfrp.service")));
-        let unit = plan
-            .iter()
-            .find_map(|a| match a {
-                Action::UnitInstall { name, contents } if name == "chmlfrp.service" => Some(contents.clone()),
-                _ => None,
-            })
-            .unwrap();
-        assert!(unit.contains("EnvironmentFile="), "{unit}");
-        assert!(!unit.contains("tok"), "凭据不进 644 单元文件");
-        assert!(unit.contains("${FRP_TOKEN}"));
+        assert!(!plan.iter().any(|a| matches!(a, Action::UnitInstall { name, .. } if name == "chmlfrp.service")));
+        assert!(!plan.iter().any(|a| matches!(a, Action::UnitEnable { name } if name == "chmlfrp.service")));
+        // 遗留主机（chmlfrp.service 已装）→ UnitDisableRm 迁移收敛
+        let mut obs = obs_with_hw(Obs::default());
+        obs.units_installed.insert("chmlfrp.service".into());
+        obs.units_enabled.insert("chmlfrp.service".into());
+        obs.units_installed.insert("chmlfrp2.service".into());
+        let plan2 = plan_setup(&h, &obs);
+        assert!(plan2.iter().any(|a| matches!(a, Action::UnitDisableRm { name } if name == "chmlfrp.service")));
+        assert!(plan2.iter().any(|a| matches!(a, Action::UnitDisableRm { name } if name == "chmlfrp2.service")), "双隧道历史单元同样收敛");
+        // 迁移提示：旧单元在场时 plan_warnings 提醒 apply 后须 restart serve（隧道在其内）
+        let warns = plan_warnings(Path::new("/srv/showroom"), &obs);
+        assert!(warns.iter().any(|w| w.contains("restart showroom-api")), "{warns:?}");
     }
 
     // action_needed 每类正反例（plan-15 §8 清单）
@@ -1368,7 +1309,6 @@ mod tests {
         obs.units_enabled.insert("t.timer".into());
         obs.files.insert(unit_path("u.service"), "unit-body".into());
         obs.units_installed.insert("u.service".into());
-        obs.binaries.insert(PathBuf::from("/usr/local/frpc/frpc"));
 
         assert!(!action_needed(&Action::CreateDir { path: d.clone(), mode: 0o755 }, &obs));
         assert!(action_needed(&Action::CreateDir { path: PathBuf::from("/x/e"), mode: 0o755 }, &obs));
@@ -1416,12 +1356,8 @@ mod tests {
         assert!(action_needed(&Action::UnitEnable { name: "u.service".into() }, &obs));
         assert!(action_needed(&Action::UnitDisableRm { name: "u.service".into() }, &obs));
         assert!(!action_needed(&Action::UnitDisableRm { name: "zz.timer".into() }, &obs));
-        // Cmd 恒 needed（派生类只在触发时进 plan）；FrpcFetch 在/缺
+        // Cmd 恒 needed（派生类只在触发时进 plan）
         assert!(action_needed(&Action::Cmd { what: "x".into(), argv: vec!["echo".into()] }, &obs));
-        assert!(action_needed(
-            &Action::FrpcFetch { url: "u".into(), dest: PathBuf::from("/x/other") },
-            &obs
-        ));
     }
 
     // render_caddyfile 三组合快照（plan-15 §8：registry 缺 → 无 /v2；PUBLIC_HOST 空 → 无 site B）

@@ -571,7 +571,7 @@ function HostPanel() {
 
   function postBody(confirm: boolean) {
     const he: Record<string, unknown> = { ...(host?.host_env || {}) };
-    delete he.FRP_TOKEN; // 打码值回传会覆盖真实凭据——剔除
+    delete he.FRP_TOKEN; // 打码值回传会覆盖真实凭据——剔除（FRP_TOML 是文件路径非凭据，可回传）
     he.MIDDLEWARE = MW_NAMES.filter((n) => mw[n]).join(" ");
     const toYesNo = (v: unknown, y: string, n: string) => (v === true || v === y || v === "yes" || v === "true") ? y : n;
     he.CADDY = typeof he.CADDY === "boolean" ? toYesNo(he.CADDY, "yes", "no") : String(he.CADDY ?? "yes");

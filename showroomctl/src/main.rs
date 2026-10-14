@@ -10,6 +10,7 @@ mod serve;
 mod setup;
 mod state;
 mod streams;
+mod tunnel;
 mod unpack;
 
 use clap::{Parser, Subcommand};

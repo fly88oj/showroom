@@ -1,0 +1,99 @@
+# 生产环境通过环境变量注入 Token；示例地址需要替换。
+serverAddr = "frps.example.com"
+serverPort = 7000
+user = "office"
+loginFailExit = false
+auth.token = "{{ .Envs.FRP_TOKEN }}"
+auth.additionalScopes = ["HeartBeats", "NewWorkConns"]
+
+# 与 frps 的 CA 和证书名称保持一致。证书路径相对本配置文件。
+# transport.tls.trustedCaFile = "certs/ca.pem"
+# transport.tls.serverName = "frps.example.com"
+# transport.tls.certFile = "certs/client.pem"
+# transport.tls.keyFile = "certs/client-key.pem"
+
+transport.poolCount = 4
+transport.tcpMux = true
+transport.tls.enable = true
+webServer.addr = "127.0.0.1"
+webServer.port = 7400
+
+[[proxies]]
+name = "ssh"
+type = "tcp"
+localPort = 22
+remotePort = 6000
+transport.useEncryption = true
+transport.useCompression = true
+transport.bandwidthLimit = "10MB"
+transport.bandwidthLimitMode = "client"
+
+[[proxies]]
+name = "dns"
+type = "udp"
+localPort = 53
+remotePort = 6053
+
+[[proxies]]
+name = "website"
+type = "http"
+localPort = 8080
+customDomains = ["web.example.com"]
+locations = ["/"]
+hostHeaderRewrite = "internal.example"
+requestHeaders.set.x-source = "frpc-rust"
+responseHeaders.set.x-proxy = "frp"
+healthCheck.type = "http"
+healthCheck.path = "/healthz"
+healthCheck.intervalSeconds = 10
+healthCheck.timeoutSeconds = 3
+healthCheck.maxFailed = 3
+loadBalancer.group = "web-cluster"
+loadBalancer.groupKey = "{{ .Envs.FRP_GROUP_KEY }}"
+
+[[proxies]]
+name = "secure-website"
+type = "https"
+localPort = 443
+customDomains = ["secure.example.com"]
+
+[[proxies]]
+name = "private-ssh"
+type = "stcp"
+localPort = 22
+secretKey = "{{ .Envs.FRP_VISITOR_KEY }}"
+transport.useEncryption = true
+transport.useCompression = true
+
+[[proxies]]
+name = "private-dns"
+type = "sudp"
+localPort = 53
+secretKey = "{{ .Envs.FRP_VISITOR_KEY }}"
+
+[[proxies]]
+name = "shared-ssh"
+type = "tcpmux"
+localPort = 22
+customDomains = ["ssh.example.com"]
+multiplexer = "httpconnect"
+
+# 多台客户端共享 frps 时，访问者的 serverUser 指向提供代理的 user。
+[[visitors]]
+name = "connect-private-ssh"
+type = "stcp"
+serverUser = "office"
+serverName = "private-ssh"
+secretKey = "{{ .Envs.FRP_VISITOR_KEY }}"
+bindAddr = "127.0.0.1"
+bindPort = 6001
+transport.useEncryption = true
+transport.useCompression = true
+
+[[visitors]]
+name = "connect-private-dns"
+type = "sudp"
+serverUser = "office"
+serverName = "private-dns"
+secretKey = "{{ .Envs.FRP_VISITOR_KEY }}"
+bindPort = 6054

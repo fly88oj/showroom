@@ -27,7 +27,7 @@
 | `showroom-api.service` | 控制面 HTTP（127.0.0.1:8090） | root 运行，`Restart=always`（3s）；本机健康检查用 `systemctl is-active`，**不要**依赖 HTTP health（未签名恒 404） |
 | `caddy` | 静态面 + 反代（site A :80 内网面；site B :8081 公网面） | 项目路由变更由 showroomctl 自动 `caddy reload` |
 | `docker` / `containerd` | 容器运行时 | 项目容器 `--restart unless-stopped` |
-| `chmlfrp.service`（可选） | frpc 隧道（FRP=chmlfrp 时 setup 启用） | 转发公网流量到 127.0.0.1:8081（site B） |
+| （已废除）`chmlfrp.service` | 历史独立 frpc 单元——隧道已并入 showroom-api.service（D22）；setup 观察到即 `UnitDisableRm` 收敛移除 | 隧道日志看 `journalctl -u showroom-api`；状态看 `/_api/admin/host` 的 `frp.tunnel`（数据源 state/tunnel.status） |
 
 ### systemd timers（部署单元见 `deploy/*.timer`，setup 自动启用）
 

@@ -1,0 +1,57 @@
+[package]
+name = "frpc-rust"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.85"
+description = "Native asynchronous Rust client for the frp reverse proxy protocol"
+license = "Apache-2.0"
+
+[[bin]]
+name = "frpc-rust"
+path = "src/main.rs"
+
+[dependencies]
+anyhow = "1"
+aes = "0.8"
+base64 = "0.22"
+bytes = "1"
+clap = { version = "4", features = ["derive"] }
+crc32c = "0.6"
+futures = "0.3"
+glob = "0.3"
+md-5 = "0.10"
+pbkdf2 = "0.12"
+rand = "0.8"
+regex = "1"
+reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "json", "socks", "stream", "http2"] }
+rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12"] }
+rustls-pemfile = "2"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+serde_yaml = "0.9"
+sha1 = "0.10"
+snap = "1"
+socket2 = "0.6"
+subtle = "2"
+tokio = { version = "1", features = ["full"] }
+tokio-rustls = { version = "0.26", default-features = false, features = ["ring", "tls12"] }
+tokio-tungstenite = "0.28"
+tokio-util = { version = "0.7", features = ["compat", "rt"] }
+toml = "0.8"
+tracing = "0.1"
+tracing-appender = "0.2"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+url = "2"
+yamux = "0.14"
+quinn = { version = "0.11", default-features = false, features = ["runtime-tokio", "rustls-ring"] }
+axum = "0.8"
+tower-http = { version = "0.6", features = ["fs"] }
+hyper = { version = "1", features = ["server", "http1", "http2"] }
+hyper-util = { version = "0.1", features = ["tokio", "server-auto"] }
+http-body-util = "0.1"
+tower = { version = "0.5", features = ["util"] }
+
+[dev-dependencies]
+tempfile = "3"
+rcgen = "0.13"
+# [profile.release]（lto/strip）已移除——vendor 进 showroom workspace 后由根 profile 统辖

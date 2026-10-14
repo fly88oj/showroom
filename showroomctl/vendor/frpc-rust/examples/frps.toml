@@ -1,0 +1,5 @@
+# 供官方 frps 使用，与根目录 frpc.toml 配套，仅监听本机。
+bindAddr = "127.0.0.1"
+proxyBindAddr = "127.0.0.1"
+bindPort = 7000
+auth.token = "local-development-only"

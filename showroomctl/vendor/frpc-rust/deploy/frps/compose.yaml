@@ -1,0 +1,17 @@
+services:
+  frps:
+    image: fatedier/frps:v0.70.0
+    restart: unless-stopped
+    command: ["-c", "/etc/frp/frps.toml"]
+    environment:
+      FRP_TOKEN: "${FRP_TOKEN:?请设置 FRP_TOKEN，并与客户端 auth.token 保持一致}"
+    volumes:
+      - ./frps.toml:/etc/frp/frps.toml:ro
+    ports:
+      # 宿主机 7001 -> 容器内 frps 控制端口 7000。
+      - "7001:7000/tcp"
+      # 配套根目录 frpc.toml 的 web 代理（remotePort = 18080）。
+      - "18080:18080/tcp"
+      # 新增 TCP/UDP 代理时，按 remotePort 添加对应端口映射，例如：
+      # - "6000:6000/tcp"
+      # - "6053:6053/udp"

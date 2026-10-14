@@ -21,3 +21,15 @@ hex = "0.4"
 base64 = "0.22"
 # B14：opaque-ke/argon2 直接依赖删除——showroomctl 代码不经由它们调用（OPAQUE 两端实现
 # 收口在 common::opaque，见 showroom-common/Cargo.toml；版本锚定随 common 一致即可）。
+
+# 隧道（frp v1 客户端，合并进 serve）：vendor 钉死（上游 github.com/L1yp/frpc-rust @
+# e8920c6，Apache-2.0+NOTICE 随目录）——构建不依赖 github（项目网络环境现实）；
+# 互操作实测（tcp 传输 × 官方 frps 0.70.0 全绿）见 docs/architecture.md 隧道段。
+frpc-rust = { path = "vendor/frpc-rust" }
+# chmlfrp getcfg（cf-v2.uapis.cn）HTTPS 拉取；rustls 后端与 frpc-rust 的 reqwest 特性面统一。
+reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "json"] }
+# FRP_TOML（原生 frp 配置直载）反序列化；版本随 frpc-rust 锁定一致。
+toml = "0.8"
+
+[dev-dependencies]
+rsa = "0.9" # 网关回环测试：以平台公钥构造 SRTP 上行 wrap（版本随 common 锁定一致）
