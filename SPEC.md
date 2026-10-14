@@ -228,7 +228,8 @@ UI：发布页单表单双镜像源（tar 上传→压缩→上传→发布；�
   FRP=none  FRP_TOKEN=  FRP_TUNNEL=  FRP_TOML=   # 隧道（整文件 0600；见下行注）
   ```
   > 隧道并入 serve（D22）：`FRP=chmlfrp` 走 getcfg 拉取面板 ini（FRP_TOKEN/FRP_TUNNEL；
-  > 多隧道=FRP_TUNNEL 逗号列表，历史键 FRP_TUNNEL2 解析时折叠）；`FRP=native` 时
+  > 多隧道=FRP_TUNNEL 逗号列表——**每 ID 独立会话**（实测：getcfg 多 ID 合并调用仅支持
+  > 同节点，跨节点双入口必须分会话；历史键 FRP_TUNNEL2 解析时折叠）；`FRP=native` 时
   > FRP_TOML=指向完整 frpc TOML 的**文件路径**（自建 frps/其它中转商；host.env 是单行
   > kv，内联多行 TOML 存活不了落盘往返——TOML 连同凭据住独立 0600 文件如
   > /etc/showroom/frpc-native.toml，**会话重建时**重读：frpc 内层重连不重读配置，

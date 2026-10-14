@@ -617,8 +617,8 @@ pub fn disabled_middleware(root: &Path) -> Vec<String> {
 
 /// host_view 纯核（drift 来源：mw 实况 + redis 漂移 + caddy/单元存在性 via observe）。
 /// mw_actual=(mw, 容器实况)；pool 由调用方喂（redis_pool_snapshot/json）；
-/// frp_tunnel 为隧道会话状态字符串（数据源 state/tunnel.status 落盘文件，见
-/// tunnel::status_write/status_poller 与 frp_tunnel_status：connected/connecting/
+/// frp_tunnel 为隧道会话状态字符串（数据源 state/tunnel/*.status 每会话一文件，见
+/// tunnel::status_write/status_poller 与 frp_tunnel_status 聚合：connected/connecting/
 /// error/stale/未运行——FRP=none 时忽略）。
 pub fn host_view_json(
     host: &HostEnv,
@@ -739,25 +739,49 @@ pub fn host_view(root: &Path) -> R<Value> {
     Ok(host_view_json(&host, &policy, &obs, &mw_actual, &redis_pool_snapshot(root), &frp_status))
 }
 
-/// 隧道状态读取（state/tunnel.status）：`connected: …` / `connecting` / `error: …` /
-/// `未运行`（缺文件）/ `stale: …`（>90s 未更新——serve 停摆或隧道循环卡死）。
-pub fn frp_tunnel_status(root: &Path) -> String {
-    let Ok(t) = fs::read_to_string(root.join("state/tunnel.status")) else {
-        return "未运行".into();
-    };
+/// 单会话状态文件解析 → (kind, 节点, 详情)；坏行/缺文件按 None 处理。
+fn tunnel_session_state(path: &Path) -> Option<(String, String, String)> {
+    let t = fs::read_to_string(path).ok()?;
     let mut it = t.trim_end().splitn(4, '|');
-    let (Some(ts), Some(kind), node, detail) = (it.next(), it.next(), it.next().unwrap_or("-"), it.next().unwrap_or("")) else {
+    let ts = it.next()?.parse::<u64>().ok()?;
+    let kind = it.next()?.to_string();
+    let node = it.next().unwrap_or("-").to_string();
+    let detail = it.next().unwrap_or("").to_string();
+    let fresh = state::unix_now().saturating_sub(ts) <= 90;
+    // 过期统一折算成 stale（读取侧只有一个时钟判定点）
+    let kind = if fresh { kind } else { "stale".to_string() };
+    Some((kind, node, detail))
+}
+
+/// 隧道状态聚合（state/tunnel/*.status，每会话一文件）：
+/// 无文件=未运行；任一 error→error（取首条详情）；否则任一 stale→stale；任一
+/// connecting→connecting；全 ok→`connected: n 会话（node1 · node2）`。
+pub fn frp_tunnel_status(root: &Path) -> String {
+    let dir = crate::tunnel::status_dir(root);
+    let Ok(entries) = fs::read_dir(&dir) else { return "未运行".into() };
+    let states: Vec<(String, String, String)> = entries
+        .flatten()
+        .filter(|e| e.path().extension().is_some_and(|x| x == "status"))
+        .filter_map(|e| tunnel_session_state(&e.path()))
+        .collect();
+    if states.is_empty() {
         return "未运行".into();
-    };
-    let Ok(ts) = ts.parse::<u64>() else { return "未运行".into() };
-    if state::unix_now().saturating_sub(ts) > 90 {
+    }
+    if let Some((_, node, detail)) = states.iter().find(|s| s.0 == "error") {
+        return format!("error: {node} {detail}");
+    }
+    if let Some((_, _, detail)) = states.iter().find(|s| s.0 == "stale") {
         return format!("stale: {detail}");
     }
-    match kind {
-        "ok" => format!("connected: {node}（{detail}）"),
-        "connecting" => "connecting".into(),
-        _ => format!("error: {detail}"),
+    if states.iter().any(|s| s.0 == "connecting") {
+        return "connecting".into();
     }
+    if states.len() == 1 {
+        let (_, n, d) = &states[0];
+        return format!("connected: {n}（{d}）");
+    }
+    let nodes: Vec<String> = states.iter().map(|(_, n, _)| n.clone()).collect();
+    format!("connected: {} 会话（{}）", states.len(), nodes.join(" · "))
 }
 
 #[cfg(test)]
@@ -1099,16 +1123,25 @@ mod tests {
         let v4 = host_view_json(&h3, &policy, &obs_ok, &mw_actual, &tight, "connecting");
         assert!(v4["drift"].as_array().unwrap().iter().all(|d| d["item"] != "tunnel"));
 
-        // frp_tunnel_status：缺文件=未运行；新鲜 ok=connected；过期=stale；坏行容错
+        // frp_tunnel_status（目录聚合）：空=未运行；单 ok 保留详情；双 ok 摘要；
+        // 任一 error 优先透出；过期折算 stale；坏行容错
         assert_eq!(frp_tunnel_status(&root), "未运行");
-        fs::create_dir_all(root.join("state")).unwrap();
+        let tdir = crate::tunnel::status_dir(&root);
+        fs::create_dir_all(&tdir).unwrap();
         let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_secs();
-        fs::write(root.join("state/tunnel.status"), format!("{now}|ok|node1:7000|2 条代理在线\n")).unwrap();
+        fs::write(tdir.join("362002.status"), format!("{now}|ok|node1:7000|2 条代理在线\n")).unwrap();
         assert_eq!(frp_tunnel_status(&root), "connected: node1:7000（2 条代理在线）");
-        fs::write(root.join("state/tunnel.status"), format!("{}|error|node1|getcfg 失败\n", now - 200)).unwrap();
-        assert_eq!(frp_tunnel_status(&root), "stale: getcfg 失败");
-        fs::write(root.join("state/tunnel.status"), "垃圾行\n").unwrap();
-        assert_eq!(frp_tunnel_status(&root), "未运行");
+        fs::write(tdir.join("361356.status"), format!("{now}|ok|node2:7000|1 条代理在线\n")).unwrap();
+        assert_eq!(frp_tunnel_status(&root), "connected: 2 会话（node1:7000 · node2:7000）");
+        // 任一 error → error（另一会话健康也不掩盖）
+        fs::write(tdir.join("361356.status"), format!("{now}|error|node2:7000|面板拒绝\n")).unwrap();
+        assert_eq!(frp_tunnel_status(&root), "error: node2:7000 面板拒绝");
+        // 过期（>90s）→ stale 优先级在 error 之下、connecting 之上
+        fs::write(tdir.join("361356.status"), format!("{}|ok|node2:7000|1 条代理在线\n", now - 200)).unwrap();
+        assert_eq!(frp_tunnel_status(&root), "stale: 1 条代理在线");
+        // 坏行会话被忽略（其余会话照常聚合）
+        fs::write(tdir.join("361356.status"), "垃圾行\n").unwrap();
+        assert_eq!(frp_tunnel_status(&root), "connected: node1:7000（2 条代理在线）");
         let _ = fs::remove_dir_all(&root);
     }
 

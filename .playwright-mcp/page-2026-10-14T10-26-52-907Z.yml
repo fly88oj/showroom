@@ -1,0 +1,36 @@
+- generic [ref=e2]:
+  - generic [ref=e22]:
+    - banner [ref=e23]:
+      - generic [ref=e24]:
+        - heading "Showroom 控制台" [level=1] [ref=e26]
+        - button "qavis" [ref=e27] [cursor=pointer]
+    - generic [ref=e29]:
+      - navigation "Main" [ref=e32]:
+        - list [ref=e34]:
+          - listitem [ref=e35]:
+            - generic [ref=e36] [cursor=pointer]: 我的项目
+          - listitem [ref=e37]:
+            - generic [ref=e38] [cursor=pointer]: 发布
+          - listitem [ref=e39]:
+            - generic [ref=e40] [cursor=pointer]: 镜像库
+          - listitem [ref=e41]:
+            - generic [ref=e42] [cursor=pointer]: 数据
+          - listitem [ref=e43]:
+            - generic [ref=e44] [cursor=pointer]: 帮助
+      - tabpanel [ref=e48]:
+        - generic [ref=e49]:
+          - heading "项目列表" [level=2] [ref=e50]
+          - table [ref=e53]:
+            - rowgroup [ref=e54]:
+              - row [ref=e55]:
+                - columnheader "名称" [ref=e56]
+                - columnheader "状态" [ref=e57]
+                - columnheader "对外 URL" [ref=e58]
+                - columnheader "版本" [ref=e59]
+                - columnheader "更新" [ref=e60]
+                - columnheader "日志" [ref=e61]
+                - columnheader "操作" [ref=e62]
+            - rowgroup [ref=e63]:
+              - row [ref=e64]:
+                - cell "正在加载…" [ref=e65]
+  - region "Notifications alt+T"

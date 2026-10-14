@@ -30,14 +30,32 @@ pub const UPSTREAM_PORT: u16 = 8081;
 /// 外层重试间隔（getcfg 失败 / 客户端致命退出后的会话级退避；连接级重连由客户端自理）。
 const RETRY: Duration = Duration::from_secs(30);
 
-/// 隧道配置源。
+/// 隧道配置源（**一会话一源**：每个源一条独立 getcfg/客户端/重试循环——实测教训：
+/// getcfg 多 ID 合并调用仅支持同节点，跨节点双入口必须分会话；代理名保持面板原名，
+/// 不触碰面板 checkproxy 校验）。
 #[derive(Debug, Clone)]
 pub enum Source {
-    /// chmlfrp：面板 usertoken + 隧道 ID（可逗号分隔多个）→ getcfg ini。
-    Chmlfrp { token: String, ids: String },
+    /// chmlfrp：面板 usertoken + **单条**隧道 ID → getcfg ini。
+    Chmlfrp { token: String, id: String },
     /// 原生 frp / 其它中转商：frpc TOML 文件路径（host.env FRP_TOML；会话重建时重读——
     /// 内层重连复用旧配置，致命错误后 ≤30s 外层重试或 restart 生效）。
     Toml(std::path::PathBuf),
+}
+
+/// host.env 的 FRP_TUNNEL（逗号列表）+ FRP_TOML → 会话源清单。
+/// chmlfrp 每 ID 一源；native 单文件一源（多节点 native 需多文件，host.env 单键单文件）。
+fn sources_from(host: &HostEnv) -> Vec<Source> {
+    match host.frp {
+        FrpMode::None => vec![],
+        FrpMode::Chmlfrp => host
+            .frp_tunnel
+            .split(',')
+            .map(|s| s.trim())
+            .filter(|s| !s.is_empty())
+            .map(|id| Source::Chmlfrp { token: host.frp_token.clone(), id: id.to_string() })
+            .collect(),
+        FrpMode::Native => vec![Source::Toml(std::path::PathBuf::from(host.frp_toml_path.clone()))],
+    }
 }
 
 /// 解析一份可运行的客户端配置：local 统一改指网关，校验至少一条启用的 tcp 代理。
@@ -45,8 +63,8 @@ pub enum Source {
 async fn resolve(source: &Source) -> R<(frpc_rust::config::Config, Vec<String>)> {
     let mut pre_skipped = Vec::new();
     let mut cfg = match source {
-        Source::Chmlfrp { token, ids } => {
-            let ini = chmlfrp::fetch_ini(token, ids)
+        Source::Chmlfrp { token, id } => {
+            let ini = chmlfrp::fetch_ini(token, id)
                 .await
                 .map_err(|e| ApiError::new("E_NET", format!("getcfg: {e}")))?;
             let (cfg, ini_skipped) = chmlfrp::ini_to_config(&ini)?;
@@ -90,14 +108,11 @@ async fn resolve(source: &Source) -> R<(frpc_rust::config::Config, Vec<String>)>
 /// 永不返回 Err——所有失败记日志后按 RETRY 重试，控制面照常服务。
 pub async fn supervise(root: PathBuf) {
     let host = HostEnv::load(&root);
-    let source = match host.frp {
-        FrpMode::None => {
-            eprintln!("showroomctl: tunnel: FRP=none，隧道未启用");
-            return;
-        }
-        FrpMode::Chmlfrp => Source::Chmlfrp { token: host.frp_token.clone(), ids: host.frp_tunnel.clone() },
-        FrpMode::Native => Source::Toml(std::path::PathBuf::from(host.frp_toml_path)),
-    };
+    let sources = sources_from(&host);
+    if sources.is_empty() {
+        eprintln!("showroomctl: tunnel: FRP=none，隧道未启用");
+        return;
+    }
     if host.public_host.is_empty() {
         eprintln!("showroomctl: tunnel: 警告：PUBLIC_HOST 为空（site B 未渲染），隧道流量将无处落地");
     }
@@ -119,21 +134,28 @@ pub async fn supervise(root: PathBuf) {
     );
     let keys = keys.map(std::sync::Arc::new);
     tokio::spawn(gateway::serve(listener, UPSTREAM_PORT, keys));
-    // 会话循环：会话重建时重读配置（getcfg/FRP_TOML 文件）——内层网络重连不触发此处
-    loop {
-        match run_once(&source, &root).await {
-            Ok(info) => {
-                // 短暂态不落盘：新会话 poller ≤10s 内会写 connecting/ok，避免 error 语义污染
-                eprintln!("showroomctl: tunnel: {info}——{RETRY:?} 后重建会话");
+    // 每源一个会话任务（独立 getcfg/客户端/重试；一源抖动不拖累其他源）
+    for source in sources {
+        let root = root.clone();
+        tokio::spawn(async move {
+            let key = status_key(&source);
+            // 会话循环：会话重建时重读配置（getcfg/FRP_TOML 文件）——内层网络重连不触发此处
+            loop {
+                match run_once(&source, &root).await {
+                    Ok(info) => {
+                        // 短暂态不落盘：新会话 poller ≤10s 内会写 connecting/ok，避免 error 语义污染
+                        eprintln!("showroomctl: tunnel[{key}]: {info}——{RETRY:?} 后重建会话");
+                    }
+                    Err(e) => {
+                        // resolve（getcfg/读文件/解析）失败时 poller 尚未存在——失败详情必须进
+                        // 状态文件，否则 frp.tunnel 视图恒显「未运行」而非真实原因
+                        status_write(&root, &key, "error", "-", &e.msg);
+                        eprintln!("showroomctl: tunnel[{key}]: {e}——{RETRY:?} 后重试");
+                    }
+                }
+                tokio::time::sleep(RETRY).await;
             }
-            Err(e) => {
-                // resolve（getcfg/读文件/解析）失败时 poller 尚未存在——失败详情必须进
-                // state/tunnel.status，否则 frp.tunnel 视图恒显「未运行」而非真实原因
-                status_write(&root, "error", "-", &e.msg);
-                eprintln!("showroomctl: tunnel: {e}——{RETRY:?} 后重试");
-            }
-        }
-        tokio::time::sleep(RETRY).await;
+        });
     }
 }
 
@@ -152,7 +174,13 @@ async fn run_once(source: &Source, root: &std::path::Path) -> R<String> {
     // 会话存活旗：run 返回即置 false——poller 必须随会话退出，否则旧轮询任务持有已死
     // Shared 持续写陈旧状态，与新会话的 poller 互相踩踏（评审实锤）
     let alive = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(true));
-    tokio::spawn(status_poller(root.to_path_buf(), client.shared.clone(), node.clone(), alive.clone()));
+    tokio::spawn(status_poller(
+        root.to_path_buf(),
+        status_key(source),
+        client.shared.clone(),
+        node.clone(),
+        alive.clone(),
+    ));
     let r = client.run().await;
     alive.store(false, std::sync::atomic::Ordering::Relaxed);
     r.map_err(|e| ApiError::new("E_NET", format!("隧道会话结束: {e:#}")))?;
@@ -161,10 +189,28 @@ async fn run_once(source: &Source, root: &std::path::Path) -> R<String> {
 
 // —— 隧道状态落盘（host_view 的 frp.tunnel 数据源；比 grep journald 稳定可测）——
 
+/// 会话状态目录（每会话一文件；读取侧聚合，见 middleware::frp_tunnel_status）。
+pub fn status_dir(root: &std::path::Path) -> std::path::PathBuf {
+    root.join("state/tunnel")
+}
+
+/// 源 → 稳定文件键（chmlfrp=隧道 ID；native=TOML 文件名去扩展——避免路径斜杠进文件名）。
+fn status_key(source: &Source) -> String {
+    match source {
+        Source::Chmlfrp { id, .. } => id.clone(),
+        Source::Toml(p) => p
+            .file_stem()
+            .map(|s| s.to_string_lossy().to_string())
+            .unwrap_or_else(|| "native".into()),
+    }
+}
+
 /// 状态文件行形状：`<unix秒>|<ok|connecting|error>|<节点>|<详情>`。
-fn status_write(root: &std::path::Path, kind: &str, node: &str, detail: &str) {
+fn status_write(root: &std::path::Path, key: &str, kind: &str, node: &str, detail: &str) {
+    let dir = status_dir(root);
+    let _ = std::fs::create_dir_all(&dir);
     let _ = std::fs::write(
-        root.join("state/tunnel.status"),
+        dir.join(format!("{key}.status")),
         format!("{}|{}|{}|{}\n", crate::state::unix_now(), kind, node, detail),
     );
 }
@@ -174,6 +220,7 @@ fn status_write(root: &std::path::Path, kind: &str, node: &str, detail: &str) {
 /// 防旧轮询任务持有已死 Shared 与新会话 poller 踩踏）。
 async fn status_poller(
     root: PathBuf,
+    key: String,
     shared: std::sync::Arc<frpc_rust::service::Shared>,
     node: String,
     alive: std::sync::Arc<std::sync::atomic::AtomicBool>,
@@ -193,7 +240,7 @@ async fn status_poller(
         } else {
             ("error", node.as_str(), format!("{err}（重连 {reconnects} 次）"))
         };
-        status_write(&root, cur.0, cur.1, &cur.2);
+        status_write(&root, &key, cur.0, cur.1, &cur.2);
         tokio::time::sleep(Duration::from_secs(10)).await;
     }
 }

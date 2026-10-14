@@ -21,12 +21,17 @@ struct GetCfgResp {
     success: bool,
     #[serde(default)]
     message: String,
-    cfg: String,
+    /// 失败响应无此字段（实测：面板恒 HTTP 200，成败只看 success 旗标）——必选会先炸
+    /// 反序列化、吞掉面板的清晰拒绝原因（真机实弹教训）。
+    #[serde(default)]
+    cfg: Option<String>,
 }
 
-/// 拉取面板 ini（getcfg）。多隧道 ID 逗号分隔（FRP_TUNNEL2 场景合一）。
-pub async fn fetch_ini(token: &str, ids: &str) -> Result<String, String> {
-    if token.trim().is_empty() || ids.trim().is_empty() {
+/// 拉取单条隧道的面板 ini（getcfg，**每 ID 一次调用**）。
+/// 实测：多 ID 合并调用仅支持同节点隧道（跨节点报「所有隧道必须属于同一节点」）——
+/// 故多隧道=每 ID 独立会话（见 tunnel::supervise），不做合并调用。
+pub async fn fetch_ini(token: &str, id: &str) -> Result<String, String> {
+    if token.trim().is_empty() || id.trim().is_empty() {
         return Err("FRP_TOKEN/FRP_TUNNEL 为空".into());
     }
     let resp = reqwest::Client::builder()
@@ -34,16 +39,17 @@ pub async fn fetch_ini(token: &str, ids: &str) -> Result<String, String> {
         .build()
         .map_err(|e| format!("http 客户端构建: {e}"))?
         .get(API_URL)
-        .query(&[("action", "getcfg"), ("token", token), ("id", ids)])
+        .query(&[("action", "getcfg"), ("token", token), ("id", id)])
         .send()
         .await
         .map_err(|e| format!("请求 cf-v2.uapis.cn: {e}"))?;
     let status = resp.status();
-    let body: GetCfgResp = resp.json().await.map_err(|e| format!("响应解析（{status}）: {e}"))?;
+    let text = resp.text().await.map_err(|e| format!("读响应体（{status}）: {e}"))?;
+    let body: GetCfgResp = serde_json::from_str(&text).map_err(|e| format!("响应解析（{status}）: {e}；响应体前 120 字: {}", text.chars().take(120).collect::<String>()))?;
     if !body.success {
-        return Err(format!("面板拒绝: {}", body.message));
+        return Err(format!("面板拒绝（隧道 {id}）: {}", body.message));
     }
-    Ok(body.cfg)
+    body.cfg.ok_or_else(|| format!("面板 success 但缺 cfg 字段（隧道 {id}）"))
 }
 
 /// 宽容的老式 ini 解析：[节] / key = value / ; 与 # 注释行 / 空行；内联注释不剥离
