@@ -187,6 +187,14 @@ impl HostEnv {
         )
     }
 
+    /// 严格读盘：坏值/坏组合如实 Err（隧道热重载用——防 setup 非原子写盘的中间态把
+    /// 在线会话拆掉；普通调用方继续用 load 的宽容语义）。
+    pub fn try_load(root: &Path) -> R<Self> {
+        let text = fs::read_to_string(host_env_path(root))
+            .map_err(|e| ApiError::state(format!("读 host.env: {e}")))?;
+        Self::parse(&text)
+    }
+
     /// 读盘；缺文件 → default_for(first_lan_ip())（首跑，不落盘——写盘是 setup 的 WriteFile Action）。
     /// 坏文件如实告警并按缺省形状处理（setup diff 会显示将重写的 host.env）。
     pub fn load(root: &Path) -> Self {

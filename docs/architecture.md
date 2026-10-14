@@ -50,7 +50,7 @@
 | `showroomctl` | 主机工具（`showroomctl`） | HTTP 控制面（`serve`，仅监听 127.0.0.1:8090）+ 隧道（D22：frp 客户端内嵌 vendored frpc-rust，SRTP/明文混合网关 :8082→:8081，凭据经 host.env，无独立 frpc 单元）+ 全部运维子命令：user 管理（含密码发放）、发布内核、生命周期、reconcile/autoheal/gc、快照、导入、主机自举（`setup`/`middleware`/`upgrade`）。状态存 `/srv/showroom`，全部外部世界调用集中在 `dockerops`（docker CLI / psql / caddy / 裸 TCP registry 客户端） |
 | `showroom-web` | 静态资源（`dist/`） | React 单页工程（Vite+TS+shadcn/ui，产物 `console/dist/` 入库：index.html + assets/* 哈希分包 + wasm 于 public/ 复制；与垫片源码同一提交内重建）。一步登录（账号+密码，OPAQUE）+ 五标签信息架构（**我的项目**/发布/镜像库/数据/帮助，帮助页二级菜单五面板：账号/CLI 使用/镜像规范/工具下载/错误码）+ 管理页五面板（账号/全部项目/平台状态/宿主配置/实时事件；仅管理员账号可见，admin 按账号级判定） |
 
-内部深模块（showroomctl）：`state`（状态读写+纯函数：命名/policy/conf/端口/redisdb 分配/caddy 片段）、`dockerops`（外部世界）、`publish`（publish/import 内核，serve 与 CLI 子命令共用）、`ops`（生命周期、user/key 管理、key-bind 继承与 GC）、`serve`（axum 统一 fallback 分发、`/_api/auth/*` 免签族与限流）、`dbmaint`（db-sql/dump 三段式）、`streams`（ndjson 实时流）、`setup`（声明式期望状态引擎与 Action 体系）、`middleware`（host.env 契约与编排/扩容状态机）、`unpack`（信封解包）、`tunnel`（隧道主管：`Source` 配置源抽象 + `chmlfrp` getcfg/ini 映射 + `gateway` SRTP/明文混合网关 + 状态落盘 state/tunnel.status）。
+内部深模块（showroomctl）：`state`（状态读写+纯函数：命名/policy/conf/端口/redisdb 分配/caddy 片段）、`dockerops`（外部世界）、`publish`（publish/import 内核，serve 与 CLI 子命令共用）、`ops`（生命周期、user/key 管理、key-bind 继承与 GC）、`serve`（axum 统一 fallback 分发、`/_api/auth/*` 免签族与限流）、`dbmaint`（db-sql/dump 三段式）、`streams`（ndjson 实时流）、`setup`（声明式期望状态引擎与 Action 体系）、`middleware`（host.env 契约与编排/扩容状态机）、`unpack`（信封解包）、`tunnel`（隧道主管：`Source` 配置源抽象——每 ID/文件独立会话 + `chmlfrp` getcfg/ini 映射 + `gateway` SRTP/明文混合网关 + **热重载**（2s 轮询 FRP 签名，变化即 abort 重建会话，控制台/setup/手编统一路径）+ 每会话状态落盘 state/tunnel/*.status 聚合）。
 
 ## 2. 数据流
 

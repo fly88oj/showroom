@@ -105,15 +105,10 @@ async fn resolve(source: &Source) -> R<(frpc_rust::config::Config, Vec<String>)>
 }
 
 /// 隧道主管：serve 拉起（进程生命周期即隧道生命周期；serve Restart=always 兜底）。
-/// 永不返回 Err——所有失败记日志后按 RETRY 重试，控制面照常服务。
+/// 网关恒驻（FRP=none 时无会话但监听无害，免去模式切换重绑）；会话随 FRP 签名热重载。
 pub async fn supervise(root: PathBuf) {
-    let host = HostEnv::load(&root);
-    let sources = sources_from(&host);
-    if sources.is_empty() {
-        eprintln!("showroomctl: tunnel: FRP=none，隧道未启用");
-        return;
-    }
-    if host.public_host.is_empty() {
+    let host0 = HostEnv::load(&root);
+    if host0.frp != crate::middleware::FrpMode::None && host0.public_host.is_empty() {
         eprintln!("showroomctl: tunnel: 警告：PUBLIC_HOST 为空（site B 未渲染），隧道流量将无处落地");
     }
     // 平台私钥（serve 启动序列已确保生成；此处缺失只禁用密封通道，不拦明文直通）
@@ -134,28 +129,82 @@ pub async fn supervise(root: PathBuf) {
     );
     let keys = keys.map(std::sync::Arc::new);
     tokio::spawn(gateway::serve(listener, UPSTREAM_PORT, keys));
-    // 每源一个会话任务（独立 getcfg/客户端/重试；一源抖动不拖累其他源）
-    for source in sources {
-        let root = root.clone();
-        tokio::spawn(async move {
-            let key = status_key(&source);
-            // 会话循环：会话重建时重读配置（getcfg/FRP_TOML 文件）——内层网络重连不触发此处
-            loop {
-                match run_once(&source, &root).await {
-                    Ok(info) => {
-                        // 短暂态不落盘：新会话 poller ≤10s 内会写 connecting/ok，避免 error 语义污染
-                        eprintln!("showroomctl: tunnel[{key}]: {info}——{RETRY:?} 后重建会话");
-                    }
-                    Err(e) => {
-                        // resolve（getcfg/读文件/解析）失败时 poller 尚未存在——失败详情必须进
-                        // 状态文件，否则 frp.tunnel 视图恒显「未运行」而非真实原因
-                        status_write(&root, &key, "error", "-", &e.msg);
-                        eprintln!("showroomctl: tunnel[{key}]: {e}——{RETRY:?} 后重试");
-                    }
+    // 热重载（用户裁决）：每 2s 对比 FRP 签名（mode/token/tunnels/toml）——变化即中止旧会话
+    // 任务、按新源重建。控制台保存（admin POST 落盘 host.env）、setup --apply、手工编辑
+    // 三种途径统一走此路径，无需重启 serve。try_load 失败（如 setup 非原子写的中间态）
+    // 保持上一轮会话不动，坏文件不自拆。
+    let mut cur_sig: Option<String> = None;
+    let mut handles: Vec<tokio::task::JoinHandle<()>> = Vec::new();
+    loop {
+        if let Ok(host) = HostEnv::try_load(&root) {
+            let sig = frp_signature(&host);
+            if cur_sig.as_deref() != Some(sig.as_str()) {
+                for h in handles.drain(..) {
+                    h.abort(); // 会话任务与其 poller（watch 通道随 drop 关闭）一并退出
                 }
-                tokio::time::sleep(RETRY).await;
+                let sources = sources_from(&host);
+                let live: Vec<String> = sources.iter().map(status_key).collect();
+                status_gc(&root, &live); // 移除已下线会话的状态文件（防聚合视图读尸）
+                if sources.is_empty() {
+                    eprintln!("showroomctl: tunnel: FRP=none，隧道停用");
+                }
+                for source in sources {
+                    let root = root.clone();
+                    handles.push(tokio::spawn(session_loop(root, source)));
+                }
+                let n = handles.len();
+                eprintln!("showroomctl: tunnel: 配置已生效（{n} 会话，签名 {sig}）");
+                cur_sig = Some(sig);
             }
-        });
+        }
+        tokio::time::sleep(Duration::from_secs(2)).await;
+    }
+}
+
+/// FRP 相关键的签名（变化才重建会话——无关键改动如 MIDDLEWARE 不扰隧道）。
+/// token 只进「设/空」位（打码）——签名会进 journal，凭据不入日志。
+fn frp_signature(host: &HostEnv) -> String {
+    format!(
+        "{}|{}|{}|{}",
+        host.frp.as_str(),
+        if host.frp_token.is_empty() { "空" } else { "<set>" },
+        host.frp_tunnel,
+        host.frp_toml_path
+    )
+}
+
+/// 单源会话循环（外层 30s 重试；由 supervise 在配置变化时 abort 整任务）。
+async fn session_loop(root: PathBuf, source: Source) {
+    let key = status_key(&source);
+    loop {
+        match run_once(&source, &root).await {
+            Ok(info) => {
+                // 短暂态不落盘：新会话 poller ≤10s 内会写 connecting/ok，避免 error 语义污染
+                eprintln!("showroomctl: tunnel[{key}]: {info}——{RETRY:?} 后重建会话");
+            }
+            Err(e) => {
+                // resolve（getcfg/读文件/解析）失败时 poller 尚未存在——失败详情必须进
+                // 状态文件，否则 frp.tunnel 视图恒显「未运行」而非真实原因
+                status_write(&root, &key, "error", "-", &e.msg);
+                eprintln!("showroomctl: tunnel[{key}]: {e}——{RETRY:?} 后重试");
+            }
+        }
+        tokio::time::sleep(RETRY).await;
+    }
+}
+
+/// 清掉不在当前会话键集合里的状态文件（会话下线后旧文件会让聚合视图读到尸体）。
+fn status_gc(root: &std::path::Path, live_keys: &[String]) {
+    let dir = status_dir(root);
+    let Ok(entries) = std::fs::read_dir(&dir) else { return };
+    for e in entries.flatten() {
+        let path = e.path();
+        let keep = path
+            .file_stem()
+            .is_some_and(|s| live_keys.iter().any(|k| k.as_str() == s.to_string_lossy()));
+        if !keep {
+            let _ = std::fs::remove_file(&path);
+        }
     }
 }
 
@@ -171,18 +220,19 @@ async fn run_once(source: &Source, root: &std::path::Path) -> R<String> {
     eprintln!("showroomctl: tunnel: 连接 {node}（代理 {names:?}，tls={}）", cfg.transport.tls.enable);
     // config_path 仅客户端 admin/reload 使用（未启用 web_server，此路径不被读取）
     let client = frpc_rust::service::Client::new(cfg, root.join("state/tunnel-client.toml"));
-    // 会话存活旗：run 返回即置 false——poller 必须随会话退出，否则旧轮询任务持有已死
-    // Shared 持续写陈旧状态，与新会话的 poller 互相踩踏（评审实锤）
-    let alive = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(true));
+    // 会话存活通道：正常返回 send 关闭；被 supervise abort 时 tx 随本 future drop——
+    // 两条路径下 poller 的 rx.changed() 都立即到头退出（旧 AtomicBool 方案在 abort
+    // 路径不会置旗，poller 变孤儿持续写已死客户端的状态，评审实锤）
+    let (alive_tx, alive_rx) = tokio::sync::watch::channel(());
     tokio::spawn(status_poller(
         root.to_path_buf(),
         status_key(source),
         client.shared.clone(),
         node.clone(),
-        alive.clone(),
+        alive_rx,
     ));
     let r = client.run().await;
-    alive.store(false, std::sync::atomic::Ordering::Relaxed);
+    drop(alive_tx);
     r.map_err(|e| ApiError::new("E_NET", format!("隧道会话结束: {e:#}")))?;
     Ok(format!("客户端会话正常退出（{node}）"))
 }
@@ -216,19 +266,16 @@ fn status_write(root: &std::path::Path, key: &str, kind: &str, node: &str, detai
 }
 
 /// 周期采样客户端 Snapshot（10s；**每轮恒写盘**刷新时间戳——读取侧的 90s 新鲜度判定
-/// 依赖它，change-only 会把健康会话误判成 stale（评审实锤）；alive=false 即随会话退出，
-/// 防旧轮询任务持有已死 Shared 与新会话 poller 踩踏）。
+/// 依赖它，change-only 会把健康会话误判成 stale（评审实锤）；会话结束（正常 send 关闭
+/// 或 abort 后 tx drop）时 rx.changed() 到头即退出，防孤儿 poller 写已死客户端的状态）。
 async fn status_poller(
     root: PathBuf,
     key: String,
     shared: std::sync::Arc<frpc_rust::service::Shared>,
     node: String,
-    alive: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    mut alive: tokio::sync::watch::Receiver<()>,
 ) {
     loop {
-        if !alive.load(std::sync::atomic::Ordering::Relaxed) {
-            return;
-        }
         let (connected, err, reconnects, proxies) = {
             let s = shared.status.read().await;
             (s.connected, s.last_error.clone(), s.reconnects, s.proxies.len())
@@ -241,7 +288,14 @@ async fn status_poller(
             ("error", node.as_str(), format!("{err}（重连 {reconnects} 次）"))
         };
         status_write(&root, &key, cur.0, cur.1, &cur.2);
-        tokio::time::sleep(Duration::from_secs(10)).await;
+        tokio::select! {
+            _ = tokio::time::sleep(Duration::from_secs(10)) => {}
+            r = alive.changed() => {
+                if r.is_err() {
+                    return; // tx 已 drop（会话结束/abort）
+                }
+            }
+        }
     }
 }
 

@@ -232,8 +232,10 @@ UI：发布页单表单双镜像源（tar 上传→压缩→上传→发布；�
   > 同节点，跨节点双入口必须分会话；历史键 FRP_TUNNEL2 解析时折叠）；`FRP=native` 时
   > FRP_TOML=指向完整 frpc TOML 的**文件路径**（自建 frps/其它中转商；host.env 是单行
   > kv，内联多行 TOML 存活不了落盘往返——TOML 连同凭据住独立 0600 文件如
-  > /etc/showroom/frpc-native.toml，**会话重建时**重读：frpc 内层重连不重读配置，
-  > 改动须重启 serve 或等致命错误后的外层重试）。不再有独立 frpc 单元与二进制下载。
+  > /etc/showroom/frpc-native.toml，**会话重建时**重读：frpc 内层重连不重读配置）。
+  > **热重载**：FRP 四键任一变化（控制台两段式/setup --apply/手工编辑，均落盘 host.env）
+  → serve 内隧道模块 ≤2s 检出签名变化 → 中止旧会话任务、按新源重建，无需重启。
+  > 不再有独立 frpc 单元与二进制下载。
   > 勘误（plan-15 落地）：REDIS_DBS/DISK_RESERVE_GB/UPLOAD_SPACE_FACTOR/RESERVE_MEM_MB
   > 属业务限额，归 `state/policy.env`（§13.3/§14.4 已落），不在 host.env——两类键的变更主体
   > 与风险等级不同（限额=管理员日常调节；设施=setup 幂等收敛），分层不合并以免双写漂移。

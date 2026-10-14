@@ -9,6 +9,7 @@ import {
 import { Field, FieldDescription, FieldError, FieldGroup, FieldLabel } from "@/components/ui/field";
 import { Input } from "@/components/ui/input";
 import { ScrollArea } from "@/components/ui/scroll-area";
+import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { Separator } from "@/components/ui/separator";
 import { Switch } from "@/components/ui/switch";
 import {
@@ -42,6 +43,7 @@ interface HostState {
   policy: Record<string, number | string>;
   drift: { severity?: string; item: string; expected: unknown; actual: unknown; advice?: string }[];
   redis_pool?: { total?: number; used?: number; headroom?: number; suggest_expand?: boolean };
+  frp?: { mode?: string; tunnel?: string | null };
 }
 
 /** 管理（仅 admin）：账号 / 全部项目 / 平台状态 / 宿主配置 / 实时事件（真链路） */
@@ -534,16 +536,22 @@ function HostPanel() {
   const [host, setHost] = useState<HostState | null>(null);
   const [mw, setMw] = useState<Record<string, boolean>>({});
   const [policyEdit, setPolicyEdit] = useState({ disk: "", mem: "", factor: "" });
+  // FRP 热配置（隧道常驻 serve，保存即落盘 host.env 并 ≤2s 内热重建会话，无需重启）
+  const [frpEdit, setFrpEdit] = useState({ mode: "none", token: "", tunnel: "", toml: "" });
   const [review, setReview] = useState<{ actions: { kind: string; target?: string; detail?: string; needed?: boolean }[]; impact: { removed_middleware?: string[]; affected_projects?: string[] } } | null>(null);
   const [report, setReport] = useState<string | null>(null);
   const [confirming, setConfirming] = useState(false);
   const [applyBusy, setApplyBusy] = useState(false);
   const [rxOpen, setRxOpen] = useState(false);
 
-  const load = useCallback(async () => {
+  // resync=false（30s 轮询）只刷新展示态 host——编辑态（mw/policyEdit/frpEdit）一旦被
+  // 轮询回填，会把用户改到一半的值原地重置（FRP 顺序热更实测踩中：输入→弹确认→轮询
+  // 回填→确认发出旧值）；回填仅在挂载与 apply 成功后（apply 处显式 load(true)）。
+  const load = useCallback(async (resync = false) => {
     try {
       const j = (await api("GET", "/_api/admin/host")) as unknown as HostState;
       setHost(j);
+      if (!resync) return;
       const mwSet = new Set(Array.isArray(j.host_env?.MIDDLEWARE) ? j.host_env.MIDDLEWARE : String(j.host_env?.MIDDLEWARE ?? "").split(/\s+/).filter(Boolean));
       setMw({ postgres: mwSet.has("postgres"), redis: mwSet.has("redis"), registry: mwSet.has("registry") });
       setPolicyEdit({
@@ -551,27 +559,42 @@ function HostPanel() {
         mem: j.policy?.RESERVE_MEM_MB != null ? String(j.policy.RESERVE_MEM_MB) : "",
         factor: j.policy?.UPLOAD_SPACE_FACTOR != null ? String(j.policy.UPLOAD_SPACE_FACTOR) : "",
       });
+      setFrpEdit({
+        mode: String(j.host_env?.FRP ?? "none"),
+        token: "", // 恒空起步：留空=保持既有凭据（GET 为打码值，不可回填）
+        tunnel: String(j.host_env?.FRP_TUNNEL ?? ""),
+        toml: String(j.host_env?.FRP_TOML ?? ""),
+      });
     } catch { setHost(null); }
   }, []);
 
   useEffect(() => {
-    void load();
-    const id = window.setInterval(load, 30000);
+    void load(true);
+    const id = window.setInterval(() => void load(false), 30000);
     return () => clearInterval(id);
   }, [load]);
 
   function dirty(): boolean {
     if (!host) return false;
     const mwSet = new Set(Array.isArray(host.host_env.MIDDLEWARE) ? host.host_env.MIDDLEWARE : String(host.host_env.MIDDLEWARE ?? "").split(/\s+/).filter(Boolean));
+    const frpDirty = frpEdit.mode !== String(host.host_env?.FRP ?? "none")
+      || frpEdit.tunnel !== String(host.host_env?.FRP_TUNNEL ?? "")
+      || (frpEdit.mode === "native" && frpEdit.toml !== String(host.host_env?.FRP_TOML ?? "") && frpEdit.toml !== "")
+      || frpEdit.token !== "";
     return MW_NAMES.some((n) => mwSet.has(n) !== !!mw[n])
       || (policyEdit.disk !== "" && policyEdit.disk !== String(host.policy.DISK_RESERVE_GB ?? ""))
       || (policyEdit.mem !== "" && policyEdit.mem !== String(host.policy.RESERVE_MEM_MB ?? ""))
-      || (policyEdit.factor !== "" && policyEdit.factor !== String(host.policy.UPLOAD_SPACE_FACTOR ?? ""));
+      || (policyEdit.factor !== "" && policyEdit.factor !== String(host.policy.UPLOAD_SPACE_FACTOR ?? ""))
+      || frpDirty;
   }
 
   function postBody(confirm: boolean) {
     const he: Record<string, unknown> = { ...(host?.host_env || {}) };
     delete he.FRP_TOKEN; // 打码值回传会覆盖真实凭据——剔除（FRP_TOML 是文件路径非凭据，可回传）
+    he.FRP = frpEdit.mode;
+    he.FRP_TUNNEL = frpEdit.tunnel.trim();
+    if (frpEdit.toml.trim() !== "") he.FRP_TOML = frpEdit.toml.trim();
+    if (frpEdit.token !== "") he.FRP_TOKEN = frpEdit.token; // 空=不发送（沿用既有）
     he.MIDDLEWARE = MW_NAMES.filter((n) => mw[n]).join(" ");
     const toYesNo = (v: unknown, y: string, n: string) => (v === true || v === y || v === "yes" || v === "true") ? y : n;
     he.CADDY = typeof he.CADDY === "boolean" ? toYesNo(he.CADDY, "yes", "no") : String(he.CADDY ?? "yes");
@@ -607,7 +630,7 @@ function HostPanel() {
       const lines = items.map((a) => `${a.ok === false ? "● 失败" : "● 成功"} ${kindCn(a.kind ?? "")} ${a.target ?? ""} ${a.result || a.detail || ""}`);
       setReport(`执行报告${j.ok === false ? "（有失败项）" : ""}：完成 ${Number(rep.changed ?? items.length)} 项变更。\n${lines.join("\n")}\n${(rep.warnings || []).join("\n")}`);
       setReview(null);
-      await load();
+      await load(true); // 应用成功：回填编辑态到新基线
     } catch (e) {
       toast.error(`确认执行失败：${(e as { msg?: string }).msg ?? ""}`);
     } finally { setApplyBusy(false); }
@@ -637,6 +660,57 @@ function HostPanel() {
           ))}
         </FieldGroup>
         <FieldDescription>取消勾选即禁用，重新勾选即启用。修改后走下方「查看变更 → 确认执行」两段式。</FieldDescription>
+      </div>
+
+      <Separator />
+      <div className="flex flex-col gap-3">
+        <h3 className="text-sm font-semibold text-info">公网隧道（热配置：保存后 ≤2 秒生效，无需重启）</h3>
+        <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-4">
+          <Field>
+            <FieldLabel>形态</FieldLabel>
+            <Select value={frpEdit.mode} onValueChange={(v) => { setFrpEdit((s2) => ({ ...s2, mode: v })); setReview(null); }}>
+              <SelectTrigger><SelectValue /></SelectTrigger>
+              <SelectContent>
+                <SelectItem value="none">不启用</SelectItem>
+                <SelectItem value="chmlfrp">ChmlFrp</SelectItem>
+                <SelectItem value="native">原生 frp / 其它</SelectItem>
+              </SelectContent>
+            </Select>
+            <FieldDescription>chmlfrp=面板 getcfg；native=FRP_TOML 文件</FieldDescription>
+          </Field>
+          {frpEdit.mode === "chmlfrp" && (
+            <Field>
+              <FieldLabel>面板 Token</FieldLabel>
+              <Input type="password" autoComplete="new-password" placeholder={host?.host_env?.FRP_TOKEN ? "已设置（留空保持）" : "usertoken"} value={frpEdit.token} onChange={(e) => { setFrpEdit((s2) => ({ ...s2, token: e.target.value })); setReview(null); }} />
+              <FieldDescription>留空=保持既有凭据</FieldDescription>
+            </Field>
+          )}
+          {frpEdit.mode === "chmlfrp" && (
+            <Field>
+              <FieldLabel>隧道 ID</FieldLabel>
+              <Input placeholder="如 362002,361356（多隧道逗号分隔）" value={frpEdit.tunnel} onChange={(e) => { setFrpEdit((s2) => ({ ...s2, tunnel: e.target.value })); setReview(null); }} />
+              <FieldDescription>每 ID 独立会话；跨节点双入口即此形态</FieldDescription>
+            </Field>
+          )}
+          {frpEdit.mode === "native" && (
+            <Field>
+              <FieldLabel>frpc TOML 路径</FieldLabel>
+              <Input placeholder="/etc/showroom/frpc-native.toml（0600）" value={frpEdit.toml} onChange={(e) => { setFrpEdit((s2) => ({ ...s2, toml: e.target.value })); setReview(null); }} />
+              <FieldDescription>完整客户端配置所在文件；改文件在会话重建时生效</FieldDescription>
+            </Field>
+          )}
+          {host?.frp && host.frp.mode !== "none" && (
+            <Field>
+              <FieldLabel>当前状态</FieldLabel>
+              <div className="flex min-h-9 items-center gap-2 text-xs">
+                <Badge variant={host.frp.tunnel?.startsWith("connected") ? "default" : host.frp.tunnel?.startsWith("error") ? "destructive" : "secondary"}>
+                  {host.frp.tunnel?.startsWith("connected") ? "在线" : host.frp.tunnel?.startsWith("error") ? "异常" : host.frp.tunnel?.startsWith("stale") ? "停更" : "连接中"}
+                </Badge>
+                <span className="break-all font-mono text-muted-foreground">{host.frp.tunnel ?? ""}</span>
+              </div>
+            </Field>
+          )}
+        </div>
       </div>
 
       <Separator />
