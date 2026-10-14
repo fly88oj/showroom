@@ -280,7 +280,7 @@ function RollbackDialog({
 }) {
   const [pending, setPending] = useState<{ v: string; image: string } | null>(null);
   const [busy, setBusy] = useState(false);
-  const [rows, setRows] = useState<{ version: string; image: string; time: number; imagePresent?: boolean; services?: string[]; envCount?: number; svcEnvCount?: number }[]>([]);
+  const [rows, setRows] = useState<{ version: string; image: string; time: number; imagePresent?: boolean; hasSnapshot?: boolean; services?: string[] | null; envCount?: number | null }[]>([]);
   const [cur, setCur] = useState<string | null>(null);
 
   useEffect(() => {
@@ -290,7 +290,7 @@ function RollbackDialog({
     (async () => {
       try {
         const j = (await api("GET", `/_api/versions?project=${encodeURIComponent(project.project)}`)) as {
-          current?: string | number; versions?: { version: string; image: string; time: number; imagePresent?: boolean; services?: string[]; envCount?: number; svcEnvCount?: number }[];
+          current?: string | number; versions?: { version: string; image: string; time: number; imagePresent?: boolean; hasSnapshot?: boolean; services?: string[] | null; envCount?: number | null }[];
         };
         if (!alive) return;
         setCur(String(j.current ?? ""));
@@ -342,8 +342,9 @@ function RollbackDialog({
                       <TableCell><Badge variant="outline" className="font-mono">{v.version.startsWith("v") ? v.version : `v${v.version}`}</Badge></TableCell>
                       <TableCell className="font-mono text-xs">{v.image}{gone && !isCur && (v.imagePresent === false ? "（镜像已删除）" : "（镜像状态未知）")}</TableCell>
                       <TableCell className="text-xs text-muted-foreground">
-                        {(v.services?.length ?? 0) > 0 ? `主+${v.services!.length} 服务` : "单服务"}
-                        {((v.envCount ?? 0) + (v.svcEnvCount ?? 0)) > 0 ? ` · ${(v.envCount ?? 0) + (v.svcEnvCount ?? 0)} 变量` : ""}
+                        {v.hasSnapshot === false
+                          ? "旧版本记录 · 按当前配置"
+                          : `${(v.services?.length ?? 0) > 0 ? `主+${v.services!.length} 服务` : "单服务"}${(v.envCount ?? 0) > 0 ? ` · ${v.envCount} 变量` : ""}`}
                       </TableCell>
                       <TableCell className="text-right text-xs text-muted-foreground">{fmtTime(v.time)}</TableCell>
                       <TableCell>
@@ -360,7 +361,7 @@ function RollbackDialog({
                   );
                 })}
                 {rows.length === 0 && (
-                  <TableRow><TableCell colSpan={4} className="py-6 text-center text-xs text-muted-foreground">暂无发布历史（该项目在本功能上线前发布，或仅发布过一个版本）。</TableCell></TableRow>
+                  <TableRow><TableCell colSpan={5} className="py-6 text-center text-xs text-muted-foreground">暂无发布历史（该项目在本功能上线前发布，或仅发布过一个版本）。</TableCell></TableRow>
                 )}
               </TableBody>
             </Table>
@@ -400,10 +401,7 @@ function EnvDialog({ project, onClose }: { project: Project | null; onClose: () 
   const conn = env ? [
     ["PostgreSQL", env.DATABASE_URL || ""],
     ["Redis", env.REDIS_URL || ""],
-    ...(env.SHOWROOM_SVC_API_HOST ? [["附加服务 api", `${env.SHOWROOM_SVC_API_HOST}:${env.SHOWROOM_SVC_API_PORT}`]] : []),
   ].filter(([, v]) => v) : [];
-  const svcKeys = keys.filter((k) => k.startsWith("SHOWROOM_SVC_"));
-  const baseKeys = keys.filter((k) => !k.startsWith("SHOWROOM_SVC_"));
   const [reveal, setReveal] = useState(false);
   const val = (k: string) => (k === "DB_PASSWORD" && !reveal ? "••••••••（点右侧显）" : env![k]);
   return (
@@ -436,7 +434,7 @@ function EnvDialog({ project, onClose }: { project: Project | null; onClose: () 
             <TableBody>
               {env === null ? (
                 <TableRow><TableCell colSpan={3} className="py-6 text-center text-xs text-muted-foreground">加载中…</TableCell></TableRow>
-              ) : baseKeys.length ? baseKeys.map((k) => (
+              ) : keys.length ? keys.map((k) => (
                 <TableRow key={k}>
                   <TableCell className="font-mono text-xs">{k}</TableCell>
                   <TableCell className="break-all font-mono text-xs">
@@ -445,7 +443,7 @@ function EnvDialog({ project, onClose }: { project: Project | null; onClose: () 
                       <Button variant="link" size="sm" className="h-auto p-0 ml-1" onClick={() => setReveal((r) => !r)}>{reveal ? "隐藏" : "显示"}</Button>
                     )}
                   </TableCell>
-                  <TableCell className="text-xs text-muted-foreground">{ENV_DESC[k] || (k.startsWith("SHOWROOM_SVC_") ? "附加服务发现键（多容器项目，plan-19）" : "")}</TableCell>
+                  <TableCell className="text-xs text-muted-foreground">{ENV_DESC[k] || (k.startsWith("SHOWROOM_SVC_") ? "服务发现键（多容器项目）" : "")}</TableCell>
                 </TableRow>
               )) : (
                 <TableRow><TableCell colSpan={3} className="py-6 text-center text-xs text-muted-foreground">（空）</TableCell></TableRow>
@@ -453,13 +451,8 @@ function EnvDialog({ project, onClose }: { project: Project | null; onClose: () 
             </TableBody>
           </Table>
         </div>
-        {svcKeys.length > 0 && (
-          <div className="text-xs text-muted-foreground">
-            服务发现键：附加服务（多容器）以 <code className="font-mono">SHOWROOM_SVC_&lt;名称大写&gt;_HOST/_PORT</code> 注入全体容器（见上表尾部行）。
-          </div>
-        )}
         <div className="text-xs text-muted-foreground">
-          镜像内配置文件需替换时，推荐入口脚本 <code className="font-mono">envsubst &lt; config.tpl &gt; config</code>——模板占位符（如 <code className="font-mono">${'$'}{'{'}DB_PASSWORD{'}'}</code>）由容器启动时自动替换。
+          镜像内配置文件需替换时，推荐入口脚本 <code className="font-mono">envsubst &lt; config.tpl &gt; config</code>——模板占位符（如 <code className="font-mono">${'$'}{'{'}DB_PASSWORD{'}'}</code>）由容器启动时自动替换（详见帮助页「中间件连接」）。
         </div>
       </DialogContent>
     </Dialog>

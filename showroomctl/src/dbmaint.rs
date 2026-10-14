@@ -557,16 +557,9 @@ pub fn reset(root: &Path, p: &str, confirm: bool) -> R<()> {
     let mw = crate::middleware::HostEnv::load(root).middleware;
     // 发现键随 conf 重建（plan-19：db-reset 场景 conf 已在——按其服务集重建 env）
     let conf = state::Conf::load(root, p)?;
-    let main_c = crate::publish::container_name(p);
-    let svc_c: Vec<String> = conf
-        .services
-        .iter()
-        .map(|v| crate::publish::svc_container_name(p, &v.name))
-        .collect();
-    let mut disc: Vec<(&str, &str, u16)> = vec![("main", main_c.as_str(), conf.cport)];
-    for (v, c) in conf.services.iter().zip(svc_c.iter()) {
-        disc.push((v.name.as_str(), c.as_str(), v.cport));
-    }
+    let disc_full = state::disc_for(p, conf.cport, &conf.services);
+    let disc: Vec<(&str, &str, u16)> =
+        disc_full.iter().map(|(a, b, c)| (a.as_str(), b.as_str(), *c)).collect();
     let uenv = conf.uenv.clone();
     fs::write(state::env_path(root, p), state::env_file_contents(p, &new_db, &db_pass, redisdb, &mw, &disc, &uenv))?;
     Ok(())

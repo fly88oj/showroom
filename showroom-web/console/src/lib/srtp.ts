@@ -8,6 +8,8 @@ import { ex, mem, put, unput } from "@/lib/wasm";
 
 const SUB_PROTOCOL = "showroom-srtp-v1";
 const CHALLENGE_TIMEOUT_MS = 3000;
+/** 单请求超时（GUI 实测教训：一次响应丢失即永久挂起整条顺序队列——必须有超时出口） */
+const REQUEST_TIMEOUT_MS = 30000;
 
 export interface SrtpCreds { id: Uint8Array; pubPem: string }
 
@@ -198,6 +200,18 @@ export function srtpRequest(httpBytes: Uint8Array): Promise<Uint8Array> {
 async function srtpRequestOne(httpBytes: Uint8Array): Promise<Uint8Array> {
   const sock = await connect();
   return new Promise<Uint8Array>((resolve, reject) => {
+    // 超时出口：到点未收到响应 → 拒绝并清理 inflight（调用方走 srtpTry 的降级路径）
+    const timer = setTimeout(() => {
+      if (inflight) {
+        inflight.reject({ error: "E_NET", msg: "SRTP 通道响应超时" });
+        inflight = null;
+      }
+    }, REQUEST_TIMEOUT_MS);
+    const onDone = () => clearTimeout(timer);
+    const innerResolve = resolve;
+    const innerReject = reject;
+    resolve = (b) => { onDone(); innerResolve(b); };
+    reject = (e) => { onDone(); innerReject(e); };
     inflight = { resolve, reject };
     // 应用帧 [8B 长度][HTTP] → 记录（64KiB 分片）
     const framed = new Uint8Array(8 + httpBytes.length);

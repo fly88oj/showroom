@@ -159,14 +159,14 @@ export function Help() {
             <table className="w-full text-xs">
               <tbody>
                 {[
-                  ["DB_HOST / DB_PORT", "PostgreSQL 地址（sr-postgres:5432，平台内置）"],
-                  ["DB_NAME / DB_USER", "本项目专属库名/用户（sr_<项目名>，发布时创建）"],
-                  ["DB_PASSWORD", "随机生成（每次发布轮换）"],
-                  ["DATABASE_URL", "完整连接串：postgresql://…@sr-postgres:5432/…"],
-                  ["REDIS_HOST / REDIS_PORT / REDIS_DB", "Redis 地址与本项目专属逻辑库（禁用 Redis 中间件时不注入）"],
-                  ["REDIS_URL", "完整连接串：redis://sr-redis:6379/<n>"],
-                  ["SHOWROOM_PROJECT / SHOWROOM_BASE_PATH", "项目名与对外子路径前缀（恒 /<项目名>/）"],
-                  ["SHOWROOM_SVC_<名称>_HOST/_PORT", "多容器服务发现（plan-19）：全体容器可发现主服务（main）与各附加服务"],
+                  ["DB_HOST / DB_PORT", ENV_DESC.DB_HOST],
+                  ["DB_NAME / DB_USER", ENV_DESC.DB_NAME],
+                  ["DB_PASSWORD", ENV_DESC.DB_PASSWORD],
+                  ["DATABASE_URL", ENV_DESC.DATABASE_URL],
+                  ["REDIS_HOST / REDIS_PORT / REDIS_DB", ENV_DESC.REDIS_HOST],
+                  ["REDIS_URL", ENV_DESC.REDIS_URL],
+                  ["SHOWROOM_PROJECT / SHOWROOM_BASE_PATH", ENV_DESC.SHOWROOM_BASE_PATH],
+                  ["SHOWROOM_SVC_<名称>_HOST/_PORT", "多容器服务发现：全体容器可发现主服务（main）与各附加服务"],
                 ].map(([k, d]) => (
                   <tr key={k} className="border-b last:border-0">
                     <td className="w-72 p-2 font-mono align-top">{k}</td>

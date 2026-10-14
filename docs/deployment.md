@@ -52,7 +52,7 @@ sudo showroomctl setup --apply    # 幂等执行；二次运行期望 `plan: 0 a
 | `DEDUP` | weekly/none | weekly | 周日 05:00 duperemove timer |
 | `FRP` | none/chmlfrp/native | none | 隧道形态（并入 serve 常驻，见 §3 frp） |
 | `FRP_TOKEN` / `FRP_TUNNEL` | 字符串 | 空 | chmlfrp：usertoken 与隧道 ID（多隧道=逗号列表，**每 ID 独立会话**——跨节点双入口即此形态；历史键 FRP_TUNNEL2 解析时自动折叠） |
-| `FRP_TOML` | 文件路径 | 空 |（占位防误删） |
+| `FRP_TOML` | 文件路径 | 空 | native：指向 0600 的 frpc TOML 文件（自建 frps/其它中转商；路径非凭据可回显，凭据在该文件里） |
 | `SERVICES_MAX`（policy.env） | 数字 | 4 | 每项目服务数上限（含主服务，plan-19 多容器） | native：指向 0600 的 frpc TOML 文件（自建 frps/其它中转商；路径非凭据可回显，凭据在该文件里） |
 
 setup 做的事：目录/policy.env（缺键补默认、已有键保留）/host.env 落盘、docker 网络 `showroom-net`、所选中间件容器（pg 12 参数/redis `--databases=policy.REDIS_DBS`/registry 全旗标，规格见附录 B）、Caddy 安装+Caddyfile 渲染（registry ∈ 集合才有 `/v2`）、systemd 单元（api+7 timers+dedup）安装启用、sysctl/journald(400M+30d)/watchdog(10s) 调优、`showroom-precompress` 预压缩脚本与首跑执行。现网 redis 实例 `--databases` 低于 policy 时**不重建**（数据安全优先），只报黄条引导走 §3 扩容流。

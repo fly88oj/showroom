@@ -48,7 +48,12 @@ pub fn split_image_ref(image: &str) -> (String, String) {
 /// 附加服务对齐（plan-19 §B.2）：目标集合内——先 rm 再 run（附加服务无公网端口，
 /// 秒级重建可接受，免去配置漂移比对）；不在集合内的旧附加服务删除（由调用方扫描）。
 /// 单服务失败只记日志不中止（主服务已健康；下次 publish/reconcile 收敛）。
-fn align_services(root: &Path, project: &str, services: &[state::Svc], env_file: &str) {
+/// 附加服务对齐（公开单/多服务版：reconcile/autoheal 重建缺失附加服务用）。
+pub fn align_services_pub(project: &str, services: &[state::Svc], env_file: &str) {
+    align_services(project, services, env_file);
+}
+
+fn align_services(project: &str, services: &[state::Svc], env_file: &str) {
     let net = dockerops::DOCKER_NET;
     // 删除不再存在的旧附加服务（防孤儿）
     let live: std::collections::BTreeSet<String> =
@@ -67,26 +72,31 @@ fn align_services(root: &Path, project: &str, services: &[state::Svc], env_file:
         let full = format!("{}/{}", dockerops::REGISTRY, v.image);
         // 每服务独立 env 文件：基础 env + 本服务专属变量追加（覆盖语义）；
         // 空专属时直接复用主 env 文件（零额外落盘）
-        let svc_env_path;
-        let env_arg = if v.env.trim().is_empty() {
-            env_file
-        } else {
-            svc_env_path = format!("{env_file}.{}", v.name);
+        let mut svc_env = String::new();
+        if !v.env.trim().is_empty() {
             let base = fs::read_to_string(env_file).unwrap_or_default();
             let mut extra = String::new();
+            let mut bad_key = false;
             for pair in v.env.split(';') {
                 if pair.trim().is_empty() {
                     continue;
                 }
-                if let Some((k, val)) = pair.split_once('=') {
-                    if state::check_env_key(k.trim()) {
-                        extra.push_str(&format!("{}={}\n", k.trim(), val));
+                match pair.split_once('=') {
+                    Some((k, val)) if state::check_env_key(k.trim()) => {
+                        extra.push_str(&format!("{}={}\n", k.trim(), val))
                     }
+                    // 与全体变量同语义：坏键拒绝而非静默丢（评审：两级校验须一致）
+                    _ => bad_key = true,
                 }
             }
-            let _ = fs::write(&svc_env_path, format!("{base}{extra}"));
-            Box::leak(svc_env_path.into_boxed_str()) // 生命周期：容器 run 在本函数内完成
-        };
+            if bad_key {
+                eprintln!("showroomctl: publish: 附加服务 {} 存在非法变量键，整组跳过专属变量", v.name);
+            } else {
+                svc_env = format!("{env_file}.{}", v.name);
+                let _ = fs::write(&svc_env, format!("{base}{extra}"));
+            }
+        }
+        let env_arg: &str = if svc_env.is_empty() { env_file } else { &svc_env };
         if let Err(e) = dockerops::docker(&[
             "run", "-d", "--name", &cname, "--network", net, "--restart", "unless-stopped",
             "--memory", &v.mem, "--cpus", &cpu_s, "--env-file", env_arg, &full,
@@ -94,7 +104,6 @@ fn align_services(root: &Path, project: &str, services: &[state::Svc], env_file:
             eprintln!("showroomctl: publish: 附加服务 {} 启动失败: {}", v.name, e.msg);
         }
     }
-    let _ = root;
 }
 
 #[cfg(test)]
@@ -347,13 +356,9 @@ fn publish_mode(
     // env 文件（SPEC §6 全字段具体化；§11 无 SHOWROOM_SLOT；§15.2 禁用组不注入）
     fs::create_dir_all(state::projects_dir(root))?;
     let mw = crate::middleware::HostEnv::load(root).middleware;
-    let main_container = container_name(project);
-    let svc_containers: Vec<String> =
-        services.iter().map(|v| svc_container_name(project, &v.name)).collect();
-    let mut disc: Vec<(&str, &str, u16)> = vec![("main", main_container.as_str(), cport)];
-    for (v, c) in services.iter().zip(svc_containers.iter()) {
-        disc.push((v.name.as_str(), c.as_str(), v.cport));
-    }
+    let disc_full = state::disc_for(project, cport, &services);
+    let disc: Vec<(&str, &str, u16)> =
+        disc_full.iter().map(|(a, b, c)| (a.as_str(), b.as_str(), *c)).collect();
     fs::write(
         state::env_path(root, project),
         state::env_file_contents(project, &db, &db_pass, redisdb, &mw, &disc, &uenv),
@@ -389,7 +394,7 @@ fn publish_mode(
     let _ = dockerops::run_fail_ok("docker", &["rm", "-f", &name]); // 旧容器（可能本就不存在）
     dockerops::docker(&["rename", &newname, &name])?;
     state::register_port(root, port, project)?;
-    align_services(root, project, &services, env_file);
+    align_services(project, &services, env_file);
 
     // last2 = 上一 tag（回滚兜底：无发布历史的老项目据此回跳；幂等重发也刷新）
     if let Some(o) = &old {

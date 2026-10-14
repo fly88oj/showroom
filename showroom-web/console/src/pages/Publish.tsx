@@ -170,7 +170,7 @@ export function Publish({
       }
       phaseNow = "publish";
       markRow(projectName, "publishing", 10 * 60 * 1000);
-      await doPublish(projectName, d.target ?? d.tag);
+      await doPublish(projectName, d.tag);
       setStep(2, "ok"); setStep(3, "ok");
       setProg({ cur: 1, total: 1 });
       const eurl = externalUrl(base, projectName);

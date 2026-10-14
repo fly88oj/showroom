@@ -483,6 +483,15 @@ pub fn public_url(p: &str) -> String {
 /// env 文件内容（db 传**已解析**的库名：归一化新名，或沿用的 legacy 旧名）。
 /// §11：无 SHOWROOM_SLOT，SHOWROOM_BASE_PATH 恒 /<project>/。
 /// §15.2 env 自适应：mw 为启用的中间件集合——redis ∉ 集合时不再注入 REDIS_* 组（publish 照常）。
+/// disc 全量构造（单源；publish/dbmaint 共用——此前两处各抄 8 行，评审实锤）。
+pub fn disc_for(p: &str, main_cport: u16, services: &[Svc]) -> Vec<(String, String, u16)> {
+    let mut disc = vec![("main".to_string(), format!("sr-{p}"), main_cport)];
+    for v in services {
+        disc.push((v.name.clone(), format!("sr-{p}-{}", v.name), v.cport));
+    }
+    disc
+}
+
 /// 服务发现键（plan-19 §B.1）：全体服务（含主）注入 HOST/PORT 对——任意容器读 env 即知同伴。
 /// services = (服务名, 容器名, cport) 全量；主服务名恒 "main"。
 pub fn svc_discovery_lines(services: &[(&str, &str, u16)]) -> String {

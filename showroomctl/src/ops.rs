@@ -112,7 +112,7 @@ pub fn rollback(root: &Path, p: &str) -> R<PublishOut> {
     let c = conf_of(root, p)?;
     let all = state::read_versions(root, p);
     if let Some(v) = previous_version(&all, &c.version) {
-        return rollback_to(root, p, &v);
+        return rollback_to(root, p, &v); // 版本化路径：按目标版本快照整体恢复
     }
     if !all.is_empty() {
         return Err(ApiError::new("E_STATE", format!("'{p}' 无可回滚的历史版本（仅一个版本）")));
@@ -182,13 +182,19 @@ pub fn versions_of(root: &Path, p: &str) -> R<Value> {
             },
             None => json!(false),
         };
-        // 配置摘要（plan-20：回滚整体恢复该版本配置——主+附加服务+全部变量）
-        let svc_names: Vec<&str> = r.services.iter().map(|v| v.name.as_str()).collect();
+        // 配置摘要（plan-20：回滚整体恢复该版本配置——主+附加服务+全部变量；
+        // 无快照旧记录须如实标「按当前配置」而非假装「单服务」——纪律 22）
+        let snapshot = r.has_snapshot();
+        let env_total = r.uenv.len()
+            + r.services
+                .iter()
+                .map(|v| if v.env.is_empty() { 0 } else { v.env.split(';').filter(|p| !p.trim().is_empty()).count() })
+                .sum::<usize>();
         items.push(json!({
             "version": r.version, "image": r.image, "time": r.time, "imagePresent": present,
-            "services": svc_names,
-            "envCount": r.uenv.len(),
-            "svcEnvCount": r.services.iter().map(|v| if v.env.is_empty() { 0 } else { v.env.split(';').filter(|p| !p.trim().is_empty()).count() }).sum::<usize>(),
+            "hasSnapshot": snapshot,
+            "services": if snapshot { json!(r.services.iter().map(|v| v.name.as_str()).collect::<Vec<_>>()) } else { json!(null) },
+            "envCount": if snapshot { json!(env_total) } else { json!(null) },
         }));
     }
     let current = if c.version.is_empty() { c.tag.clone() } else { c.version.clone() };
@@ -314,6 +320,25 @@ pub fn redis_get(db: u8, key: &str) -> R<(String, i64, String)> {
 }
 
 /// reconcile：先跑 v1.4 迁移编排（§11，幂等）与 owner→user 状态目录迁移，再遍历项目 conf，容器/路由缺失按 conf 重建。
+/// 附加服务健康检查：conf.services 中容器缺失/退出的 → 对齐重建（reconcile/autoheal 共用）。
+/// 返回日志行；镜像缺失（rm-image 后）记错不中断。
+fn heal_services(root: &Path, p: &str, c: &crate::state::Conf, statuses: &std::collections::HashMap<String, String>) -> Vec<String> {
+    let mut log = Vec::new();
+    for v in &c.services {
+        let name = publish::svc_container_name(p, &v.name);
+        let ok = statuses.get(&name).map(|s| s == "running").unwrap_or(false);
+        if !ok {
+            let env_file = match state::env_path(root, p).to_str() {
+                Some(e) => e.to_string(),
+                None => continue,
+            };
+            publish::align_services_pub(p, std::slice::from_ref(v), &env_file);
+            log.push(format!("{p}: service {} {}", v.name, if statuses.contains_key(&name) { "restarted (was exited)" } else { "rebuilt (was missing)" }));
+        }
+    }
+    log
+}
+
 pub fn reconcile(root: &Path) -> Vec<String> {
     if state::migrate_state_dirs(root) {
         eprintln!("showroomctl: reconcile: state dirs migrated (owners -> users)");
@@ -353,6 +378,16 @@ pub fn reconcile(root: &Path) -> Vec<String> {
                     }
                 }
             }
+        }
+    }
+    for (p, c) in state::all_confs(root) {
+        if !c.stopped {
+            log.extend(heal_services(root, &p, &c, &statuses));
+        }
+    }
+    for (p, c) in state::all_confs(root) {
+        if !c.stopped {
+            log.extend(heal_services(root, &p, &c, &statuses));
         }
     }
     if log.is_empty() {
