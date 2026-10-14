@@ -24,6 +24,12 @@ pub fn stop(root: &Path, p: &str) -> R<()> {
     if dockerops::container_status(&name).is_some() {
         dockerops::docker(&["stop", &name])?;
     }
+    for v in &c.services {
+        let sn = publish::svc_container_name(p, &v.name);
+        if dockerops::container_status(&sn).is_some() {
+            dockerops::docker(&["stop", &sn])?;
+        }
+    }
     c.stopped = true;
     c.save(root, p)
 }
@@ -36,10 +42,18 @@ pub fn start(root: &Path, p: &str) -> R<()> {
         dockerops::docker(&["start", &name])?;
     } else {
         publish::redeploy(root, &c.user, p, &c.tag, PublishOpts {
+            services: Some(c.services.clone()),
             mem: Some(c.mem.clone()),
             cpu: Some(c.cpu),
             cport: Some(c.cport),
         }, None)?;
+    }
+    let svcs = c.services.clone();
+    for v in &svcs {
+        let sn = publish::svc_container_name(p, &v.name);
+        if dockerops::container_status(&sn).is_some() {
+            let _ = dockerops::docker(&["start", &sn]); // 尽力拉起；缺失由 reconcile 重建
+        }
     }
     c.stopped = false;
     c.save(root, p)
@@ -51,6 +65,9 @@ pub fn rm(root: &Path, p: &str) -> R<()> {
     let c = conf_of(root, p)?; // 确认项目存在（未登记的项目不产生副作用）
     let name = publish::container_name(p);
     let _ = dockerops::run_fail_ok("docker", &["rm", "-f", &name]);
+    for v in &c.services {
+        let _ = dockerops::run_fail_ok("docker", &["rm", "-f", &publish::svc_container_name(p, &v.name)]);
+    }
     if let Some(s) = &c.legacyslot {
         let old = format!("sr-{p}-{s}");
         let _ = dockerops::run_fail_ok("docker", &["rm", "-f", &old]);
@@ -103,6 +120,7 @@ pub fn rollback(root: &Path, p: &str) -> R<PublishOut> {
     let prev = state::read_last2(root, p)
         .ok_or_else(|| ApiError::new("E_NOTFOUND", format!("no last2 for '{p}'")))?;
     publish::redeploy(root, &c.user, p, &prev, PublishOpts {
+        services: Some(c.services.clone()),
         mem: Some(c.mem.clone()),
         cpu: Some(c.cpu),
         cport: Some(c.cport),
@@ -118,6 +136,7 @@ pub fn rollback_to(root: &Path, p: &str, version: &str) -> R<PublishOut> {
     let tag = state::tag_of_image(&rec.image)
         .ok_or_else(|| ApiError::new("E_STATE", format!("version '{version}' 记录的镜像引用无 tag：{}", rec.image)))?;
     publish::redeploy(root, &c.user, p, &tag, PublishOpts {
+        services: Some(c.services.clone()),
         mem: Some(c.mem.clone()),
         cpu: Some(c.cpu),
         cport: Some(c.cport),
@@ -162,9 +181,17 @@ pub fn ps(root: &Path) -> Vec<(String, Conf, String)> {
         .collect()
 }
 
-pub fn logs(root: &Path, p: &str, tail: u32) -> R<String> {
-    let _ = conf_of(root, p)?;
-    let name = publish::container_name(p);
+pub fn logs(root: &Path, p: &str, service: Option<&str>, tail: u32) -> R<String> {
+    let c = conf_of(root, p)?;
+    let name = match service {
+        None | Some("main") => publish::container_name(p),
+        Some(svc) => {
+            if !c.services.iter().any(|v| v.name == svc) {
+                return Err(ApiError::new("E_NOTFOUND", format!("no service '{svc}' in {p}")));
+            }
+            publish::svc_container_name(p, svc)
+        }
+    };
     if dockerops::container_status(&name).is_none() {
         return Err(ApiError::new("E_NOTFOUND", format!("no container '{name}'")));
     }
@@ -273,6 +300,7 @@ pub fn reconcile(root: &Path) -> Vec<String> {
         let name = publish::container_name(&p);
         match statuses.get(&name).map(|s| s.as_str()).map(str::to_string) {
             None => match publish::redeploy(root, &c.user, &p, &c.tag, PublishOpts {
+                services: Some(c.services.clone()),
                 mem: Some(c.mem.clone()),
                 cpu: Some(c.cpu),
                 cport: Some(c.cport),
@@ -317,6 +345,7 @@ pub fn autoheal(root: &Path) -> Vec<String> {
         let name = publish::container_name(&p);
         match statuses.get(&name).map(|s| s.as_str()).map(str::to_string) {
             None => match publish::redeploy(root, &c.user, &p, &c.tag, PublishOpts {
+                services: Some(c.services.clone()),
                 mem: Some(c.mem.clone()),
                 cpu: Some(c.cpu),
                 cport: Some(c.cport),
@@ -969,6 +998,7 @@ mod tests {
         let root = troot("rollback-ver");
         fs::create_dir_all(state::projects_dir(&root)).unwrap();
         let c = state::Conf {
+            services: Vec::new(),
             user: "alice".into(), tag: "u3".into(), port: 8100, cport: 8080,
             mem: "256m".into(), cpu: 1.0, redisdb: 1, updated: 1, stopped: false,
             legacyslot: None, version: "v3".into(), version_seq: 3,
@@ -1252,6 +1282,7 @@ mod tests {
         // 两个项目归 alice、一个归 bob（user_list 只读 conf，不碰 docker）
         for (p, user) in [("demo1", "alice"), ("demo2", "alice"), ("demo3", "bob")] {
             let mut c = crate::state::Conf {
+            services: Vec::new(),
                 user: user.into(), tag: "v1".into(), port: 8100, cport: 8080,
                 mem: "256m".into(), cpu: 1.0, redisdb: 0, updated: 1,
                 stopped: false, legacyslot: None,

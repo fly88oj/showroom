@@ -534,7 +534,12 @@ async fn dispatch(
                     &user,
                     &req.project,
                     &req.tag,
-                    publish::PublishOpts { mem: req.mem, cpu: req.cpu, cport: req.container_port },
+                    publish::PublishOpts {
+                        mem: req.mem,
+                        cpu: req.cpu,
+                        cport: req.container_port,
+                        services: req.services.map(|v| v.into_iter().map(state::Svc::from).collect()),
+                    },
                 )
             })
             .await?;
@@ -774,7 +779,8 @@ async fn dispatch(
             user_check(&s.root, &project, &user)?;
             let tail: u32 = q.get("tail").and_then(|t| t.parse().ok()).unwrap_or(100).min(10000);
             let root = s.root.clone();
-            let logs = blk(move || ops::logs(&root, &project, tail)).await?;
+            let svc = q.get("service").cloned();
+            let logs = blk(move || ops::logs(&root, &project, svc.as_deref(), tail)).await?;
             Ok(Json(json!({"logs": logs})))
         }
 
@@ -1324,6 +1330,8 @@ struct PubReq {
     mem: Option<String>,
     cpu: Option<f64>,
     container_port: Option<u16>,
+    /// 附加服务（plan-19 §B）：None=沿用旧 conf；空数组=清空附加服务。
+    services: Option<Vec<state::SvcReq>>,
 }
 
 #[derive(Deserialize)]
@@ -1634,6 +1642,7 @@ mod tests {
         // alice 名下项目占 db 3/7；bob 占 db 2
         for (p, user, db) in [("demo1", "alice", 3u8), ("demo2", "alice", 7), ("demo3", "bob", 2)] {
             let c = crate::state::Conf {
+            services: Vec::new(),
                 user: user.into(), tag: "v1".into(), port: 8100, cport: 8080,
                 mem: "256m".into(), cpu: 1.0, redisdb: db, updated: 1,
                 stopped: false, legacyslot: None,
@@ -1741,6 +1750,7 @@ mod tests {
         crate::middleware::HostEnv::default_for("10.0.0.1").save(&root).unwrap();
         for (p, db) in [("demo1", 0u8), ("demo2", 1u8)] {
             let c = crate::state::Conf {
+            services: Vec::new(),
                 user: "alice".into(), tag: "v1".into(), port: 8100, cport: 8080,
                 mem: "256m".into(), cpu: 1.0, redisdb: db, updated: 1,
                 stopped: false, legacyslot: None,
@@ -2181,6 +2191,7 @@ FRP=none"}}"#).unwrap_err();
         // 两个账号各一个项目（conf 层；docker 实况不可用时 status 回落 missing，不影响断言）
         for (p, user) in [("demo1", "alice"), ("demo2", "bob")] {
             let c = crate::state::Conf {
+            services: Vec::new(),
                 user: user.into(), tag: "v1".into(), port: 8100, cport: 8080,
                 mem: "256m".into(), cpu: 1.0, redisdb: 0, updated: 1,
                 stopped: false, legacyslot: None,

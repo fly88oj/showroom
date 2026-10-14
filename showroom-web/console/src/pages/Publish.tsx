@@ -34,6 +34,8 @@ export function Publish({
 }) {
   const { projects, images, session, publishDone, space, refreshSpace, markRow } = useApp();
   const [project, setProject] = useState("");
+  // 附加服务行（plan-19）：name/image/cport/mem/cpu
+  const [svcs, setSvcs] = useState<{ name: string; image: string; cport: string; mem: string; cpu: string }[]>([]);
   const [projErr, setProjErr] = useState("");
   const [projOpen, setProjOpen] = useState(false);
   const [src, setSrc] = useState<"tar" | "registry">("tar");
@@ -86,6 +88,13 @@ export function Publish({
     setStep(2, "run");
     setText("③ 发布中…");
     const body: Record<string, unknown> = { project: project2, tag, container_port: parseInt(cport, 10) || 8080 };
+    const validSvcs = svcs.filter((v) => v.name.trim() && v.image.trim() && parseInt(v.cport, 10) > 0);
+    if (validSvcs.length) {
+      body.services = validSvcs.map((v) => ({
+        name: v.name.trim(), image: v.image.trim(),
+        cport: parseInt(v.cport, 10), mem: v.mem.trim() || "128m", cpu: parseFloat(v.cpu) || 0.5,
+      }));
+    }
     const memv = mem.trim();
     if (memv && /^\d+$/.test(memv)) body.mem = `${memv}m`; // C4：裸数字按 MiB（补 m 后缀，服务端字节语义）
     await api("POST", "/_api/publish", body);
@@ -335,7 +344,8 @@ export function Publish({
               {(memChanged || cportChanged) && <Badge variant="warning">与上次发布不同</Badge>}
             </div>
             <CollapsibleContent>
-              <div className="grid gap-4 pt-3 sm:grid-cols-2">
+              <div className="flex flex-col gap-3 pt-3">
+              <div className="grid gap-4 sm:grid-cols-2">
                 <Field>
                   <FieldLabel htmlFor="pub-mem">内存需求（MiB）</FieldLabel>
                   <Input id="pub-mem" className="w-24" value={mem} onChange={(e) => setMem(e.target.value)} />
@@ -349,6 +359,33 @@ export function Publish({
                   />
                   {cportChanged && <FieldDescription className="text-warn">与上次发布不同</FieldDescription>}
                 </Field>
+              </div>
+
+              <Separator />
+              <div className="flex flex-col gap-2">
+                <div className="flex items-center gap-2">
+                  <span className="text-sm font-medium">附加服务（多容器）</span>
+                  <Button
+                    type="button" variant="outline" size="sm"
+                    onClick={() => setSvcs((v) => [...v, { name: "", image: "", cport: "", mem: "", cpu: "" }])}
+                  >+ 添加服务</Button>
+                  {svcs.length > 0 && (
+                    <span className="text-xs text-muted-foreground">
+                      镜像须已在「镜像库」；互相以 SHOWROOM_SVC_&lt;名称&gt;_HOST/_PORT 发现（详见项目行「环境变量」）
+                    </span>
+                  )}
+                </div>
+                {svcs.map((v, i) => (
+                  <div key={i} className="grid gap-2 sm:grid-cols-[1fr_2fr_5rem_5rem_5rem_auto]">
+                    <Input placeholder="名称（如 api）" value={v.name} onChange={(e) => setSvcs((a) => a.map((x, j) => (j === i ? { ...x, name: e.target.value } : x)))} />
+                    <Input placeholder="镜像（user/name:tag，无 user/ 前缀自动补）" value={v.image} onChange={(e) => setSvcs((a) => a.map((x, j) => (j === i ? { ...x, image: e.target.value } : x)))} />
+                    <Input placeholder="端口" type="number" value={v.cport} onChange={(e) => setSvcs((a) => a.map((x, j) => (j === i ? { ...x, cport: e.target.value } : x)))} />
+                    <Input placeholder="128m" value={v.mem} onChange={(e) => setSvcs((a) => a.map((x, j) => (j === i ? { ...x, mem: e.target.value } : x)))} />
+                    <Input placeholder="0.5" value={v.cpu} onChange={(e) => setSvcs((a) => a.map((x, j) => (j === i ? { ...x, cpu: e.target.value } : x)))} />
+                    <Button type="button" variant="ghost" size="sm" onClick={() => setSvcs((a) => a.filter((_, j) => j !== i))}>移除</Button>
+                  </div>
+                ))}
+              </div>
               </div>
             </CollapsibleContent>
           </Collapsible>

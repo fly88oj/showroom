@@ -131,6 +131,35 @@ pub fn pass_opaque_path(root: &Path, user: &str) -> PathBuf {
 //     [version] [version_seq]）——
 // 注：磁盘键名沿用存量 `owner=`（不 break 主机存量 conf，语义即下方 user 字段）。
 
+/// API 请求形状（plan-19）：字段同 Svc 但可缺省 mem/cpu。
+#[derive(Debug, Clone, serde::Deserialize)]
+pub struct SvcReq {
+    pub name: String,
+    pub image: String,
+    pub cport: u16,
+    #[serde(default)]
+    pub mem: String,
+    #[serde(default)]
+    pub cpu: f64,
+}
+
+impl From<SvcReq> for Svc {
+    fn from(r: SvcReq) -> Self {
+        Svc { name: r.name, image: r.image, cport: r.cport, mem: r.mem, cpu: r.cpu }
+    }
+}
+
+/// 附加服务（plan-19 §B.1）：镜像为平台镜像库引用（无 `/` 前缀自动补 `<user>/`）。
+/// conf 序列化=`svc=<name>|<image>|<cport>|<mem>|<cpu>` 重复行（与 conf kv 风格一致）。
+#[derive(Debug, Clone, PartialEq)]
+pub struct Svc {
+    pub name: String,
+    pub image: String,
+    pub cport: u16,
+    pub mem: String,
+    pub cpu: f64,
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub struct Conf {
     pub user: String,
@@ -147,6 +176,9 @@ pub struct Conf {
     pub legacyslot: Option<String>,
     /// 当前版本号（版本自增）：`v<N>`。存量 conf 无此键 → 空（展示层回落 tag）。
     pub version: String,
+    /// 附加服务（plan-19 B：多容器项目）。默认空=现状单容器（旧 conf 零迁移）。
+    /// 主服务=既有容器（sr-<project>，公网端口）；附加=sr-<project>-<name>（仅内网）。
+    pub services: Vec<Svc>,
     /// 版本计数器（单调递增，绝不复用）：每次发布 +1；回滚不改它（回滚后再发布 = v{seq+1}）。
     /// 存量 conf 无此键 → 0。
     pub version_seq: u32,
@@ -164,6 +196,9 @@ impl Conf {
         }
         if let Some(ls) = &self.legacyslot {
             s.push_str(&format!("legacyslot={ls}\n"));
+        }
+        for v in &self.services {
+            s.push_str(&format!("svc={}|{}|{}|{}|{}\n", v.name, v.image, v.cport, v.mem, v.cpu));
         }
         s
     }
@@ -188,6 +223,7 @@ impl Conf {
             legacyslot: map.get("legacyslot").cloned().filter(|v| !v.is_empty()),
             version: map.get("version").cloned().unwrap_or_default(),
             version_seq: map.get("version_seq").and_then(|v| v.parse().ok()).unwrap_or(0),
+            services: parse_svc_lines(text)?,
         })
     }
 
@@ -211,8 +247,33 @@ impl Conf {
             "version_seq": self.version_seq,
             "url": public_url(p), "status": status,
             "port": self.port, "cport": self.cport, "mem": self.mem, "cpu": self.cpu, "updated": self.updated,
+            "services": self.services.iter().map(|v| json!({
+                "name": v.name, "image": v.image, "cport": v.cport, "mem": v.mem, "cpu": v.cpu,
+            })).collect::<Vec<_>>(),
         })
     }
+}
+
+/// conf 的 svc= 重复行解析（plan-19）；坏行指名字段。
+fn parse_svc_lines(text: &str) -> R<Vec<Svc>> {
+    let mut out = Vec::new();
+    for line in text.lines().filter(|l| l.starts_with("svc=")) {
+        let v = &line[4..];
+        let mut it = v.splitn(5, '|');
+        let (Some(name), Some(image), Some(cport), Some(mem), Some(cpu)) =
+            (it.next(), it.next(), it.next(), it.next(), it.next())
+        else {
+            return Err(ApiError::state(format!("conf svc 行字段不足: {v}")));
+        };
+        out.push(Svc {
+            name: name.to_string(),
+            image: image.to_string(),
+            cport: cport.parse().map_err(|e| ApiError::state(format!("conf svc cport: {e}")))?,
+            mem: mem.to_string(),
+            cpu: cpu.parse().map_err(|e| ApiError::state(format!("conf svc cpu: {e}")))?,
+        });
+    }
+    Ok(out)
 }
 
 pub fn read_last2(root: &Path, p: &str) -> Option<String> {
@@ -353,7 +414,27 @@ pub fn public_url(p: &str) -> String {
 /// env 文件内容（db 传**已解析**的库名：归一化新名，或沿用的 legacy 旧名）。
 /// §11：无 SHOWROOM_SLOT，SHOWROOM_BASE_PATH 恒 /<project>/。
 /// §15.2 env 自适应：mw 为启用的中间件集合——redis ∉ 集合时不再注入 REDIS_* 组（publish 照常）。
-pub fn env_file_contents(p: &str, db: &str, db_pass: &str, redis_db: u8, mw: &BTreeSet<String>) -> String {
+/// 服务发现键（plan-19 §B.1）：全体服务（含主）注入 HOST/PORT 对——任意容器读 env 即知同伴。
+/// services = (服务名, 容器名, cport) 全量；主服务名恒 "main"。
+pub fn svc_discovery_lines(services: &[(&str, &str, u16)]) -> String {
+    let mut out = String::new();
+    for (name, container, cport) in services {
+        let key = name.to_ascii_uppercase().replace('-', "_");
+        out.push_str(&format!(
+            "SHOWROOM_SVC_{key}_HOST={container}\nSHOWROOM_SVC_{key}_PORT={cport}\n"
+        ));
+    }
+    out
+}
+
+pub fn env_file_contents(
+    p: &str,
+    db: &str,
+    db_pass: &str,
+    redis_db: u8,
+    mw: &BTreeSet<String>,
+    services: &[(&str, &str, u16)],
+) -> String {
     let redis = if mw.contains("redis") {
         format!(
             "REDIS_HOST=sr-redis\n\
@@ -373,9 +454,60 @@ pub fn env_file_contents(p: &str, db: &str, db_pass: &str, redis_db: u8, mw: &BT
          DATABASE_URL=postgresql://{db}:{db_pass}@sr-postgres:5432/{db}\n\
          {redis}\
          SHOWROOM_PROJECT={p}\n\
-         SHOWROOM_BASE_PATH={bp}\n",
+         SHOWROOM_BASE_PATH={bp}\n\
+         {disc}",
         bp = base_path(p),
+        disc = svc_discovery_lines(services),
     )
+}
+
+#[cfg(test)]
+mod svc_tests {
+    use super::*;
+
+    #[test]
+    fn svc_conf_roundtrip_and_default_empty() {
+        // 旧 conf（无 svc 行）→ services 空（零迁移）
+        let c = Conf::parse("owner=u\ntag=v1\nport=8100\ncport=8080\nmem=256m\ncpu=1\nredisdb=1\nupdated=1\nversion=v1\nversion_seq=1\n").unwrap();
+        assert!(c.services.is_empty());
+        // 带服务往返
+        let c2 = Conf {
+            services: vec![Svc { name: "side".into(), image: "u/img:latest".into(), cport: 3000, mem: "128m".into(), cpu: 0.5 }],
+            ..c.clone()
+        };
+        let text = c2.to_conf();
+        assert!(text.contains("svc=side|u/img:latest|3000|128m|0.5"));
+        let c3 = Conf::parse(&text).unwrap();
+        assert_eq!(c3.services, c2.services);
+        // 坏行指名
+        assert!(Conf::parse(&format!("{}svc=broken\n", c2.to_conf())).is_err());
+    }
+
+    #[test]
+    fn discovery_lines_shape() {
+        let out = svc_discovery_lines(&[("main", "sr-demo", 8080), ("api", "sr-demo-api", 3000)]);
+        assert!(out.contains("SHOWROOM_SVC_MAIN_HOST=sr-demo\n"));
+        assert!(out.contains("SHOWROOM_SVC_MAIN_PORT=8080\n"));
+        assert!(out.contains("SHOWROOM_SVC_API_HOST=sr-demo-api\n"));
+        assert!(out.contains("SHOWROOM_SVC_API_PORT=3000\n"));
+    }
+
+    #[test]
+    fn svcreq_defaults_and_policy_services_max() {
+        let r: SvcReq = serde_json::from_str(r#"{"name":"a","image":"img","cport":1}"#).unwrap();
+        assert_eq!((r.mem.as_str(), r.cpu), ("", 0.0));
+        let d = tempfile_dir("policy");
+        std::fs::write(d.join("state/policy.env"), "SERVICES_MAX=6\n").unwrap();
+        assert_eq!(Policy::load(&d).services_max, 6);
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    fn tempfile_dir(n: &str) -> std::path::PathBuf {
+        let d = std::env::temp_dir().join(format!("sr-svct-{n}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&d);
+        std::fs::create_dir_all(d.join("state")).unwrap();
+        d
+    }
 }
 
 // —— policy.env（SPEC §5 默认值）——
@@ -390,6 +522,8 @@ pub struct Policy {
     pub allow_lan_port: bool,
     /// 内存准入预留（§10.2，MB）：MemAvailable 减去它之后须仍满足本次发布的需求。
     pub reserve_mem_mb: u64,
+    /// 每项目服务数上限（plan-19 §B.2，含主服务；policy.env `SERVICES_MAX=`，默认 4）。
+    pub services_max: u32,
     /// Redis 逻辑库池大小（§13.3；policy.env `REDIS_DBS=` 可调，默认 256）。
     /// 分配单位维持每项目一库（§13.3）；与 MAX_SLOTS 的一致性由文档说明（默认 30≤256）。
     pub redis_dbs: u16,
@@ -414,6 +548,7 @@ impl Default for Policy {
             allow_lan_port: false,
             reserve_mem_mb: 1536,
             redis_dbs: 256,
+            services_max: 4,
             disk_reserve_gb: 20,
             upload_space_factor: 4,
             bound_keys_max: 5,
@@ -433,6 +568,7 @@ impl Policy {
             allow_lan_port: m.get("ALLOW_LAN_PORT").map(|v| v != "0").unwrap_or(false),
             reserve_mem_mb: m.get("RESERVE_MEM_MB").and_then(|v| v.parse().ok()).unwrap_or(1536),
             redis_dbs: m.get("REDIS_DBS").and_then(|v| v.parse().ok()).unwrap_or(256),
+            services_max: m.get("SERVICES_MAX").and_then(|v| v.parse().ok()).filter(|v| *v >= 1).unwrap_or(4),
             disk_reserve_gb: m.get("DISK_RESERVE_GB").and_then(|v| v.parse().ok()).unwrap_or(20),
             upload_space_factor: m.get("UPLOAD_SPACE_FACTOR").and_then(|v| v.parse().ok()).unwrap_or(4),
             bound_keys_max: m.get("BOUND_KEYS_MAX")
@@ -1298,6 +1434,7 @@ mod tests {
 
     fn base_conf(updated: u64) -> Conf {
         Conf {
+            services: Vec::new(),
             user: "alice".into(),
             tag: "v1".into(),
             port: 8100,
@@ -1419,7 +1556,7 @@ mod tests {
     #[test]
     fn env_file_roundtrip() {
         let full_mw: BTreeSet<String> = ["postgres", "redis", "registry"].iter().map(|s| s.to_string()).collect();
-        let txt = env_file_contents("demo", &db_ident("demo"), "s3cret", 3, &full_mw);
+        let txt = env_file_contents("demo", &db_ident("demo"), "s3cret", 3, &full_mw, &[]);
         let m = parse_kv(&txt);
         assert_eq!(m["DB_HOST"], "sr-postgres");
         assert_eq!(m["DB_PORT"], "5432");
@@ -1435,11 +1572,11 @@ mod tests {
         assert_eq!(m["SHOWROOM_BASE_PATH"], "/demo/");
         assert!(!m.contains_key("SHOWROOM_SLOT"), "§11 移除 SHOWROOM_SLOT");
         // 大写/连字符项目：库名归一化，BASE_PATH 原样
-        let up = parse_kv(&env_file_contents("Demo-9", &db_ident("Demo-9"), "pw", 0, &full_mw));
+        let up = parse_kv(&env_file_contents("Demo-9", &db_ident("Demo-9"), "pw", 0, &full_mw, &[]));
         assert_eq!(up["DB_NAME"], "sr_Demo_9");
         assert_eq!(up["SHOWROOM_BASE_PATH"], "/Demo-9/");
         // legacy 库名沿用时 env 同样指向旧名（§9→§11 过渡期）
-        let lg = parse_kv(&env_file_contents("skill-demo", "sr_skill-demo_stable", "pw", 1, &full_mw));
+        let lg = parse_kv(&env_file_contents("skill-demo", "sr_skill-demo_stable", "pw", 1, &full_mw, &[]));
         assert_eq!(lg["DB_NAME"], "sr_skill-demo_stable");
         for k in [
             "DB_HOST", "DB_PORT", "DB_NAME", "DB_USER", "DB_PASSWORD", "DATABASE_URL",
@@ -1451,7 +1588,7 @@ mod tests {
 
         // §15.2：redis 禁用 → REDIS_* 组不再注入（DB_* 照常，publish 照常）
         let no_redis: BTreeSet<String> = ["postgres", "registry"].iter().map(|s| s.to_string()).collect();
-        let nr = env_file_contents("demo", &db_ident("demo"), "s3cret", 3, &no_redis);
+        let nr = env_file_contents("demo", &db_ident("demo"), "s3cret", 3, &no_redis, &[]);
         assert!(!nr.contains("REDIS_"), "{nr}");
         let nrm = parse_kv(&nr);
         assert_eq!(nrm["DB_NAME"], "sr_demo");

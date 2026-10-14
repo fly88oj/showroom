@@ -16,6 +16,8 @@ use crate::dockerops;
 use crate::state::{self, ApiError, R};
 
 pub struct PublishOpts {
+    /// 附加服务（plan-19 §B；None=沿用旧 conf，Some=按此对齐）。
+    pub services: Option<Vec<state::Svc>>,
     pub mem: Option<String>,
     pub cpu: Option<f64>,
     pub cport: Option<u16>,
@@ -28,6 +30,61 @@ pub struct PublishOut {
 }
 
 /// 容器名（§11）：`sr-<project>`。
+/// 附加服务容器名（plan-19）：sr-<project>-<svc>（仅内网，无 host 端口）。
+pub fn svc_container_name(p: &str, svc: &str) -> String {
+    format!("sr-{p}-{svc}")
+}
+
+/// 镜像引用拆 (repo, tag)（plan-19）：末段 `:tag`（tag 无 `/`）；缺省 tag=latest。
+pub fn split_image_ref(image: &str) -> (String, String) {
+    match image.rsplit_once(':') {
+        Some((repo, t)) if !t.is_empty() && !t.contains('/') => (repo.to_string(), t.to_string()),
+        _ => (image.to_string(), "latest".into()),
+    }
+}
+
+/// 附加服务对齐（plan-19 §B.2）：目标集合内——先 rm 再 run（附加服务无公网端口，
+/// 秒级重建可接受，免去配置漂移比对）；不在集合内的旧附加服务删除（由调用方扫描）。
+/// 单服务失败只记日志不中止（主服务已健康；下次 publish/reconcile 收敛）。
+fn align_services(root: &Path, project: &str, services: &[state::Svc], env_file: &str) {
+    let net = dockerops::DOCKER_NET;
+    // 删除不再存在的旧附加服务（防孤儿）
+    let live: std::collections::BTreeSet<String> =
+        services.iter().map(|v| v.name.clone()).collect();
+    for n in dockerops::all_container_names() {
+        if let Some(svc) = n.strip_prefix(&format!("sr-{project}-")) {
+            if !svc.contains('-') && !live.contains(svc) {
+                let _ = dockerops::run_fail_ok("docker", &["rm", "-f", &n]);
+            }
+        }
+    }
+    for v in services {
+        let cname = svc_container_name(project, &v.name);
+        let _ = dockerops::run_fail_ok("docker", &["rm", "-f", &cname]);
+        let cpu_s = v.cpu.to_string();
+        if let Err(e) = dockerops::docker(&[
+            "run", "-d", "--name", &cname, "--network", net, "--restart", "unless-stopped",
+            "--memory", &v.mem, "--cpus", &cpu_s, "--env-file", env_file, &v.image,
+        ]) {
+            eprintln!("showroomctl: publish: 附加服务 {} 启动失败: {}", v.name, e.msg);
+        }
+    }
+    let _ = root;
+}
+
+#[cfg(test)]
+mod svc_tests {
+    use super::split_image_ref;
+
+    #[test]
+    fn image_ref_split_shapes() {
+        assert_eq!(split_image_ref("u/img:v1"), ("u/img".into(), "v1".into()));
+        assert_eq!(split_image_ref("u/img"), ("u/img".into(), "latest".into()));
+        assert_eq!(split_image_ref("reg:5000/u/img:2"), ("reg:5000/u/img".into(), "2".into()));
+        assert_eq!(split_image_ref("a:b:c"), ("a:b".into(), "c".into()));
+    }
+}
+
 pub fn container_name(p: &str) -> String {
     format!("sr-{p}")
 }
@@ -141,11 +198,54 @@ fn publish_mode(
     if old.is_none() && state::all_confs(root).len() as u32 >= policy.max_slots {
         return Err(ApiError::new("E_QUOTA", format!("MAX_SLOTS={} reached", policy.max_slots)));
     }
+    // 附加服务归一化（plan-19 §B.2）：None=沿用旧 conf；Some=按此对齐。
+    // 名称合法 + 去重 + 总数（含主）≤ SERVICES_MAX + 镜像引用补全（无 / 前缀补 <user>/）
+    // + mem/cpu 缺省 + 内存准入按全体和。
+    let mut services = opts.services.clone().unwrap_or_else(|| {
+        old.as_ref().map(|c| c.services.clone()).unwrap_or_default()
+    });
+    {
+        use std::collections::BTreeSet;
+        let mut seen = BTreeSet::new();
+        for v in &mut services {
+            state::check_name("service", &v.name)?;
+            if !seen.insert(v.name.clone()) {
+                return Err(ApiError::new("E_NAME", format!("服务名重复: {}", v.name)));
+            }
+            if v.image.is_empty() {
+                return Err(ApiError::new("E_NAME", "服务镜像为空"));
+            }
+            if !v.image.contains('/') {
+                v.image = format!("{user}/{}", v.image);
+            }
+            if !v.image.rsplit(':').next().is_some_and(|t| !t.contains('/') && !t.is_empty())
+                || !v.image.contains(':')
+            {
+                v.image.push_str(":latest");
+            }
+            if v.mem.is_empty() {
+                v.mem = "128m".into();
+            }
+            if v.cpu == 0.0 {
+                v.cpu = 0.5;
+            }
+            state::effective_mem(&policy, Some(&v.mem))?;
+        }
+        if 1 + services.len() as u32 > policy.services_max {
+            return Err(ApiError::new(
+                "E_QUOTA",
+                format!("SERVICES_MAX={} reached（含主服务）", policy.services_max),
+            ));
+        }
+    }
     let mem = state::effective_mem(&policy, opts.mem.as_deref().or(old.as_ref().map(|c| c.mem.as_str())))?;
     // 内存准入（SPEC §10.2）：MemAvailable − RESERVE_MEM_MB ≥ 本次需求才放行，否则 E_QUOTA。
     // 只查**本次请求**的 need（当前可用减预留是否满足本次需求），不累加存量项目——
     // 存量由容器 --memory 硬限自保护。放在创建容器（含 DB 供给/env 写盘）之前，失败零副作用。
-    let need_mb = state::parse_mem(&mem).unwrap_or(0) >> 20;
+    let mut need_mb = state::parse_mem(&mem).unwrap_or(0) >> 20;
+    for v in &services {
+        need_mb += state::parse_mem(&v.mem).unwrap_or(0) >> 20;
+    }
     if let Err(m) = state::mem_admission(need_mb, mem_available_kb()?, policy.reserve_mem_mb) {
         return Err(ApiError::new("E_QUOTA", m));
     }
@@ -172,6 +272,18 @@ fn publish_mode(
         }
         Some(sz) => disk_admit(root, sz)?,
     }
+    for v in &services {
+        let (repo, stag) = split_image_ref(&v.image);
+        match dockerops::manifest_size(root, &repo, &stag)? {
+            None => {
+                return Err(ApiError::new(
+                    "E_NOTFOUND",
+                    format!("service image {}:{} not in registry", repo, stag),
+                ));
+            }
+            Some(sz) => disk_admit(root, sz)?,
+        }
+    }
 
     // DB 供给（SPEC §9.2 首建不重建，数据保留）：存量库（归一化新名或 §11 迁移沿用旧名）存在则
     // 沿用并仅对齐角色密码（下方 env 全量重写 + 容器滚动重启使新凭据生效）；不存在才 CREATE。
@@ -192,9 +304,16 @@ fn publish_mode(
     // env 文件（SPEC §6 全字段具体化；§11 无 SHOWROOM_SLOT；§15.2 禁用组不注入）
     fs::create_dir_all(state::projects_dir(root))?;
     let mw = crate::middleware::HostEnv::load(root).middleware;
+    let main_container = container_name(project);
+    let svc_containers: Vec<String> =
+        services.iter().map(|v| svc_container_name(project, &v.name)).collect();
+    let mut disc: Vec<(&str, &str, u16)> = vec![("main", main_container.as_str(), cport)];
+    for (v, c) in services.iter().zip(svc_containers.iter()) {
+        disc.push((v.name.as_str(), c.as_str(), v.cport));
+    }
     fs::write(
         state::env_path(root, project),
-        state::env_file_contents(project, &db, &db_pass, redisdb, &mw),
+        state::env_file_contents(project, &db, &db_pass, redisdb, &mw, &disc),
     )?;
 
     // 容器：同项目唯一 host 端口 → 先停旧、以 -new 起新、健康后删旧改名
@@ -227,6 +346,7 @@ fn publish_mode(
     let _ = dockerops::run_fail_ok("docker", &["rm", "-f", &name]); // 旧容器（可能本就不存在）
     dockerops::docker(&["rename", &newname, &name])?;
     state::register_port(root, port, project)?;
+    align_services(root, project, &services, env_file);
 
     // last2 = 上一 tag（回滚兜底：无发布历史的老项目据此回跳；幂等重发也刷新）
     if let Some(o) = &old {
@@ -252,6 +372,7 @@ fn publish_mode(
         ),
     };
     let conf = state::Conf {
+        services,
         user: user.to_string(),
         tag: tag.to_string(),
         port,

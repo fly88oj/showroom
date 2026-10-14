@@ -319,7 +319,7 @@ fn dispatch(cli: &Cli) -> R<()> {
                 user,
                 project,
                 tag,
-                publish::PublishOpts { mem: mem.clone(), cpu: *cpu, cport: *container_port },
+                publish::PublishOpts { services: None, mem: mem.clone(), cpu: *cpu, cport: *container_port },
             )?;
             out(
                 j,
@@ -387,7 +387,7 @@ fn dispatch(cli: &Cli) -> R<()> {
             Ok(())
         }
         Cmd::Logs { project, tail } => {
-            print!("{}", ops::logs(&root, project, *tail)?);
+            print!("{}", ops::logs(&root, project, None, *tail)?);
             Ok(())
         }
         Cmd::Env { project } => {

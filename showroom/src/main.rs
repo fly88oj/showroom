@@ -100,6 +100,9 @@ enum Cmd {
         cpu: Option<f64>,
         #[arg(long)]
         container_port: Option<u16>,
+        /// 附加服务（plan-19，可重复）：name=image[:tag],port[,mem[,cpu]]——镜像须已在平台镜像库
+        #[arg(long = "svc", value_name = "SPEC")]
+        services: Vec<String>,
         /// 等待 status=running（2s 轮询，90s 超时）后打印完整 URL
         #[arg(long)]
         wait: bool,
@@ -130,6 +133,9 @@ enum Cmd {
     /// 查看日志
     Logs {
         project: String,
+        /// 服务名（plan-19：缺省=主服务）
+        #[arg(long)]
+        svc: Option<String>,
         #[arg(long, default_value_t = 100)]
         tail: u32,
         #[arg(short = 'f', long)]
@@ -339,10 +345,11 @@ showroom db reset <项目> --confirm                    # 清库重建（破坏�
             let project = pick_project(project);
             deploy(&cfg, cli.server, &project, &tag, mem.as_deref(), *cpu, *container_port)
         }
-        Cmd::Publish { project_tag, mem, cpu, container_port, wait } => {
+        Cmd::Publish { project_tag, mem, cpu, container_port, services, wait } => {
             let (project, tag) = split_project_tag(project_tag);
             let project = pick_project(project);
-            publish(&cfg, cli.server, &project, &tag, mem.as_deref(), *cpu, *container_port, *wait)?;
+            let svcs = parse_svc_specs(services)?;
+            publish(&cfg, cli.server, &project, &tag, mem.as_deref(), *cpu, *container_port, &svcs, *wait)?;
             Ok(())
         }
         Cmd::Ps { json } => ps(&cfg, cli.server, *json),
@@ -350,8 +357,8 @@ showroom db reset <项目> --confirm                    # 清库重建（破坏�
         Cmd::Space { json } => space_cmd(&cfg, cli.server, *json),
         Cmd::RmImage { image } => rm_image(&cfg, cli.server, image),
         Cmd::Url { project } => url_cmd(&cfg, cli.server, project),
-        Cmd::Logs { project, tail, follow } => {
-            logs_cmd(&cfg, cli.server, project, *tail, *follow)
+        Cmd::Logs { project, svc, tail, follow } => {
+            logs_cmd(&cfg, cli.server, project, svc.as_deref(), *tail, *follow)
         }
         Cmd::Env { project } => env_cmd(&cfg, cli.server, project),
         Cmd::Rollback { project } => {
@@ -622,12 +629,16 @@ fn publish(
     mem: Option<&str>,
     cpu: Option<f64>,
     container_port: Option<u16>,
+    services: &[serde_json::Value],
     wait: bool,
 ) -> Result<String, String> {
     check_project(project)?;
     check_tag(tag)?;
     let api = Api::connect(cfg, force)?;
     let mut body = json!({ "project": project, "tag": tag });
+    if !services.is_empty() {
+        body["services"] = json!(services);
+    }
     if let Some(x) = mem {
         body["mem"] = json!(x);
     }
@@ -704,7 +715,7 @@ fn deploy(
     if let Err(e) = push(cfg, force, project, tag, Via::Auto) {
         return Err(deploy_err(1, "push", &e));
     }
-    match publish(cfg, force, project, tag, mem, cpu, container_port, true) {
+    match publish(cfg, force, project, tag, mem, cpu, container_port, &[], true) {
         Ok(url) => {
             println!("{}", banner(&url));
             Ok(())
@@ -727,18 +738,44 @@ fn ps(cfg: &Config, force: Option<Which>, json_out: bool) -> Result<(), String> 
         return Ok(());
     }
     let arr = v["projects"].as_array().cloned().unwrap_or_default();
-    println!("{:<26} {:<10} {:<26} USER", "PROJECT", "STATUS", "TAG");
+    println!("{:<26} {:<10} {:<26} {:<4} USER", "PROJECT", "STATUS", "TAG", "SVC");
     for e in &arr {
         let g = |k: &str| e[k].as_str().unwrap_or("");
+        let nsvc = e["services"].as_array().map(|a| a.len()).unwrap_or(0);
         println!(
-            "{:<26} {:<10} {:<26} {}",
+            "{:<26} {:<10} {:<26} {:<4} {}",
             trunc(g("project"), 25),
             trunc(g("status"), 9),
             trunc(g("tag"), 25),
+            if nsvc > 0 { format!("+{nsvc}") } else { "-".into() },
             g("user")
         );
     }
     Ok(())
+}
+
+/// --svc SPEC 解析（plan-19）：name=image[:tag],port[,mem[,cpu]]
+fn parse_svc_specs(specs: &[String]) -> Result<Vec<serde_json::Value>, String> {
+    let mut out = Vec::new();
+    for sp in specs {
+        let mut it = sp.split(',');
+        let head = it.next().ok_or("空 svc 规格")?;
+        let (name, image) = head
+            .split_once('=')
+            .ok_or_else(|| format!("--svc 须 name=image…，got '{sp}'"))?;
+        if name.is_empty() || image.is_empty() {
+            return Err(format!("--svc name/image 为空：'{sp}'"));
+        }
+        let cport: u16 = it
+            .next()
+            .ok_or_else(|| format!("--svc 缺 port：'{sp}'"))?
+            .parse()
+            .map_err(|_| format!("--svc port 非法：'{sp}'"))?;
+        let mem = it.next().unwrap_or("128m").to_string();
+        let cpu: f64 = it.next().unwrap_or("0.5").parse().unwrap_or(0.5);
+        out.push(serde_json::json!({ "name": name, "image": image, "cport": cport, "mem": mem, "cpu": cpu }));
+    }
+    Ok(out)
 }
 
 fn trunc(s: &str, n: usize) -> String {
@@ -812,12 +849,16 @@ fn logs_cmd(
     cfg: &Config,
     force: Option<Which>,
     project: &str,
+    svc: Option<&str>,
     tail: u32,
     follow: bool,
 ) -> Result<(), String> {
     check_project(project)?;
     let api = Api::connect(cfg, force)?;
-    let q = api::logs_query(project, tail);
+    let mut q = api::logs_query(project, tail);
+    if let Some(sv) = svc {
+        q.push_str(&format!("&service={sv}"));
+    }
     let mut printed = 0usize;
     loop {
         let v = api.signed_get(&q)?;

@@ -23,6 +23,8 @@ export const ENV_DESC: Record<string, string> = {
   REDIS_URL: "完整 Redis 连接串",
   SHOWROOM_PROJECT: "项目名",
   SHOWROOM_BASE_PATH: "对外子路径前缀（恒为 /<项目名>/；镜像内应据此适配或使用相对 URL）",
+  SHOWROOM_SVC_MAIN_HOST: "主服务容器名（本项目对公网的服务）",
+  SHOWROOM_SVC_MAIN_PORT: "主服务容器端口",
 };
 
 // —— 数据 TTL 缓存（plan-17 §3）：内存+TTL 单源；写操作/事件强制失效（force 绕过）——

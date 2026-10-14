@@ -23,6 +23,7 @@ export function Help() {
           <TabsTrigger value="account">账号</TabsTrigger>
           <TabsTrigger value="cli">CLI 使用</TabsTrigger>
           <TabsTrigger value="mirror">镜像规范</TabsTrigger>
+          <TabsTrigger value="mw">中间件连接</TabsTrigger>
           <TabsTrigger value="tools">工具下载</TabsTrigger>
           <TabsTrigger value="errors">错误码</TabsTrigger>
         </TabsList>
@@ -151,6 +152,35 @@ export function Help() {
           <p className="text-xs text-muted-foreground">文件大小在首次下载后显示。CLI 首次配置见「CLI 使用」栏目。</p>
         </TabsContent>
 
+        <TabsContent value="mw" className="mt-4 flex flex-col gap-3">
+          <h2 className="text-sm font-semibold text-info">容器内如何连接中间件</h2>
+          <p className="text-xs text-muted-foreground">发布时平台自动向每个容器注入以下环境变量（12-factor：应用读 env 即可，无需配置文件）；真实值随时在「我的项目 → 行菜单 → 环境变量」或 CLI <code className="font-mono">showroom env &lt;项目&gt;</code> 查看。</p>
+          <div className="rounded-lg border">
+            <table className="w-full text-xs">
+              <tbody>
+                {[
+                  ["DB_HOST / DB_PORT", "PostgreSQL 地址（sr-postgres:5432，平台内置）"],
+                  ["DB_NAME / DB_USER", "本项目专属库名/用户（sr_<项目名>，发布时创建）"],
+                  ["DB_PASSWORD", "随机生成（每次发布轮换）"],
+                  ["DATABASE_URL", "完整连接串：postgresql://…@sr-postgres:5432/…"],
+                  ["REDIS_HOST / REDIS_PORT / REDIS_DB", "Redis 地址与本项目专属逻辑库（禁用 Redis 中间件时不注入）"],
+                  ["REDIS_URL", "完整连接串：redis://sr-redis:6379/<n>"],
+                  ["SHOWROOM_PROJECT / SHOWROOM_BASE_PATH", "项目名与对外子路径前缀（恒 /<项目名>/）"],
+                  ["SHOWROOM_SVC_<名称>_HOST/_PORT", "多容器服务发现（plan-19）：全体容器可发现主服务（main）与各附加服务"],
+                ].map(([k, d]) => (
+                  <tr key={k} className="border-b last:border-0">
+                    <td className="w-72 p-2 font-mono align-top">{k}</td>
+                    <td className="p-2 text-muted-foreground align-top">{d}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+          <h3 className="text-sm font-semibold mt-2">多容器项目（附加服务）</h3>
+          <p className="text-xs text-muted-foreground">发布页「部署参数 → 附加服务」或 CLI <code className="font-mono">showroom publish … --svc api=my/api:3000,3000</code> 添加；附加服务仅内网（不出公网端口），与主服务同网络可按容器名互访；日志 <code className="font-mono">showroom logs &lt;项目&gt; --svc api</code>。</p>
+          <h3 className="text-sm font-semibold mt-2">镜像内配置文件替换</h3>
+          <p className="text-xs text-muted-foreground">推荐入口脚本 <code className="font-mono">envsubst &lt; config.tpl &gt; config</code>——模板占位符（<code className="font-mono">${'$'}{'{'}DB_PASSWORD{'}'}</code> 等）在容器启动时由注入的真实值替换。</p>
+        </TabsContent>
         <TabsContent value="errors" className="mt-4 flex flex-col gap-3">
           <h2 className="text-sm font-semibold text-info">常见错误码</h2>
           <div className="rounded-lg border">

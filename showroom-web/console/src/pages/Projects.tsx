@@ -21,6 +21,7 @@ import {
 import { cn } from "cn";
 import { consumeNdjson, api } from "@/lib/api";
 import { ENV_DESC } from "@/lib/state";
+import { toast } from "sonner";
 import { useApp, apiFailToast, fmtTime, externalUrl, isPrivateHost, type Project } from "@/lib/app";
 
 /** 我的项目：状态机行操作 + 更多菜单 + 日志抽屉 + 回滚/环境变量（对齐原版 proj.mjs） */
@@ -391,13 +392,33 @@ function EnvDialog({ project, onClose }: { project: Project | null; onClose: () 
     return () => { alive = false; };
   }, [project?.project]); // eslint-disable-line react-hooks/exhaustive-deps
   const keys = env ? Object.keys(env).sort() : [];
+  const conn = env ? [
+    ["PostgreSQL", env.DATABASE_URL || ""],
+    ["Redis", env.REDIS_URL || ""],
+    ...(env.SHOWROOM_SVC_API_HOST ? [["附加服务 api", `${env.SHOWROOM_SVC_API_HOST}:${env.SHOWROOM_SVC_API_PORT}`]] : []),
+  ].filter(([, v]) => v) : [];
+  const svcKeys = keys.filter((k) => k.startsWith("SHOWROOM_SVC_"));
+  const baseKeys = keys.filter((k) => !k.startsWith("SHOWROOM_SVC_"));
+  const [reveal, setReveal] = useState(false);
+  const val = (k: string) => (k === "DB_PASSWORD" && !reveal ? "••••••••（点右侧显）" : env![k]);
   return (
     <Dialog open={!!project} onOpenChange={(v) => !v && onClose()}>
       <DialogContent className="sm:max-w-2xl">
         <DialogHeader>
-          <DialogTitle>环境变量 · <span className="font-mono">{project?.project}</span></DialogTitle>
-          <DialogDescription>发布时自动注入（<span className="font-mono">showroom env</span> 同）。</DialogDescription>
+          <DialogTitle>连接信息 · <span className="font-mono">{project?.project}</span></DialogTitle>
+          <DialogDescription>容器内应用按 12-factor 读环境变量即可连接（<span className="font-mono">showroom env</span> 同）。</DialogDescription>
         </DialogHeader>
+        {conn.length > 0 && (
+          <div className="flex flex-col gap-1.5">
+            {conn.map(([label, v]) => (
+              <div key={label} className="flex items-center gap-2 text-xs">
+                <span className="w-20 shrink-0 font-medium">{label}</span>
+                <code className="flex-1 break-all rounded bg-muted px-2 py-1 font-mono">{v}</code>
+                <Button variant="ghost" size="sm" onClick={() => { void navigator.clipboard.writeText(v); toast.success("已复制"); }}>复制</Button>
+              </div>
+            ))}
+          </div>
+        )}
         <div className="rounded-lg border">
           <Table>
             <TableHeader>
@@ -410,17 +431,30 @@ function EnvDialog({ project, onClose }: { project: Project | null; onClose: () 
             <TableBody>
               {env === null ? (
                 <TableRow><TableCell colSpan={3} className="py-6 text-center text-xs text-muted-foreground">加载中…</TableCell></TableRow>
-              ) : keys.length ? keys.map((k) => (
+              ) : baseKeys.length ? baseKeys.map((k) => (
                 <TableRow key={k}>
                   <TableCell className="font-mono text-xs">{k}</TableCell>
-                  <TableCell className="break-all font-mono text-xs">{env[k]}</TableCell>
-                  <TableCell className="text-xs text-muted-foreground">{ENV_DESC[k] || ""}</TableCell>
+                  <TableCell className="break-all font-mono text-xs">
+                    {val(k)}
+                    {k === "DB_PASSWORD" && (
+                      <Button variant="link" size="sm" className="h-auto p-0 ml-1" onClick={() => setReveal((r) => !r)}>{reveal ? "隐藏" : "显示"}</Button>
+                    )}
+                  </TableCell>
+                  <TableCell className="text-xs text-muted-foreground">{ENV_DESC[k] || (k.startsWith("SHOWROOM_SVC_") ? "附加服务发现键（多容器项目，plan-19）" : "")}</TableCell>
                 </TableRow>
               )) : (
                 <TableRow><TableCell colSpan={3} className="py-6 text-center text-xs text-muted-foreground">（空）</TableCell></TableRow>
               )}
             </TableBody>
           </Table>
+        </div>
+        {svcKeys.length > 0 && (
+          <div className="text-xs text-muted-foreground">
+            服务发现键：附加服务（多容器）以 <code className="font-mono">SHOWROOM_SVC_&lt;名称大写&gt;_HOST/_PORT</code> 注入全体容器（见上表尾部行）。
+          </div>
+        )}
+        <div className="text-xs text-muted-foreground">
+          镜像内配置文件需替换时，推荐入口脚本 <code className="font-mono">envsubst &lt; config.tpl &gt; config</code>——模板占位符（如 <code className="font-mono">${'$'}{'{'}DB_PASSWORD{'}'}</code>）由容器启动时自动替换。
         </div>
       </DialogContent>
     </Dialog>
