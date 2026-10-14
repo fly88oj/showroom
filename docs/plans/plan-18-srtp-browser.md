@@ -31,8 +31,8 @@ TCP 载波**逐层同构**（记录层 + 应用帧 + HTTP/1.1 字节），三处
 载波信封按载体而定，**记录层及以上完全共享**：
 
 ```
-TCP 载波（CLI，已实施）："SRTP"0x01 flags ‖ 384B wrap ‖ 记录流（字节流无消息边界）
-WS  载波（本文）        ：msg[0]  = 384B wrap
+TCP 载波（CLI，v1.1 起）："SRTP"0x01 flags ‖ 8B srtp_id ‖ 384B wrap ‖ 记录流
+WS  载波（本文）        ：msg[0]  = 8B srtp_id ‖ 384B wrap
                          msg[n]  = 记录字节（0..N 条记录拼接；WS 消息边界即分片边界）
 记录 = [12B nonce][4B 大端密文长][密文‖16B tag]            （TWriter/TReader，不变）
 上行记录明文 = 应用帧 [8B 大端长度][HTTP/1.1 请求字节]      （FrameFwd，不变）
@@ -82,14 +82,46 @@ where I: Stream<Item = Vec<u8>>, O: Sink<Vec<u8>>
 - 服务端空闲心跳：axum ws `Ping` 每 20s，两轮无 `Pong` 判死清理（浏览器自动回 Pong）。
 - 日志口径：`srtp-ws 会话建立`（与网关的 `SRTP 会话建立` 区分，排障可 grep）。
 
-### 3.3 平台公钥下发（登录前可得）
+### 3.3 密钥编排：动态下发、按用户隔离（OPAQUE 绑定）——替代静态公钥文件
 
-- serve 启动时幂等拷贝 `state/platform_rsa.pub` → `_console/srtp.pub`（静态资产，
-  随 precompress）。控制台在发起 SRTP 前直接 GET 该文件——公钥本就是公开物，
-  无新匿名端点、不破零信息纪律。
-- ⚠ 诚实边界（如实写进 SPEC §2.2）：明文 HTTP 下分发的公钥/控制台本体可被
-  浏览器→中转段上的**主动**中间人替换。SRTP 的威胁模型是「中转运营方与被动观察者
-  看不到 API 明文」；抗主动 MITM 需入口真 HTTPS（域名+证书，独立事项）。
+**问题重述（先厘清密码学事实）**：公钥是公开物，被「窃取」无害；要防的是两件事——
+①传输途中的**替换**（主动 MITM 换自己的公钥 → 解密再转封 = 全程窃听）；
+②服务端私钥失窃的**波及面**。静态文件分发（初稿方案）对两者皆无防御。
+
+**核心洞察：本系统已有服务端身份验证——OPAQUE 登录**。登录仅对真实服务端可完成
+（MITM 无 OPRF 密钥不可能代答），且 opaque-ke 两侧各得同一 `session_key`（AKE 输出，
+依赖面已核实）。因此：
+
+```
+login-finish 响应（客户端此刻已确证对端=真实服务端）附带：
+  srtp_id      : 8B 随机句柄（本次登录新鲜；中转只见此不可逆句柄，用户名不露）
+  srtp_wrap_pub: 该用户的 SRTP 包裹公钥（PEM）
+  key_mac      : HMAC-SHA256(opaque_session_key, "srtp-key-v1" ‖ srtp_id ‖ srtp_wrap_pub)
+```
+
+- **防替换（①）**：客户端以本地 OPAQUE session_key 验 key_mac——MITM 改任何一个字段
+  即验签失败 → **fail-closed**（向用户报告「检测到传输链路篡改」并禁用该会话）。
+  这同时给了此前不具备的**主动篡改检测能力**。旧 (pub, mac) 重放无效（MAC 绑定本次
+  登录的新鲜 session_key）。
+- **按用户隔离（②）**：包裹密钥 per-user（`state/users/<u>/srtp_rsa{,.pub}`，RSA-3072，
+  首次登录惰性生成、0600）。单用户私钥失窃只暴露该用户流量；密码重置/吊销即轮换该用户
+  密钥（不动他人）。诚实边界：单机部署下全部私钥同居一磁盘——隔离的价值是**定向轮换
+  与波及面收敛**，不是抗整站磁盘失窃；抗「录制流量 + 事后密钥失窃」的前向保密见 §3.5。
+- **动态性**：密钥随每次登录下发（内存持有，不落客户端盘）——轮换即时生效，无静态
+  文件的缓存/过期问题；原 `srtp.pub` 静态资产方案作废（匿名面反而收窄）。
+- **多设备**：同用户多设备各自持有 srtp_id；`state/srtp_ids.json` 维护 id→user 映射
+  （登录签发、登出/吊销作废、幂等 GC）。网关与 serve 共享该映射（内存缓存 + 落盘）。
+
+**前置格式变更（v1.1）**：上行 wrap 前加 8B srtp_id（见 §2）——网关/serve 先查
+id→用户私钥，再解 wrap。平台级 RSA 密钥保留给 §2 上传信封（import 通道），不动。
+
+### 3.5 前向保密（明确缓办，记录取舍）
+
+per-user 静态密钥不能防「录制流量 + 事后私钥失窃」的回放解密。彻底解法 = 每次登录
+下发**临时** X25519 密钥（ECIES 取代 RSA-OAEP wrap，x25519-dalek + HKDF，会话结束
+即焚）。缓办理由：新增一条密码学路径（依赖+实现+审计面），而其防御的对象（事后磁盘
+失窃）在本机部署的现实威胁排序中低于 MITM 替换（§3.3 已解）；格式已版本化（SRTP
+v1.1），后续升级为 v1.2 临时密钥时载波与帧层零改动。
 
 ## 4. wasm 垫片新增（showroom-common/wasm_shim，C-ABI）
 
@@ -110,9 +142,12 @@ sr_srtp_end(sid)                                     // 会话收尾
 
 ### 5.1 两级与能力判定（与 CLI 同哲学：尝试 + 降级，零配置）
 
-- **能力探测 = 首个 api() 调用时懒连接**：`new WebSocket("wss?://origin/_srtp",
-  "showroom-srtp-v1")`，3s 内握手+wrap 应答成功 → Tier 1；失败（404/超时/旧服务端）
-  → **页面会话内粘性 Tier 2**（与 CLI 进程内粘性对齐）。
+- **能力探测与激活时序**：`/_api/auth/*` 登录族**恒走 Tier 2**（OPAQUE 本就是为
+  敌意信道设计的零知识交换，无需密封；且包裹公钥恰由 login-finish 下发——先有蛋）。
+  login-finish 验 key_mac 成功后建立 WS 通道；此后全部 api() 走 Tier 1。
+  WS 建立失败（404/超时/旧服务端）→ 页面会话内粘性 Tier 2（与 CLI 对齐）。
+  key_mac 验证失败 → fail-closed 报「检测到传输链路篡改」并中止（不降级——降级
+  正是 MITM 所愿）。
 - 判定不依赖 Caddy 头注入等服务器配置面；LAN 入口旧服务端自动回落，双端版本任意组合。
 - 匿名访客不建连（登录页纯静态+登录提交才首个 api 调用——懒连接天然覆盖）。
 
@@ -149,7 +184,7 @@ class SrtpChannel {
 |---|---|---|
 | frps 中转看 API 流量 | 看不到（高熵记录） | 本设计主目标 |
 | 浏览器→中转被动窃听 | 看不到 | 同上 |
-| 浏览器→中转**主动** MITM | **不在范围内** | 可换 JS/wasm/srtp.pub；根治=入口 HTTPS（独立事项） |
+| 浏览器→中转**主动** MITM（密钥替换） | **可检测并阻断** | OPAQUE 绑定 key_mac，fail-closed（§3.3）；但 JS/wasm 本体替换仍防不住——根治=入口 HTTPS（独立事项） |
 | 服务端认证/防重放 | 不变 | SR-SIG1+nonce 在记录内层原样验 |
 | 设备/密钥模型 | 不变 | 密封管道内仍是逐请求签名（前轮设计结论：SRTP≠身份） |
 | 明文直通流量（匿名访客/Docker Push import） | 不变 | 网关混合探测原样 |
@@ -158,8 +193,9 @@ class SrtpChannel {
 
 | 步骤 | 内容 | 量级 |
 |---|---|---|
+| S0 | 密钥编排（§3.3）：login-finish 附 (srtp_id, per-user pub, key_mac)；opaque 两侧 session_key 透出；srtp_ids.json 映射 + 网关/serve 内存缓存；v1.1 前置 8B id；CLI 同步（登录后内存持有） | ~250 行 |
 | S1 | common：wasm_shim 四导出 + 原生会话包装 + 单测（native 侧 TWriter/TReader 组合） | ~150 行 |
-| S2 | ctl：axum ws feature、`/_srtp` 路由 + 会话状态机（泛型通道）+ serve 启动拷贝 srtp.pub + WS 真socket 单测（dev-dep tokio-tungstenite） | ~300 行 |
+| S2 | ctl：axum ws feature、`/_srtp` 路由 + 会话状态机（泛型通道）+ WS 真socket 单测（dev-dep tokio-tungstenite） | ~300 行 |
 | S3 | Caddyfile 渲染：showroom-app 片段加 `/_srtp` 反代（setup 快照测试同步） | ~10 行 |
 | S4 | console：srtp.ts（通道/序列化/解析/降级）+ api/upload 接线 + vitest（移植形状测试） | ~400 行 |
 | S5 | SPEC §2.2（WS 载波）+ §2.1 补一句「载波信封按载体」+ architecture D22 + deployment | 文档 |
