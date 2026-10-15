@@ -384,7 +384,7 @@ export function Publish({
                   <span className="text-sm font-medium">自定义环境变量（全体容器）</span>
                   <Button type="button" variant="outline" size="sm" onClick={() => setUenvs((a) => [...a, { k: "", v: "" }])}>+ 添加变量</Button>
                 </div>
-                <p className="text-xs text-muted-foreground">任意应用变量（如 LOG_LEVEL / TIMEZONE）注入每个容器；与平台默认键同名时覆盖默认值；配置随版本走。</p>
+                <p className="text-xs text-muted-foreground">任意应用变量（如 LOG_LEVEL / TIMEZONE）注入每个容器；同键覆写平台默认值；值支持 <span className="font-mono">${'{'}VAR{'}'}</span> 引用平台凭据（如 <span className="font-mono">${'{'}DATABASE_URL{'}'}</span>）；配置随版本走（回滚恢复）。</p>
                 {uenvs.map((u, i) => (
                   <div key={`e${i}`} className="grid gap-2 sm:grid-cols-[1fr_3fr_auto]">
                     <Input placeholder="变量名（应用自己的键，如 LOG_LEVEL）" value={u.k} onChange={(e) => setUenvs((a) => a.map((x, j) => (j === i ? { ...x, k: e.target.value } : x)))} />

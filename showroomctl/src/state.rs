@@ -306,6 +306,44 @@ fn parse_svc_lines(text: &str) -> R<Vec<Svc>> {
     Ok(out)
 }
 
+/// 自定义变量值中的 `${VAR}` 插值（plan-21）：解析时以已计算的变量集填充——
+/// 可引用平台注入的任意键（DB_PASSWORD/DATABASE_URL/SHOWROOM_SVC_*_HOST 等）。
+/// 未定义引用原样保留；递归展开上限 5 层（防自引用死循环）。
+pub fn interpolate_vars(value: &str, vars: &std::collections::BTreeMap<String, String>) -> String {
+    let mut cur = value.to_string();
+    for _ in 0..5 {
+        let mut out = String::with_capacity(cur.len());
+        let mut rest = cur.as_str();
+        let mut changed = false;
+        while let Some(start) = rest.find("${") {
+            out.push_str(&rest[..start]);
+            let after = &rest[start + 2..];
+            match after.find('}') {
+                Some(end) => {
+                    let name = &after[..end];
+                    if let Some(v) = vars.get(name) {
+                        out.push_str(v);
+                        changed = true;
+                    } else {
+                        out.push_str(&rest[start..start + 2 + end + 1]); // 未定义：原样
+                    }
+                    rest = &after[end + 1..];
+                }
+                None => {
+                    out.push_str(&rest[start..]);
+                    rest = "";
+                }
+            }
+        }
+        out.push_str(rest);
+        cur = out;
+        if !changed {
+            break;
+        }
+    }
+    cur
+}
+
 /// conf 的 uenv= 重复行解析（plan-20）；坏行（无 `|`）跳过（值可含任何字符除换行）。
 fn parse_uenv_lines(text: &str) -> Vec<(String, String)> {
     text.lines()
@@ -480,9 +518,6 @@ pub fn public_url(p: &str) -> String {
     format!("{}/{}", base.trim_end_matches('/'), bp.trim_start_matches('/'))
 }
 
-/// env 文件内容（db 传**已解析**的库名：归一化新名，或沿用的 legacy 旧名）。
-/// §11：无 SHOWROOM_SLOT，SHOWROOM_BASE_PATH 恒 /<project>/。
-/// §15.2 env 自适应：mw 为启用的中间件集合——redis ∉ 集合时不再注入 REDIS_* 组（publish 照常）。
 /// disc 全量构造（单源；publish/dbmaint 共用——此前两处各抄 8 行，评审实锤）。
 pub fn disc_for(p: &str, main_cport: u16, services: &[Svc]) -> Vec<(String, String, u16)> {
     let mut disc = vec![("main".to_string(), format!("sr-{p}"), main_cport)];
@@ -524,7 +559,7 @@ pub fn env_file_contents(
     } else {
         String::new()
     };
-    format!(
+    let base = format!(
         "DB_HOST=sr-postgres\n\
          DB_PORT=5432\n\
          DB_NAME={db}\n\
@@ -534,20 +569,49 @@ pub fn env_file_contents(
          {redis}\
          SHOWROOM_PROJECT={p}\n\
          SHOWROOM_BASE_PATH={bp}\n\
-         {disc}\
-         {custom}",
+         {disc}",
         bp = base_path(p),
         disc = svc_discovery_lines(services),
-        // 自定义块在最后：Docker --env-file 同键后者覆盖前者 → 可覆写任意平台默认值
-        custom = uenv
-            .iter()
-            .map(|(k, v)| format!("{k}={v}\n"))
-            .collect::<String>(),
-    )
+    );
+    // 自定义块在最后：Docker --env-file 同键后者覆盖前者 → 可覆写任意平台默认值。
+    // ${VAR} 插值：以 base 块的完整变量集解析自定义值（plan-21）——可引用 DB_PASSWORD 等
+    let vars: std::collections::BTreeMap<String, String> = base
+        .lines()
+        .filter_map(|l| l.split_once('=').map(|(k, v)| (k.to_string(), v.to_string())))
+        .collect();
+    let custom = uenv
+        .iter()
+        .map(|(k, v)| format!("{k}={}\n", interpolate_vars(v, &vars)))
+        .collect::<String>();
+    format!("{base}{custom}")
 }
 
 #[cfg(test)]
 mod svc_tests {
+
+    #[test]
+    fn interpolate_resolves_platform_vars_and_unresolved_kept() {
+        let mut vars = std::collections::BTreeMap::new();
+        vars.insert("DB_PASSWORD".to_string(), "s3cret".to_string());
+        vars.insert("DB_HOST".to_string(), "sr-postgres".to_string());
+        // 基本引用
+        assert_eq!(interpolate_vars("pw=${DB_PASSWORD}", &vars), "pw=s3cret");
+        // 混合多引用 + 字面量
+        assert_eq!(
+            interpolate_vars("host=${DB_HOST}:5432 pw=${DB_PASSWORD}", &vars),
+            "host=sr-postgres:5432 pw=s3cret"
+        );
+        // 未定义：原样保留
+        assert_eq!(interpolate_vars("${UNKNOWN}+x", &vars), "${UNKNOWN}+x");
+        // 嵌套引用（值本身含 ${}）——上限 5 层不失控
+        let mut nested = std::collections::BTreeMap::new();
+        nested.insert("A".to_string(), "${B}".to_string());
+        nested.insert("B".to_string(), "val".to_string());
+        assert_eq!(interpolate_vars("${A}", &nested), "val");
+        // 无引用直通
+        assert_eq!(interpolate_vars("plain", &vars), "plain");
+    }
+
     use super::*;
 
     #[test]

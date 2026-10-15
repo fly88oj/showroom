@@ -179,7 +179,9 @@ export function Help() {
           <h3 className="text-sm font-semibold mt-2">多容器项目（附加服务）</h3>
           <p className="text-xs text-muted-foreground">发布页「部署参数 → 附加服务」或 CLI <code className="font-mono">showroom publish … --svc api=my/api:3000,3000</code> 添加；附加服务仅内网（不出公网端口），与主服务同网络可按容器名互访；日志 <code className="font-mono">showroom logs &lt;项目&gt; --svc api</code>。</p>
           <h3 className="text-sm font-semibold mt-2">自定义环境变量</h3>
-          <p className="text-xs text-muted-foreground">两层：全体变量（发布页「自定义环境变量（全体容器）」或 CLI <code className="font-mono">--env KEY=VALUE</code>）注入每个容器；附加服务可再设专属变量（服务行变量框 / CLI <code className="font-mono">--svc name=img:tag,port,KEY=VALUE</code>）只注入该服务。应用自有键名任意设（如 LOG_LEVEL / TIMEZONE）；同键可覆写平台默认值。回滚=整体恢复该版本配置（主服务+附加服务+全部变量）。</p>
+          <p className="text-xs text-muted-foreground">两层：全体变量注入每个容器；附加服务可再设专属变量只注入该服务。应用自有键名任意设（如 LOG_LEVEL / TIMEZONE）；同键可覆写平台默认值。回滚=整体恢复该版本配置（主服务+附加服务+全部变量）。</p>
+          <h3 className="text-sm font-semibold mt-2">自定义变量引用中间件凭据（${'{'}VAR{'}'} 插值）</h3>
+          <p className="text-xs text-muted-foreground">自定义变量的值可引用平台注入的任意键——例如程序用自己的键名时：<code className="font-mono">MYAPP_DB_URL=postgres://${'{'}DB_USER{'}'}:${'{'}DB_PASSWORD{'}'}@${'{'}DB_HOST{'}'}:${'{'}DB_PORT{'}'}/${'{'}DB_NAME{'}'}</code>，或直接 <code className="font-mono">MYAPP_DB_URL=${'{'}DATABASE_URL{'}'}</code>。随机生成的密码无需知道，插值在发布时自动解析。附加服务容器同样持有全部 DB_*/REDIS_* 凭据（共用项目库），可直接连接 sr-postgres / sr-redis。</p>
           <h3 className="text-sm font-semibold mt-2">镜像内配置文件替换</h3>
           <p className="text-xs text-muted-foreground">推荐入口脚本 <code className="font-mono">envsubst &lt; config.tpl &gt; config</code>——模板占位符（<code className="font-mono">${'$'}{'{'}DB_PASSWORD{'}'}</code> 等）在容器启动时由注入的真实值替换。</p>
         </TabsContent>

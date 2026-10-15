@@ -71,10 +71,15 @@ fn align_services(project: &str, services: &[state::Svc], env_file: &str) {
         let cpu_s = v.cpu.to_string();
         let full = format!("{}/{}", dockerops::REGISTRY, v.image);
         // 每服务独立 env 文件：基础 env + 本服务专属变量追加（覆盖语义）；
-        // 空专属时直接复用主 env 文件（零额外落盘）
+        // 空专属时直接复用主 env 文件（零额外落盘）。
+        // 专属变量支持 ${VAR} 插值——以基础 env 的完整变量集解析（可引用 DB_* 等平台值）
         let mut svc_env = String::new();
         if !v.env.trim().is_empty() {
             let base = fs::read_to_string(env_file).unwrap_or_default();
+            let vars: std::collections::BTreeMap<String, String> = base
+                .lines()
+                .filter_map(|l| l.split_once('=').map(|(k, v)| (k.to_string(), v.to_string())))
+                .collect();
             let mut extra = String::new();
             let mut bad_key = false;
             for pair in v.env.split(';') {
@@ -83,7 +88,8 @@ fn align_services(project: &str, services: &[state::Svc], env_file: &str) {
                 }
                 match pair.split_once('=') {
                     Some((k, val)) if state::check_env_key(k.trim()) => {
-                        extra.push_str(&format!("{}={}\n", k.trim(), val))
+                        let resolved = state::interpolate_vars(val, &vars);
+                        extra.push_str(&format!("{}={}\n", k.trim(), resolved))
                     }
                     // 与全体变量同语义：坏键拒绝而非静默丢（评审：两级校验须一致）
                     _ => bad_key = true,

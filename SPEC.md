@@ -117,13 +117,24 @@ SHOWROOM_PROJECT=<project>   SHOWROOM_BASE_PATH=/<project>/
 SHOWROOM_SVC_<NAME>_HOST=<容器名>   SHOWROOM_SVC_<NAME>_PORT=<端口>   # plan-19：全体服务含 main
 ```
 
-**自定义环境变量（plan-20）**：两层——①**全体变量**（CLI `--env` 可重复 /
+**自定义环境变量（plan-20/21）**：两层——①**全体变量**（CLI `--env` 可重复 /
 API `env:{K:V}` / 控制台「自定义环境变量（全体容器）」）：追加在平台默认块**之后**
 ——Docker --env-file 同键后者覆盖前者语义 → 可覆写任意默认值；②**服务专属变量**
 （`--svc …,K=V;K2=V2` / API services[].env / 控制台服务行专属变量框）：再追加在
 ①之后 = 三级覆盖链（平台默认 < 全体变量 < 服务专属）。键 POSIX 形状
-`^[A-Za-z_][A-Za-z0-9_]*$`；同层同键后值胜出；值禁换行。**回滚 = 整体恢复**
-（主服务 + 附加服务 + 两层变量都回到目标版本的快照）。
+`^[A-Za-z_][A-Za-z0-9_]*$`；同层同键后值胜出；值禁换行。
+
+**`${VAR}` 插值（plan-21）**：两层自定义变量的**值**均可引用平台注入的任意键——
+解析发生在 env 文件生成时（平台默认块+发现键已就绪）：`MYAPP_DB_URL=postgres://
+${DB_USER}:${DB_PASSWORD}@${DB_HOST}:${DB_PORT}/${DB_NAME}` 或直接
+`MYAPP_DB_URL=${DATABASE_URL}`。服务专属变量额外可引用全体变量（其 env 文件=
+全体块+专属追加）。未定义引用原样保留；递归上限 5 层。
+
+**附加服务的中间件连接**：附加服务容器与主服务共用同一份 env 文件基础（含全部
+DB_*/REDIS_* 凭据与 SHOWROOM_SVC_* 发现键）——**每个容器都可直连 sr-postgres/
+sr-redis**，凭据同源、权限同库（同一项目的全部服务共享该项目的 DB/Redis 库）。
+
+**回滚 = 整体恢复**（主服务 + 附加服务 + 两层变量都回到目标版本的快照）。
 **配置随版本走（plan-20 用户裁决）**：每次发布把当时的完整配置
 （services/uenv/mem/cpu/cport）快照进 versions.json 对应记录；回滚按**目标版本的
 快照**恢复（旧记录无快照 → 按当前 conf 兜底，与旧行为一致）。
