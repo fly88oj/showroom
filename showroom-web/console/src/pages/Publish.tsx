@@ -81,7 +81,7 @@ export function Publish({
   const mainName = project.trim() || main.name.trim();
   const existing = useMemo(() => projects.find((p) => p.project === mainName), [projects, mainName]);
   const name = project.trim();
-  const urlChip = name ? externalUrl(base, name) : "（清空则自动生成随机名）";
+  const urlChip = name ? externalUrl(base, name) : "";
   const nextV = existing ? (parseInt(String(existing.version).replace(/^v/, ""), 10) || 0) + 1 : 1;
   const memChanged = !!existing?.mem && String(existing.mem) !== main.mem;
   const cportChanged = !!existing?.cport && String(existing.cport) !== main.cport;
@@ -117,7 +117,7 @@ export function Publish({
   }
 
   function addSvc() {
-    setSvcs((a) => [...a, { name: "", src: "registry", file: null, image: "", cport: "", mem: "128m", cpu: "0.5", env: "", resolved: false }]);
+    setSvcs((a) => [...a, { name: "", src: "registry", file: null, image: "", cport: "", mem: "128", cpu: "0.5", env: "", resolved: false }]);
   }
 
   async function doPublish(project2: string, mainTag: string, svcImages: string[]) {
@@ -148,7 +148,7 @@ export function Publish({
           name: v.name.trim(),
           image: svcImages[origIdx] || v.image.trim(),
           cport: parseInt(v.cport, 10),
-          mem: v.mem.trim() || "128m",
+          mem: /^\d+$/.test(v.mem.trim()) ? `${v.mem.trim()}m` : (v.mem.trim() || "128m"),
           cpu: parseFloat(v.cpu) || 0.5,
           env: parsePairs(v.env),
         };
@@ -364,7 +364,7 @@ export function Publish({
               </PopoverContent>
             </Popover>
             {projErr ? <FieldError>{projErr}</FieldError> : (
-              <FieldDescription>可输入新项目名发布，或从已有项目选择；清空后发布将自动生成随机名。</FieldDescription>
+              <FieldDescription>清空后自动生成随机名。</FieldDescription>
             )}
           </Field>
 
@@ -373,7 +373,7 @@ export function Publish({
             <span aria-live="polite" className="font-mono text-xs text-muted-foreground">
               将发布为 v{nextV}
             </span>
-            <FieldDescription>版本由平台自动分配，单调递增；回滚后继续向前编号。</FieldDescription>
+            <FieldDescription>回滚后继续向前编号。</FieldDescription>
           </Field>
           </div>
 
@@ -401,7 +401,7 @@ export function Publish({
               <span className="text-sm font-medium">附加服务（多容器）</span>
               <Button type="button" variant="outline" size="sm" onClick={addSvc}>+ 添加服务</Button>
             </div>
-            <p className="text-xs text-muted-foreground">与主服务同一表单；以 SHOWROOM_SVC_&lt;名称&gt; 发现互访。</p>
+            <p className="text-xs text-muted-foreground">与主服务同一表单；容器间自动发现互访（详见帮助页「中间件连接」）。</p>
             {extras.map((v, i) => (
               <ServiceCard
                 key={i + 1}
@@ -491,9 +491,8 @@ export function Publish({
       <div className="flex flex-col gap-2">
         <h3 className="text-sm font-semibold text-info">发布说明</h3>
         <ol className="list-decimal pl-5 text-xs leading-6 text-muted-foreground">
-          <li>主服务与附加服务同一表单：选「上传镜像」（自动压缩→上传）或「镜像库」（直接发布）。</li>
-          <li>版本由平台自动分配；回滚时主服务与附加服务的配置一起恢复。</li>
-          <li>附加服务仅内网（不出公网端口），与主服务同网络互访。</li>
+          <li>回滚时主服务与附加服务的配置一起恢复。</li>
+          <li>附加服务仅内网，不出公网端口。</li>
         </ol>
       </div>
     </div>
@@ -594,7 +593,7 @@ function ServiceCard({ isMain = false, value: v, onChange, onRemove, images, ima
             searchPlaceholder="输入过滤…"
             options={images}
           />
-          {imageError ? <FieldError>{imageError}</FieldError> : <FieldDescription>只显示本人上传的镜像。</FieldDescription>}
+          {imageError ? <FieldError>{imageError}</FieldError> : null}
         </Field>
       )}
       <div className="grid gap-3 sm:grid-cols-2">

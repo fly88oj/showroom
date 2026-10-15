@@ -682,7 +682,7 @@ function HostPanel() {
             <Field>
               <FieldLabel>面板 Token</FieldLabel>
               <Input type="password" autoComplete="new-password" placeholder={host?.host_env?.FRP_TOKEN ? "已设置（留空保持）" : "usertoken"} value={frpEdit.token} onChange={(e) => { setFrpEdit((s2) => ({ ...s2, token: e.target.value })); setReview(null); }} />
-              <FieldDescription>留空=保持既有凭据</FieldDescription>
+
             </Field>
           )}
           {frpEdit.mode === "chmlfrp" && (

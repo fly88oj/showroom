@@ -272,7 +272,11 @@ export function Data({ onOpenSettings }: { onOpenSettings: () => void }) {
     const named = (j.entries ?? []).filter((e) => Number.isInteger(e.db) && e.project);
     const list = named.map((e) => ({ db: e.db as number, project: e.project as string }));
     setRdDbs(list);
-    if (list.length && !rdDb) setRdDb(String(list[0].db));
+    // 默认跟随顶部目标项目（管理员视角下列表含全项目——首项不一定是用户选的）
+    if (list.length && !rdDb) {
+      const match = list.find((e) => e.project === dbProject);
+      setRdDb(String(match ? match.db : list[0].db));
+    }
     return list;
   }
 

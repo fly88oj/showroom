@@ -98,7 +98,7 @@ export function Help() {
             </Table>
           </div>
           <p className="text-xs text-muted-foreground">
-            当前值可随时在项目列表「环境变量」里查看（<span className="font-mono break-all">showroom env</span> 同）。
+            当前值可随时在「我的项目 → 更多 → 环境变量」里查看（<span className="font-mono break-all">showroom env</span> 同）。
           </p>
         </TabsContent>
 
@@ -154,7 +154,7 @@ export function Help() {
 
         <TabsContent value="mw" className="mt-4 flex flex-col gap-3">
           <h2 className="text-sm font-semibold text-info">容器内如何连接中间件</h2>
-          <p className="text-xs text-muted-foreground">发布时平台自动向每个容器注入以下环境变量（12-factor：应用读 env 即可，无需配置文件）；真实值随时在「我的项目 → 行菜单 → 环境变量」或 CLI <code className="font-mono break-all">showroom env &lt;项目&gt;</code> 查看。</p>
+          <p className="text-xs text-muted-foreground">发布时平台自动向每个容器注入以下环境变量（12-factor：应用读 env 即可，无需配置文件）；真实值随时在「我的项目 → 更多 → 环境变量」或 CLI <code className="font-mono break-all">showroom env &lt;项目&gt;</code> 查看。</p>
           <div className="rounded-lg border">
             <table className="w-full text-xs">
               <tbody>
