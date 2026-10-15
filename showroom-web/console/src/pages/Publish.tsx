@@ -316,9 +316,8 @@ export function Publish({
 
       <form onSubmit={submit} noValidate>
         <FieldGroup>
-        <div className="grid gap-4 lg:grid-cols-2">
-          {/* 左栏：项目+版本+主服务+全体变量 */}
-          <div className="flex flex-col gap-3">
+          {/* 项目/版本左右排（短字段）→ 容器全宽 */}
+          <div className="grid gap-4 sm:grid-cols-2">
           <Field data-invalid={!!projErr}>
             <FieldLabel htmlFor="pub-project">项目</FieldLabel>
             <Popover open={projOpen} onOpenChange={setProjOpen}>
@@ -367,6 +366,7 @@ export function Publish({
             </span>
             <FieldDescription>版本由平台自动分配，单调递增；回滚后继续向前编号。</FieldDescription>
           </Field>
+          </div>
 
           <Separator />
           {(memChanged || cportChanged) && <Badge variant="warning" className="w-fit">与上次发布不同</Badge>}
@@ -385,9 +385,8 @@ export function Publish({
             <span className="text-sm font-medium">自定义环境变量（全体容器）</span>
             <EnvRows rows={uenvs} onChange={setUenvs} />
           </div>
-          </div>
 
-          {/* 右栏：附加服务 */}
+          <Separator />
           <div className="flex flex-col gap-3">
             <div className="flex items-center gap-2">
               <span className="text-sm font-medium">附加服务（多容器）</span>
@@ -410,7 +409,6 @@ export function Publish({
               />
             ))}
           </div>
-        </div>
 
           <div className="flex items-center gap-3">
             <Button type="submit" disabled={busy}>
