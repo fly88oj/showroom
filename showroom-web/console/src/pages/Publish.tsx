@@ -515,11 +515,11 @@ function ServiceCard({ value: v, onChange, onRemove }: {
   return (
     <div className="flex flex-col gap-2 rounded-lg border p-3">
       <div className="grid gap-2 sm:grid-cols-[1fr_2fr_5rem_5rem_5rem_auto]">
-        <Input value={v.name} onChange={(e) => onChange({ ...v, name: e.target.value })} />
-        <Input value={v.image} onChange={(e) => onChange({ ...v, image: e.target.value })} />
-        <Input type="number" value={v.cport} onChange={(e) => onChange({ ...v, cport: e.target.value })} />
-        <Input value={v.mem} onChange={(e) => onChange({ ...v, mem: e.target.value })} />
-        <Input value={v.cpu} onChange={(e) => onChange({ ...v, cpu: e.target.value })} />
+        <Input placeholder="名称" value={v.name} onChange={(e) => onChange({ ...v, name: e.target.value })} />
+        <Input placeholder="user/api:v2" value={v.image} onChange={(e) => onChange({ ...v, image: e.target.value })} />
+        <Input placeholder="端口" type="number" value={v.cport} onChange={(e) => onChange({ ...v, cport: e.target.value })} />
+        <Input placeholder="128m" value={v.mem} onChange={(e) => onChange({ ...v, mem: e.target.value })} />
+        <Input placeholder="0.5" value={v.cpu} onChange={(e) => onChange({ ...v, cpu: e.target.value })} />
         <Button type="button" variant="ghost" size="sm" onClick={onRemove}>移除</Button>
       </div>
       <div className="flex flex-col gap-1.5">
