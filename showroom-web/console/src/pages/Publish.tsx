@@ -385,13 +385,7 @@ export function Publish({
                   <Button type="button" variant="outline" size="sm" onClick={() => setUenvs((a) => [...a, { k: "", v: "" }])}>+ 添加变量</Button>
                 </div>
                 <p className="text-xs text-muted-foreground">任意应用变量（如 LOG_LEVEL / TIMEZONE）注入每个容器；同键覆写平台默认值；值支持 <span className="font-mono">${'{'}VAR{'}'}</span> 引用平台凭据（如 <span className="font-mono">${'{'}DATABASE_URL{'}'}</span>）；配置随版本走（回滚恢复）。</p>
-                {uenvs.map((u, i) => (
-                  <div key={`e${i}`} className="grid gap-2 sm:grid-cols-[1fr_3fr_auto]">
-                    <Input placeholder="变量名（应用自己的键，如 LOG_LEVEL）" value={u.k} onChange={(e) => setUenvs((a) => a.map((x, j) => (j === i ? { ...x, k: e.target.value } : x)))} />
-                    <Input placeholder="值（如 error / UTC / 任意）" value={u.v} onChange={(e) => setUenvs((a) => a.map((x, j) => (j === i ? { ...x, v: e.target.value } : x)))} />
-                    <Button type="button" variant="ghost" size="sm" onClick={() => setUenvs((a) => a.filter((_, j) => j !== i))}>移除</Button>
-                  </div>
-                ))}
+                <EnvRows rows={uenvs} onChange={setUenvs} />
               </div>
 
               <Separator />
@@ -405,21 +399,12 @@ export function Publish({
                 </div>
                 <p className="text-xs text-muted-foreground">镜像须已在「镜像库」；容器互相以 SHOWROOM_SVC_&lt;名称&gt;_HOST/_PORT 发现；回滚时附加服务随版本一起恢复。</p>
                 {svcs.map((v, i) => (
-                  <div key={i} className="grid gap-2 rounded-lg border p-2">
-                    <div className="grid gap-2 sm:grid-cols-[1fr_2fr_5rem_5rem_5rem_auto]">
-                      <Input placeholder="名称（如 api）" value={v.name} onChange={(e) => setSvcs((a) => a.map((x, j) => (j === i ? { ...x, name: e.target.value } : x)))} />
-                      <Input placeholder="镜像（user/name:tag，无 user/ 前缀自动补）" value={v.image} onChange={(e) => setSvcs((a) => a.map((x, j) => (j === i ? { ...x, image: e.target.value } : x)))} />
-                      <Input placeholder="端口" type="number" value={v.cport} onChange={(e) => setSvcs((a) => a.map((x, j) => (j === i ? { ...x, cport: e.target.value } : x)))} />
-                      <Input placeholder="128m" value={v.mem} onChange={(e) => setSvcs((a) => a.map((x, j) => (j === i ? { ...x, mem: e.target.value } : x)))} />
-                      <Input placeholder="0.5" value={v.cpu} onChange={(e) => setSvcs((a) => a.map((x, j) => (j === i ? { ...x, cpu: e.target.value } : x)))} />
-                      <Button type="button" variant="ghost" size="sm" onClick={() => setSvcs((a) => a.filter((_, j) => j !== i))}>移除</Button>
-                    </div>
-                    <Input
-                      className="font-mono text-xs"
-                      placeholder="本服务专属变量（可选；KEY=VALUE;KEY2=V2，覆盖全体变量）"
-                      value={v.env} onChange={(e) => setSvcs((a) => a.map((x, j) => (j === i ? { ...x, env: e.target.value } : x)))}
-                    />
-                  </div>
+                  <ServiceCard
+                    key={i}
+                    value={v}
+                    onChange={(nv) => setSvcs((a) => a.map((x, j) => (j === i ? nv : x)))}
+                    onRemove={() => setSvcs((a) => a.filter((_, j) => j !== i))}
+                  />
                 ))}
               </div>
               </div>
@@ -495,6 +480,68 @@ export function Publish({
           <li>选「镜像库」→ 直接发布已入库镜像（①②两段自动跳过）。</li>
           <li>任一步失败状态条标红，可点「重试」；只入库不发布请到「镜像库」页上传。</li>
         </ol>
+      </div>
+    </div>
+  );
+}
+
+
+// —— 通用组件：环境变量行（全体/服务专属共用——同一交互形状，plan-21 用户裁决） ——
+
+interface EnvRow { k: string; v: string }
+
+function EnvRows({ rows, onChange, keyPlaceholder = "LOG_LEVEL", valPlaceholder = "error（或 ${DATABASE_URL} 引用平台凭据）" }: {
+  rows: EnvRow[];
+  onChange: (rows: EnvRow[]) => void;
+  keyPlaceholder?: string;
+  valPlaceholder?: string;
+}) {
+  return (
+    <div className="flex flex-col gap-2">
+      {rows.map((u, i) => (
+        <div key={i} className="grid gap-2 sm:grid-cols-[1fr_3fr_auto]">
+          <Input placeholder={keyPlaceholder} value={u.k} onChange={(e) => onChange(rows.map((x, j) => (j === i ? { ...x, k: e.target.value } : x)))} />
+          <Input placeholder={valPlaceholder} value={u.v} onChange={(e) => onChange(rows.map((x, j) => (j === i ? { ...x, v: e.target.value } : x)))} />
+          <Button type="button" variant="ghost" size="sm" onClick={() => onChange(rows.filter((_, j) => j !== i))}>移除</Button>
+        </div>
+      ))}
+      <Button type="button" variant="outline" size="sm" className="w-fit" onClick={() => onChange([...rows, { k: "", v: "" }])}>+ 变量</Button>
+    </div>
+  );
+}
+
+// —— 通用组件：附加服务卡片（名称/镜像/端口/资源/专属环境变量一体——添加=整卡添加） ——
+
+interface SvcRow { name: string; image: string; cport: string; mem: string; cpu: string; env: string }
+
+function ServiceCard({ value: v, onChange, onRemove }: {
+  value: SvcRow;
+  onChange: (v: SvcRow) => void;
+  onRemove: () => void;
+}) {
+  const [envRows, setEnvRows] = useState<EnvRow[]>(() =>
+    v.env ? v.env.split(";").filter((p) => p.trim()).map((p) => {
+      const eq = p.indexOf("=");
+      return eq >= 0 ? { k: p.slice(0, eq), v: p.slice(eq + 1) } : { k: p, v: "" };
+    }) : [],
+  );
+  const syncEnv = (rows: EnvRow[]) => {
+    setEnvRows(rows);
+    onChange({ ...v, env: rows.filter((r) => r.k.trim()).map((r) => `${r.k.trim()}=${r.v}`).join(";") });
+  };
+  return (
+    <div className="flex flex-col gap-2 rounded-lg border p-3">
+      <div className="grid gap-2 sm:grid-cols-[1fr_2fr_5rem_5rem_5rem_auto]">
+        <Input placeholder="api" value={v.name} onChange={(e) => onChange({ ...v, name: e.target.value })} />
+        <Input placeholder="user/api:v2" value={v.image} onChange={(e) => onChange({ ...v, image: e.target.value })} />
+        <Input placeholder="端口" type="number" value={v.cport} onChange={(e) => onChange({ ...v, cport: e.target.value })} />
+        <Input placeholder="128m" value={v.mem} onChange={(e) => onChange({ ...v, mem: e.target.value })} />
+        <Input placeholder="0.5" value={v.cpu} onChange={(e) => onChange({ ...v, cpu: e.target.value })} />
+        <Button type="button" variant="ghost" size="sm" onClick={onRemove}>移除</Button>
+      </div>
+      <div className="flex flex-col gap-1.5">
+        <span className="text-xs text-muted-foreground">本服务专属变量（只注入此容器；同键覆盖全体变量）</span>
+        <EnvRows rows={envRows} onChange={syncEnv} keyPlaceholder="TIMEZONE" valPlaceholder="UTC（或 ${SHOWROOM_SVC_MAIN_HOST} 引用发现键）" />
       </div>
     </div>
   );
