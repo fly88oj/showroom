@@ -3,7 +3,6 @@ import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Combobox } from "@/components/Combobox";
 import { Command, CommandGroup, CommandInput, CommandItem, CommandList } from "@/components/ui/command";
-import { Collapsible, CollapsibleContent, CollapsibleTrigger } from "@/components/ui/collapsible";
 import { Field, FieldDescription, FieldError, FieldGroup, FieldLabel } from "@/components/ui/field";
 import { Input } from "@/components/ui/input";
 import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover";
@@ -46,7 +45,6 @@ export function Publish({
   const [imgErr, setImgErr] = useState("");
   const [mem, setMem] = useState("256");
   const [cport, setCport] = useState("8080");
-  const [paramsOpen, setParamsOpen] = useState(false);
 
   const [phase, setPhase] = useState<Phase>("idle");
   const [failAt, setFailAt] = useState<keyof typeof PHASE_CN | null>(null);
@@ -349,19 +347,8 @@ export function Publish({
           </Field>
 
           <Separator />
-
-          <Collapsible open={paramsOpen} onOpenChange={setParamsOpen}>
-            <div className="flex items-center gap-2">
-              <CollapsibleTrigger asChild>
-                <Button type="button" variant="ghost" size="sm">
-                  部署参数
-                  <ChevronDownIcon data-icon="inline-end" className={cn(paramsOpen && "rotate-180 transition-transform")} />
-                </Button>
-              </CollapsibleTrigger>
-              {(memChanged || cportChanged) && <Badge variant="warning">与上次发布不同</Badge>}
-            </div>
-            <CollapsibleContent>
-              <div className="flex flex-col gap-3 pt-3">
+          <div className="flex flex-col gap-3">
+            {(memChanged || cportChanged) && <Badge variant="warning" className="w-fit">与上次发布不同</Badge>}
               <div className="grid gap-4 sm:grid-cols-2">
                 <Field>
                   <FieldLabel htmlFor="pub-mem">内存需求（MiB）</FieldLabel>
@@ -407,9 +394,7 @@ export function Publish({
                   />
                 ))}
               </div>
-              </div>
-            </CollapsibleContent>
-          </Collapsible>
+          </div>
 
           <div className="flex items-center gap-3">
             <Button type="submit" disabled={busy}>
@@ -490,18 +475,16 @@ export function Publish({
 
 interface EnvRow { k: string; v: string }
 
-function EnvRows({ rows, onChange, keyPlaceholder = "LOG_LEVEL", valPlaceholder = "error（或 ${DATABASE_URL} 引用平台凭据）" }: {
+function EnvRows({ rows, onChange }: {
   rows: EnvRow[];
   onChange: (rows: EnvRow[]) => void;
-  keyPlaceholder?: string;
-  valPlaceholder?: string;
 }) {
   return (
     <div className="flex flex-col gap-2">
       {rows.map((u, i) => (
         <div key={i} className="grid gap-2 sm:grid-cols-[1fr_3fr_auto]">
-          <Input placeholder={keyPlaceholder} value={u.k} onChange={(e) => onChange(rows.map((x, j) => (j === i ? { ...x, k: e.target.value } : x)))} />
-          <Input placeholder={valPlaceholder} value={u.v} onChange={(e) => onChange(rows.map((x, j) => (j === i ? { ...x, v: e.target.value } : x)))} />
+          <Input value={u.k} onChange={(e) => onChange(rows.map((x, j) => (j === i ? { ...x, k: e.target.value } : x)))} />
+          <Input value={u.v} onChange={(e) => onChange(rows.map((x, j) => (j === i ? { ...x, v: e.target.value } : x)))} />
           <Button type="button" variant="ghost" size="sm" onClick={() => onChange(rows.filter((_, j) => j !== i))}>移除</Button>
         </div>
       ))}
@@ -532,16 +515,16 @@ function ServiceCard({ value: v, onChange, onRemove }: {
   return (
     <div className="flex flex-col gap-2 rounded-lg border p-3">
       <div className="grid gap-2 sm:grid-cols-[1fr_2fr_5rem_5rem_5rem_auto]">
-        <Input placeholder="api" value={v.name} onChange={(e) => onChange({ ...v, name: e.target.value })} />
-        <Input placeholder="user/api:v2" value={v.image} onChange={(e) => onChange({ ...v, image: e.target.value })} />
-        <Input placeholder="端口" type="number" value={v.cport} onChange={(e) => onChange({ ...v, cport: e.target.value })} />
-        <Input placeholder="128m" value={v.mem} onChange={(e) => onChange({ ...v, mem: e.target.value })} />
-        <Input placeholder="0.5" value={v.cpu} onChange={(e) => onChange({ ...v, cpu: e.target.value })} />
+        <Input value={v.name} onChange={(e) => onChange({ ...v, name: e.target.value })} />
+        <Input value={v.image} onChange={(e) => onChange({ ...v, image: e.target.value })} />
+        <Input type="number" value={v.cport} onChange={(e) => onChange({ ...v, cport: e.target.value })} />
+        <Input value={v.mem} onChange={(e) => onChange({ ...v, mem: e.target.value })} />
+        <Input value={v.cpu} onChange={(e) => onChange({ ...v, cpu: e.target.value })} />
         <Button type="button" variant="ghost" size="sm" onClick={onRemove}>移除</Button>
       </div>
       <div className="flex flex-col gap-1.5">
         <span className="text-xs text-muted-foreground">本服务专属变量（只注入此容器；同键覆盖全体变量）</span>
-        <EnvRows rows={envRows} onChange={syncEnv} keyPlaceholder="TIMEZONE" valPlaceholder="UTC（或 ${SHOWROOM_SVC_MAIN_HOST} 引用发现键）" />
+        <EnvRows rows={envRows} onChange={syncEnv} />
       </div>
     </div>
   );
