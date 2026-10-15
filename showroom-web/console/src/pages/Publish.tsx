@@ -65,6 +65,8 @@ export function Publish({
   const [, setFailAt] = useState<keyof typeof PHASE_CN | null>(null);
   const [stepState, setStepState] = useState<StepState[]>(["wait", "wait", "wait", "wait"]);
   const [prog, setProg] = useState({ cur: 0, total: 1 });
+  // 每容器进度（svcIdx → { state, label, cur, total }——多 tar 时各自有子进度条）
+  const [svcProg, setSvcProg] = useState<Record<number, { state: StepState; label: string; cur: number; total: number }>>({});
   const [text, setText] = useState("（未开始）");
   const [doneUrl, setDoneUrl] = useState("");
   const deployRef = useRef<{
@@ -106,7 +108,7 @@ export function Publish({
 
   function resetBar() {
     setPhase("idle"); setFailAt(null); setProg({ cur: 0, total: 1 });
-    setText("（未开始）"); setDoneUrl("");
+    setText("（未开始）"); setDoneUrl(""); setSvcProg({});
     setStepState(["wait", "wait", "wait", "wait"]);
   }
 
@@ -173,14 +175,16 @@ export function Publish({
           let totalRaw = 0, totalDone = 0;
           for (const te of tarEntries) {
             const svcName = te.svcIdx === 0 ? "主服务" : `服务 ${svcs[te.svcIdx]?.name || te.svcIdx}`;
-            setText(`① 压缩中：${svcName}…`);
+            setSvcProg((p) => ({ ...p, [te.svcIdx]: { state: "run", label: "压缩中", cur: 0, total: te.file.size } }));
             const { blob } = await uploadPayload(te.file, (done, raw) => {
               setText(`① 压缩中：${svcName} ${((done / raw) * 100).toFixed(1)}%`);
               setProg({ cur: totalDone + done, total: totalRaw + raw });
+              setSvcProg((p) => ({ ...p, [te.svcIdx]: { state: "run", label: "压缩中", cur: done, total: raw } }));
             });
             te.blob = blob;
             totalRaw += te.file.size;
             totalDone += te.file.size;
+            setSvcProg((p) => ({ ...p, [te.svcIdx]: { state: "ok", label: "压缩完成", cur: 1, total: 1 } }));
           }
           setStep(0, "ok");
           setText(`压缩完成：${tarEntries.length} 个镜像`);
@@ -197,16 +201,18 @@ export function Publish({
         setPhase("upload"); setStep(1, "run");
         for (const te of d.files) {
           const svcName = te.svcIdx === 0 ? "主服务" : `服务 ${svcs[te.svcIdx]?.name || te.svcIdx}`;
+          setSvcProg((p) => ({ ...p, [te.svcIdx]: { state: "run", label: "上传中", cur: 0, total: 1 } }));
           const upNote = (sent: number, total: number) => {
             setProg({ cur: sent, total });
-            setText(`② 上传中：${svcName} 已传 ${sent} / ${total} 字节（${total ? ((sent / total) * 100).toFixed(1) : "0"}%）`);
+            setText(`② 上传中：${svcName} ${total ? ((sent / total) * 100).toFixed(1) : "0"}%`);
+            setSvcProg((p) => ({ ...p, [te.svcIdx]: { state: "run", label: "上传中", cur: sent, total } }));
           };
           const importProject = te.svcIdx === 0 ? projectName : `${projectName}-${svcs[te.svcIdx]?.name || te.svcIdx}`;
           const r = await freshUpload(importProject, te.file, te.blob as Blob, upNote, () => void refreshSpace(true));
-          // 上传成功：回填 resolvedImage（registry 引用：user/{importProject}:{tag}）
           const user = session?.user ?? "";
           d.resolvedImages[te.svcIdx] = `${user}/${importProject.toLowerCase()}:${r.tag}`;
-          if (te.svcIdx === 0) d.resolvedImages[0] = r.tag; // 主服务：tag 传给 publish 的 tag 字段
+          if (te.svcIdx === 0) d.resolvedImages[0] = r.tag;
+          setSvcProg((p) => ({ ...p, [te.svcIdx]: { state: "ok", label: "上传完成", cur: 1, total: 1 } }));
         }
         setStep(1, "ok");
         setText(`上传完成：${d.files.length} 个镜像已导入。`);
@@ -310,6 +316,9 @@ export function Publish({
 
       <form onSubmit={submit} noValidate>
         <FieldGroup>
+        <div className="grid gap-4 lg:grid-cols-2">
+          {/* 左栏：项目+版本+主服务+全体变量 */}
+          <div className="flex flex-col gap-3">
           <Field data-invalid={!!projErr}>
             <FieldLabel htmlFor="pub-project">项目</FieldLabel>
             <Popover open={projOpen} onOpenChange={setProjOpen}>
@@ -374,14 +383,17 @@ export function Publish({
           {/* —— 全体变量 —— */}
           <div className="flex flex-col gap-2">
             <span className="text-sm font-medium">自定义环境变量（全体容器）</span>
-            <p className="text-xs text-muted-foreground">注入每个容器；同键覆写平台默认值；值支持 <span className="font-mono">${'{'}VAR{'}'}</span> 引用平台凭据；配置随版本走。</p>
             <EnvRows rows={uenvs} onChange={setUenvs} />
           </div>
+          </div>
 
-          <Separator />
-
-          {/* —— 附加服务（同一 ServiceCard）—— */}
-          <div className="flex flex-col gap-2">
+          {/* 右栏：附加服务 */}
+          <div className="flex flex-col gap-3">
+            <div className="flex items-center gap-2">
+              <span className="text-sm font-medium">附加服务（多容器）</span>
+              <Button type="button" variant="outline" size="sm" onClick={addSvc}>+ 添加服务</Button>
+            </div>
+            <p className="text-xs text-muted-foreground">与主服务同一表单；以 SHOWROOM_SVC_&lt;名称&gt; 发现互访。</p>
             <div className="flex items-center gap-2">
               <span className="text-sm font-medium">附加服务（多容器）</span>
               <Button type="button" variant="outline" size="sm" onClick={addSvc}>+ 添加服务</Button>
@@ -398,6 +410,7 @@ export function Publish({
               />
             ))}
           </div>
+        </div>
 
           <div className="flex items-center gap-3">
             <Button type="submit" disabled={busy}>
@@ -439,6 +452,25 @@ export function Publish({
             )}
           </div>
           <Progress value={prog.total ? (prog.cur / prog.total) * 100 : 0} />
+          {Object.entries(svcProg).length > 0 && (
+            <div className="flex flex-col gap-1">
+              {Object.entries(svcProg).map(([idx, p]) => {
+                const si = parseInt(idx, 10);
+                const label = si === 0 ? "主服务" : `服务 ${svcs[si]?.name || si}`;
+                return (
+                  <div key={idx} className="flex items-center gap-2 text-xs">
+                    <Badge variant={p.state === "ok" ? "success" : p.state === "fail" ? "danger" : "info"} className="text-[10px]">
+                      {p.state === "ok" ? "✓" : p.state === "fail" ? "✗" : "…"} {label}
+                    </Badge>
+                    <span className="w-16 text-muted-foreground">{p.label}</span>
+                    {p.total > 1 && (
+                      <Progress value={(p.cur / p.total) * 100} className="h-1 flex-1" />
+                    )}
+                  </div>
+                );
+              })}
+            </div>
+          )}
           <div className="text-xs text-muted-foreground" aria-live="polite">{text}</div>
           {phase === "done" && (
             <div className="flex flex-wrap items-center gap-2">
