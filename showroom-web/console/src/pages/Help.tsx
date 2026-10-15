@@ -19,7 +19,7 @@ export function Help() {
   return (
     <div className="flex flex-col gap-4">
       <Tabs defaultValue="account" className="flex flex-col gap-4">
-        <TabsList variant="line" className="h-9 w-fit gap-0.5">
+        <TabsList variant="line" className="h-9 w-fit gap-0.5 overflow-x-auto flex-nowrap max-w-full">
           <TabsTrigger value="account">账号</TabsTrigger>
           <TabsTrigger value="cli">CLI 使用</TabsTrigger>
           <TabsTrigger value="mirror">镜像规范</TabsTrigger>
@@ -41,12 +41,12 @@ export function Help() {
           <ul className="list-disc pl-5 text-xs leading-6 text-muted-foreground">
             <li>
               CLI 与控制台同一模型（统一账号密码认证）：
-              <span className="font-mono">showroom login &lt;账号&gt;</span>
+              <span className="font-mono break-all">showroom login &lt;账号&gt;</span>
               输一次密码即自动配置本机（含镜像库凭据），此后全部子命令免密码（gh/ssh 模型）；
-              <span className="font-mono">showroom logout</span> 退出（清本机并远程吊销钥匙）。
+              <span className="font-mono break-all">showroom logout</span> 退出（清本机并远程吊销钥匙）。
             </li>
-            <li>无账号 / 忘记密码：联系管理员发放或重置（<span className="font-mono">showroomctl user-add &lt;名&gt; --gen-password</span>）。</li>
-            <li>镜像上传与备份加密需要平台公钥：登录控制台，在本页「工具下载」下载 <span className="font-mono">platform_rsa.pub</span>，放入 <span className="font-mono">~/.showroom/platform_rsa.pub</span>（一次性）。</li>
+            <li>无账号 / 忘记密码：联系管理员发放或重置（<span className="font-mono break-all">showroomctl user-add &lt;名&gt; --gen-password</span>）。</li>
+            <li>镜像上传与备份加密需要平台公钥：登录控制台，在本页「工具下载」下载 <span className="font-mono break-all">platform_rsa.pub</span>，放入 <span className="font-mono break-all">~/.showroom/platform_rsa.pub</span>（一次性）。</li>
           </ul>
           <h2 className="text-sm font-semibold text-info">CLI 命令对照</h2>
           <div className="rounded-lg border">
@@ -76,10 +76,10 @@ export function Help() {
         <TabsContent value="mirror" className="mt-4 flex flex-col gap-4">
           <h2 className="text-sm font-semibold text-info">镜像规范</h2>
           <ul className="list-disc pl-5 text-xs leading-6 text-muted-foreground">
-            <li>项目须监听容器内 <span className="font-mono">8080</span> 端口（其他端口在发布表单的端口字段如实填写）。</li>
-            <li>项目经子路径对外发布：访问地址恒为 <span className="font-mono">/&lt;project&gt;/</span>，读 <span className="font-mono">SHOWROOM_BASE_PATH</span>（值即该前缀）适配，或页面内一律使用相对 URL。</li>
-            <li>建议在 Dockerfile 里配置 <span className="font-mono">HEALTHCHECK</span>，平台据此判定健康并自愈。</li>
-            <li>镜像内配置文件替换推荐 <span className="font-mono">envsubst &lt; config.tpl &gt; config</span> 模式（占位符由注入的环境变量填充）。</li>
+            <li>项目须监听容器内 <span className="font-mono break-all">8080</span> 端口（其他端口在发布表单的端口字段如实填写）。</li>
+            <li>项目经子路径对外发布：访问地址恒为 <span className="font-mono break-all">/&lt;project&gt;/</span>，读 <span className="font-mono break-all">SHOWROOM_BASE_PATH</span>（值即该前缀）适配，或页面内一律使用相对 URL。</li>
+            <li>建议在 Dockerfile 里配置 <span className="font-mono break-all">HEALTHCHECK</span>，平台据此判定健康并自愈。</li>
+            <li>镜像内配置文件替换推荐 <span className="font-mono break-all">envsubst &lt; config.tpl &gt; config</span> 模式（占位符由注入的环境变量填充）。</li>
           </ul>
           <h2 className="text-sm font-semibold text-info">环境变量清单（发布时自动注入）</h2>
           <div className="rounded-lg border">
@@ -98,7 +98,7 @@ export function Help() {
             </Table>
           </div>
           <p className="text-xs text-muted-foreground">
-            当前值可随时在项目列表「环境变量」里查看（<span className="font-mono">showroom env</span> 同）。
+            当前值可随时在项目列表「环境变量」里查看（<span className="font-mono break-all">showroom env</span> 同）。
           </p>
         </TabsContent>
 
@@ -154,7 +154,7 @@ export function Help() {
 
         <TabsContent value="mw" className="mt-4 flex flex-col gap-3">
           <h2 className="text-sm font-semibold text-info">容器内如何连接中间件</h2>
-          <p className="text-xs text-muted-foreground">发布时平台自动向每个容器注入以下环境变量（12-factor：应用读 env 即可，无需配置文件）；真实值随时在「我的项目 → 行菜单 → 环境变量」或 CLI <code className="font-mono">showroom env &lt;项目&gt;</code> 查看。</p>
+          <p className="text-xs text-muted-foreground">发布时平台自动向每个容器注入以下环境变量（12-factor：应用读 env 即可，无需配置文件）；真实值随时在「我的项目 → 行菜单 → 环境变量」或 CLI <code className="font-mono break-all">showroom env &lt;项目&gt;</code> 查看。</p>
           <div className="rounded-lg border">
             <table className="w-full text-xs">
               <tbody>
@@ -177,13 +177,13 @@ export function Help() {
             </table>
           </div>
           <h3 className="text-sm font-semibold mt-2">多容器项目（附加服务）</h3>
-          <p className="text-xs text-muted-foreground">发布页「部署参数 → 附加服务」或 CLI <code className="font-mono">showroom publish … --svc api=my/api:3000,3000</code> 添加；附加服务仅内网（不出公网端口），与主服务同网络可按容器名互访；日志 <code className="font-mono">showroom logs &lt;项目&gt; --svc api</code>。</p>
+          <p className="text-xs text-muted-foreground">发布页「部署参数 → 附加服务」或 CLI <code className="font-mono break-all">showroom publish … --svc api=my/api:3000,3000</code> 添加；附加服务仅内网（不出公网端口），与主服务同网络可按容器名互访；日志 <code className="font-mono break-all">showroom logs &lt;项目&gt; --svc api</code>。</p>
           <h3 className="text-sm font-semibold mt-2">自定义环境变量</h3>
           <p className="text-xs text-muted-foreground">两层：全体变量注入每个容器；附加服务可再设专属变量只注入该服务。应用自有键名任意设（如 LOG_LEVEL / TIMEZONE）；同键可覆写平台默认值。回滚=整体恢复该版本配置（主服务+附加服务+全部变量）。</p>
           <h3 className="text-sm font-semibold mt-2">自定义变量引用中间件凭据（${'{'}VAR{'}'} 插值）</h3>
-          <p className="text-xs text-muted-foreground">自定义变量的值可引用平台注入的任意键——例如程序用自己的键名时：<code className="font-mono">MYAPP_DB_URL=postgres://${'{'}DB_USER{'}'}:${'{'}DB_PASSWORD{'}'}@${'{'}DB_HOST{'}'}:${'{'}DB_PORT{'}'}/${'{'}DB_NAME{'}'}</code>，或直接 <code className="font-mono">MYAPP_DB_URL=${'{'}DATABASE_URL{'}'}</code>。随机生成的密码无需知道，插值在发布时自动解析。附加服务容器同样持有全部 DB_*/REDIS_* 凭据（共用项目库），可直接连接 sr-postgres / sr-redis。</p>
+          <p className="text-xs text-muted-foreground">自定义变量的值可引用平台注入的任意键——例如程序用自己的键名时：<code className="font-mono break-all">MYAPP_DB_URL=postgres://${'{'}DB_USER{'}'}:${'{'}DB_PASSWORD{'}'}@${'{'}DB_HOST{'}'}:${'{'}DB_PORT{'}'}/${'{'}DB_NAME{'}'}</code>，或直接 <code className="font-mono break-all">MYAPP_DB_URL=${'{'}DATABASE_URL{'}'}</code>。随机生成的密码无需知道，插值在发布时自动解析。附加服务容器同样持有全部 DB_*/REDIS_* 凭据（共用项目库），可直接连接 sr-postgres / sr-redis。</p>
           <h3 className="text-sm font-semibold mt-2">镜像内配置文件替换</h3>
-          <p className="text-xs text-muted-foreground">推荐入口脚本 <code className="font-mono">envsubst &lt; config.tpl &gt; config</code>——模板占位符（<code className="font-mono">${'$'}{'{'}DB_PASSWORD{'}'}</code> 等）在容器启动时由注入的真实值替换。</p>
+          <p className="text-xs text-muted-foreground">推荐入口脚本 <code className="font-mono break-all">envsubst &lt; config.tpl &gt; config</code>——模板占位符（<code className="font-mono break-all">${'$'}{'{'}DB_PASSWORD{'}'}</code> 等）在容器启动时由注入的真实值替换。</p>
         </TabsContent>
         <TabsContent value="errors" className="mt-4 flex flex-col gap-3">
           <h2 className="text-sm font-semibold text-info">常见错误码</h2>

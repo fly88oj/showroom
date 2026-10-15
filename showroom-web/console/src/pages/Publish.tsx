@@ -291,7 +291,16 @@ export function Publish({
         setImgErr("主服务未选择镜像"); setImgErrIdx(0);
         return;
       }
+      // 主服务 registry 模式：提取 user/project 和 tag——publish API 用 project 字段匹配仓库名
+      // 镜像引用格式 user/{repo}:{tag}——repo 必须与项目名一致（或已有项目名匹配）
       d.resolvedImages[0] = main.image.trim().split(":").pop() || "";
+      // 如果镜像 repo ≠ 项目名，用镜像 repo 的最后一段作为项目名（自动适配已有项目）
+      const repoPart = main.image.trim().split(":")[0].split("/").pop();
+      if (repoPart && !name) {
+        // 未填项目名且选了已有镜像 → 用镜像 repo 名作为项目名（除非用户已填）
+        // 注意：仅当用户没有手动输入项目名时才自动推断
+        if (!project.trim()) setProject(repoPart);
+      }
     }
 
     if (hasTar && !pemReady()) {
@@ -317,7 +326,7 @@ export function Publish({
       <form onSubmit={submit} noValidate>
         <FieldGroup>
           {/* 项目/版本左右排（短字段）→ 容器全宽 */}
-          <div className="grid gap-4 sm:grid-cols-2">
+          <div className="grid gap-4 sm:grid-cols-2 [&>*]:min-w-0">
           <Field data-invalid={!!projErr}>
             <FieldLabel htmlFor="pub-project">项目</FieldLabel>
             <Popover open={projOpen} onOpenChange={setProjOpen}>
@@ -393,11 +402,6 @@ export function Publish({
               <Button type="button" variant="outline" size="sm" onClick={addSvc}>+ 添加服务</Button>
             </div>
             <p className="text-xs text-muted-foreground">与主服务同一表单；以 SHOWROOM_SVC_&lt;名称&gt; 发现互访。</p>
-            <div className="flex items-center gap-2">
-              <span className="text-sm font-medium">附加服务（多容器）</span>
-              <Button type="button" variant="outline" size="sm" onClick={addSvc}>+ 添加服务</Button>
-            </div>
-            <p className="text-xs text-muted-foreground">与主服务同一表单体验；容器互相以 SHOWROOM_SVC_&lt;名称&gt;_HOST/_PORT 发现；回滚随版本整体恢复。</p>
             {extras.map((v, i) => (
               <ServiceCard
                 key={i + 1}
@@ -526,6 +530,7 @@ function ServiceCard({ isMain = false, value: v, onChange, onRemove, images, ima
   images: { value: string; label: string }[];
   imageError?: string;
 }) {
+  const fileRef = useRef<HTMLInputElement>(null);
   const [envRows, setEnvRows] = useState<EnvRow[]>(() =>
     v.env ? v.env.split(";").filter((p) => p.trim()).map((p) => {
       const eq = p.indexOf("=");
@@ -566,14 +571,14 @@ function ServiceCard({ isMain = false, value: v, onChange, onRemove, images, ima
         <Field>
           <FieldLabel>镜像 tar 文件</FieldLabel>
           <div className="flex items-center gap-2">
-            <label>
-              <Button type="button" variant="outline" asChild>
-                <span><FolderOpenIcon data-icon="inline-start" />选择文件</span>
-              </Button>
-            </label>
-            <input type="file" className="hidden" accept=".tar"
+            <input
+              ref={fileRef}
+              type="file" className="hidden" accept=".tar"
               onChange={(e) => onChange({ ...v, file: e.target.files?.[0] ?? null, resolved: false })}
             />
+            <Button type="button" variant="outline" onClick={() => fileRef.current?.click()}>
+              <FolderOpenIcon data-icon="inline-start" />选择文件
+            </Button>
             <span className="truncate text-xs text-muted-foreground">
               {v.file ? `${v.file.name}（${v.file.size} 字节）` : "未选择文件（不选则要求镜像已入镜像库）"}
             </span>
