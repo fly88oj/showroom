@@ -30,22 +30,26 @@ export async function apiDo(method: string, pathQ: string, body: unknown, signal
   } else if (body instanceof Uint8Array) {
     bodyBytes = body;
   }
-  const [bp, bl] = put(bodyBytes);
-  const auth = signHeaderPtr(method, pathQ, bp, bl);
-  unput(bp, bl);
-  const headers: [string, string][] = [
-    ["Authorization", auth],
-    ...(isJson ? ([["Content-Type", "application/json"]] as [string, string][]) : []),
-  ];
-  // 两级（plan-18）：一级 SRTP-WS 可用即密封整请求；失败/未激活走原 fetch（零改动）
-  const tier1 = await srtpTry(httpSerialize(method, pathQ, headers, bodyBytes));
+  // 签名构造参数化：一级失败降级二级时必须重签（plan-18「断连重放须重签」——
+  // 一级可能已送达仅响应丢失，服务端 nonce 查重会拒同一签名的二次投递）
+  const signedHeaders = (): [string, string][] => {
+    const [bp, bl] = put(bodyBytes);
+    const auth = signHeaderPtr(method, pathQ, bp, bl);
+    unput(bp, bl);
+    return [
+      ["Authorization", auth],
+      ...(isJson ? ([["Content-Type", "application/json"]] as [string, string][]) : []),
+    ];
+  };
+  // 两级（plan-18）：一级 SRTP-WS 可用即密封整请求；失败/未激活走原 fetch
+  const tier1 = await srtpTry(httpSerialize(method, pathQ, signedHeaders(), bodyBytes));
   if (tier1) {
     const { status, body: respBody } = parseHttpResponse(tier1);
     return new Response(respBody as BodyInit, { status });
   }
   return fetch(pathQ, {
     method,
-    headers: Object.fromEntries(headers),
+    headers: Object.fromEntries(signedHeaders()),
     body: method === "GET" || method === "HEAD" ? undefined : (bodyBytes as BodyInit),
     signal,
   });

@@ -260,7 +260,11 @@ export function Publish({
 
     let project2 = name;
     if (!project2) {
-      project2 = randAlnum(8);
+      // 未填项目名：库源选了镜像 → 同步用镜像 repo 名（服务端契约 repo=项目名）；
+      // 推断必须发生在 project2 计算处——setProject 异步回填赶不上本次提交，
+      // 曾致「清空后立即发布」捕获随机名中间态、镜像名对不上而失败
+      const repoPart = main.src === "registry" ? main.image.trim().split(":")[0].split("/").pop() : "";
+      project2 = repoPart || randAlnum(8);
       setProject(project2);
     }
     const bad = checkProj(project2);
@@ -298,16 +302,8 @@ export function Publish({
         setImgErr("主服务未选择镜像"); setImgErrIdx(0);
         return;
       }
-      // 主服务 registry 模式：提取 user/project 和 tag——publish API 用 project 字段匹配仓库名
-      // 镜像引用格式 user/{repo}:{tag}——repo 必须与项目名一致（或已有项目名匹配）
+      // 主服务 registry 模式：tag 取自所选镜像（repo 名已在 project2 计算处同步推断）
       d.resolvedImages[0] = main.image.trim().split(":").pop() || "";
-      // 如果镜像 repo ≠ 项目名，用镜像 repo 的最后一段作为项目名（自动适配已有项目）
-      const repoPart = main.image.trim().split(":")[0].split("/").pop();
-      if (repoPart && !name) {
-        // 未填项目名且选了已有镜像 → 用镜像 repo 名作为项目名（除非用户已填）
-        // 注意：仅当用户没有手动输入项目名时才自动推断
-        if (!project.trim()) setProject(repoPart);
-      }
     }
 
     if (hasTar && !pemReady()) {
