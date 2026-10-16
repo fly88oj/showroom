@@ -142,7 +142,10 @@ sr-redis**，凭据同源、权限同库（同一项目的全部服务共享该�
 **多容器项目（plan-19 §B）**：主服务=既有容器 `sr-<project>`（公网端口+Caddy 路由）；
 附加服务 `--svc name=image:tag,port[,mem[,cpu]]`（CLI 可重复 / 控制台发布页重复行 /
 API `services[]`）→ 容器 `sr-<project>-<name>`（仅内网），同 `showroom-net` 按容器名
-互访，发现键注入全体容器。配额 `SERVICES_MAX`（policy.env，默认 4，含主服务）；
+互访，发现键注入全体容器。**发布收敛（2026-10-16 用户裁决「全部按照最新的来」）：
+发布=完整期望状态——发布请求不带 services 即清空既有附加服务（容器与 conf 一并收敛），
+仅内部重建通道（reconcile/autoheal/回滚按版本快照）沿用目标配置。**
+配额 `SERVICES_MAX`（policy.env，默认 4，含主服务）；
 内存准入按全体服务和。生命周期（publish/stop/start/rm/reconcile/autoheal）遍历全体
 服务容器；logs `?service=` 选流（缺省主服务）。版本历史仍只记主服务镜像（v1 边界）。
 发布文档/控制台展示的「如何配置」= 上述键列表 + `showroom env` 输出示例；若发布者镜像内配置文件需要替换，推荐模式为镜像入口脚本里 `envsubst < config.tpl > config`（模板占位符 `${DB_PASSWORD}` 等由容器启动时自动替换，平台只负责注入真实值）。

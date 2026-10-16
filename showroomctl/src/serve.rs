@@ -532,7 +532,11 @@ async fn dispatch(
                         mem: req.mem,
                         cpu: req.cpu,
                         cport: req.container_port,
-                        services: req.services.map(|v| v.into_iter().map(state::Svc::from).collect()),
+                        // 发布=完整期望状态（2026-10-16 裁决）：body 不带 services 即清空
+                        // 既有附加服务；内部重建通道（reconcile/autoheal/回滚）才沿用目标配置
+                        services: Some(
+                            req.services.unwrap_or_default().into_iter().map(state::Svc::from).collect(),
+                        ),
                         env: req.env.map(|m| m.into_iter().collect()),
                     },
                 )

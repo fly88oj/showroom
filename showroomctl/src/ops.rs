@@ -324,17 +324,26 @@ pub fn redis_get(db: u8, key: &str) -> R<(String, i64, String)> {
 /// 返回日志行；镜像缺失（rm-image 后）记错不中断。
 fn heal_services(root: &Path, p: &str, c: &crate::state::Conf, statuses: &std::collections::HashMap<String, String>) -> Vec<String> {
     let mut log = Vec::new();
-    for v in &c.services {
+    let unhealthy: Vec<crate::state::Svc> = c
+        .services
+        .iter()
+        .filter(|v| {
+            let name = publish::svc_container_name(p, &v.name);
+            !statuses.get(&name).map(|s| s == "running").unwrap_or(false)
+        })
+        .cloned()
+        .collect();
+    if unhealthy.is_empty() {
+        return log;
+    }
+    let Some(env_file) = state::env_path(root, p).to_str().map(str::to_string) else {
+        return log;
+    };
+    // 对齐一次：删除域=conf 全集（防误删兄弟服务），重建仅不健康子集
+    publish::align_services(p, &c.services, &unhealthy, &env_file);
+    for v in unhealthy {
         let name = publish::svc_container_name(p, &v.name);
-        let ok = statuses.get(&name).map(|s| s == "running").unwrap_or(false);
-        if !ok {
-            let env_file = match state::env_path(root, p).to_str() {
-                Some(e) => e.to_string(),
-                None => continue,
-            };
-            publish::align_services(p, std::slice::from_ref(v), &env_file);
-            log.push(format!("{p}: service {} {}", v.name, if statuses.contains_key(&name) { "restarted (was exited)" } else { "rebuilt (was missing)" }));
-        }
+        log.push(format!("{p}: service {} {}", v.name, if statuses.contains_key(&name) { "restarted (was exited)" } else { "rebuilt (was missing)" }));
     }
     log
 }

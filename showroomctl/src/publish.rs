@@ -45,22 +45,28 @@ pub fn split_image_ref(image: &str) -> (String, String) {
     }
 }
 
-/// 附加服务对齐（plan-19 §B.2）：目标集合内——先 rm 再 run（附加服务无公网端口，
-/// 秒级重建可接受，免去配置漂移比对）；不在集合内的旧附加服务删除（由调用方扫描）。
-/// 单服务失败只记日志不中止（主服务已健康；下次 publish/reconcile 收敛）。
-pub fn align_services(project: &str, services: &[state::Svc], env_file: &str) {
+/// 孤儿附加服务容器判定（纯函数可测）：`sr-{project}-{svc}` 单段名（多段=滚动 -new
+/// 等非附加服务）且 svc 不在期望名集合内 → 待删。
+fn orphan_svc_containers(project: &str, wanted: &[String], all_names: &[String]) -> Vec<String> {
+    let prefix = format!("sr-{project}-");
+    all_names
+        .iter()
+        .filter_map(|n| n.strip_prefix(&prefix))
+        .filter(|svc| !svc.contains('-') && !wanted.iter().any(|w| w == svc))
+        .map(|svc| format!("{prefix}{svc}"))
+        .collect()
+}
+
+/// 附加服务对齐（plan-19 §B.2）：`services`=期望全集——孤儿删除按全集判定；
+/// `recreate`=实际 rm+run 子集（附加服务无公网端口，秒级重建可接受，免配置漂移比对；
+/// heal 场景只重建不健康者，健康服务不动）。单服务失败只记日志不中止
+/// （主服务已健康；下次 publish/reconcile 收敛）。
+pub fn align_services(project: &str, services: &[state::Svc], recreate: &[state::Svc], env_file: &str) {
     let net = dockerops::DOCKER_NET;
-    // 删除不再存在的旧附加服务（防孤儿）
-    let live: std::collections::BTreeSet<String> =
-        services.iter().map(|v| v.name.clone()).collect();
-    for n in dockerops::all_container_names() {
-        if let Some(svc) = n.strip_prefix(&format!("sr-{project}-")) {
-            if !svc.contains('-') && !live.contains(svc) {
-                let _ = dockerops::run_fail_ok("docker", &["rm", "-f", &n]);
-            }
-        }
+    for n in orphan_svc_containers(project, &services.iter().map(|v| v.name.clone()).collect::<Vec<_>>(), &dockerops::all_container_names()) {
+        let _ = dockerops::run_fail_ok("docker", &["rm", "-f", &n]);
     }
-    for v in services {
+    for v in recreate {
         let cname = svc_container_name(project, &v.name);
         let _ = dockerops::run_fail_ok("docker", &["rm", "-f", &cname]);
         let cpu_s = v.cpu.to_string();
@@ -109,7 +115,22 @@ pub fn align_services(project: &str, services: &[state::Svc], env_file: &str) {
 
 #[cfg(test)]
 mod svc_tests {
-    use super::split_image_ref;
+    use super::{orphan_svc_containers, split_image_ref};
+
+    #[test]
+    fn orphan_judgement_full_set_and_rolling_suffix() {
+        let names = vec![
+            "sr-app-api".into(), "sr-app-worker".into(),       // 期望集内
+            "sr-app-stale".into(),                              // 孤儿：不在期望集
+            "sr-app-api-new".into(),                            // 滚动 -new 多段名，不删
+            "sr-other-api".into(),                              // 他项目，不删
+        ];
+        let wanted = vec!["api".to_string(), "worker".to_string()];
+        assert_eq!(orphan_svc_containers("app", &wanted, &names), vec!["sr-app-stale".to_string()]);
+        // heal 只重建子集时删除域仍是全集——worker 不会被当孤儿（曾致多服务项目 heal 轮删兄弟）
+        let heal_wanted = vec!["api".to_string()];
+        assert_eq!(orphan_svc_containers("app", &heal_wanted, &names), vec!["sr-app-worker".to_string(), "sr-app-stale".to_string()]);
+    }
 
     #[test]
     fn image_ref_split_shapes() {
@@ -395,7 +416,7 @@ fn publish_mode(
     let _ = dockerops::run_fail_ok("docker", &["rm", "-f", &name]); // 旧容器（可能本就不存在）
     dockerops::docker(&["rename", &newname, &name])?;
     state::register_port(root, port, project)?;
-    align_services(project, &services, env_file);
+    align_services(project, &services, &services, env_file);
 
     // last2 = 上一 tag（回滚兜底：无发布历史的老项目据此回跳；幂等重发也刷新）
     if let Some(o) = &old {

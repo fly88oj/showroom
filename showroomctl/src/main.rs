@@ -319,7 +319,7 @@ fn dispatch(cli: &Cli) -> R<()> {
                 user,
                 project,
                 tag,
-                publish::PublishOpts { services: None, env: None, mem: mem.clone(), cpu: *cpu, cport: *container_port },
+                publish::PublishOpts { services: Some(vec![]), env: None, mem: mem.clone(), cpu: *cpu, cport: *container_port }, // 发布=完整期望状态：不带 svc 即清空（2026-10-16 裁决）
             )?;
             out(
                 j,
