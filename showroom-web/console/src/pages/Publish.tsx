@@ -25,6 +25,13 @@ type Phase = "idle" | "compress" | "upload" | "publish" | "done" | "fail";
 type StepState = "wait" | "run" | "ok" | "skip" | "fail";
 const PHASE_CN = { compress: "压缩", upload: "上传", publish: "发布" } as const;
 
+/** 最近发布参数回填（§5 conf 记忆）。模块级函数：React Compiler purity 对组件作用域内
+ *  事件流的 impure 调用（localStorage/Date.now）持保守告警，落模块域即为其认可形态。 */
+function saveConf(p: string, tag: string, cport: string) {
+  try { localStorage.setItem(`sr.conf.${p}`, JSON.stringify({ tag, cport: parseInt(cport, 10) || 8080, ts: Date.now() })); }
+  catch { /* 存储不可写忽略 */ }
+}
+
 // —— 统一服务行：主服务与附加服务共用（同一镜像源/同一字段/同一变量交互） ——
 
 interface SvcRow {
@@ -155,14 +162,14 @@ export function Publish({
       });
     }
     await api("POST", "/_api/publish", body);
-    try {
-      localStorage.setItem(`sr.conf.${project2}`, JSON.stringify({ tag: mainTag, cport: parseInt(main.cport, 10) || 8080, ts: Date.now() }));
-    } catch { /* 存储不可写忽略 */ }
+    saveConf(project2, mainTag, main.cport);
   }
 
   /** 部署主流程：统一处理主服务 + 附加服务的 tar 上传（顺序）→ 发布。 */
   async function deployRun(mode: "fresh" | "resume" | "publish", projectName: string) {
     const d = deployRef.current;
+    // 压缩产物暂存（immutability：不改渲染期冻结值，本地可变容器贯穿①压缩→②上传）
+    const blobs = new Map<number, Blob>();
     let phaseNow: keyof typeof PHASE_CN = "compress";
     if (name) markRow(name, "uploading", 10 * 60 * 1000);
     try {
@@ -181,7 +188,7 @@ export function Publish({
               setProg({ cur: totalDone + done, total: totalRaw + raw });
               setSvcProg((p) => ({ ...p, [te.svcIdx]: { state: "run", label: "压缩中", cur: done, total: raw } }));
             });
-            te.blob = blob;
+            blobs.set(te.svcIdx, blob);
             totalRaw += te.file.size;
             totalDone += te.file.size;
             setSvcProg((p) => ({ ...p, [te.svcIdx]: { state: "ok", label: "压缩完成", cur: 1, total: 1 } }));
@@ -208,7 +215,7 @@ export function Publish({
             setSvcProg((p) => ({ ...p, [te.svcIdx]: { state: "run", label: "上传中", cur: sent, total } }));
           };
           const importProject = te.svcIdx === 0 ? projectName : `${projectName}-${svcs[te.svcIdx]?.name || te.svcIdx}`;
-          const r = await freshUpload(importProject, te.file, te.blob as Blob, upNote, () => void refreshSpace(true));
+          const r = await freshUpload(importProject, te.file, blobs.get(te.svcIdx) as Blob, upNote, () => void refreshSpace(true));
           const user = session?.user ?? "";
           d.resolvedImages[te.svcIdx] = `${user}/${importProject.toLowerCase()}:${r.tag}`;
           if (te.svcIdx === 0) d.resolvedImages[0] = r.tag;

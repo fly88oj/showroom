@@ -120,13 +120,12 @@ async function connect(): Promise<WebSocket> {
     const proto = `${location.protocol === "https:" ? "wss" : "ws"}://${location.host}/_srtp`;
     const sock = new WebSocket(proto, SUB_PROTOCOL);
     sock.binaryType = "arraybuffer";
-    const opened = await new Promise<void>((res, rej) => {
+    await new Promise<void>((res, rej) => {
       const t = setTimeout(() => rej(new Error("ws timeout")), CHALLENGE_TIMEOUT_MS);
       sock.onopen = () => { clearTimeout(t); res(); };
       sock.onerror = () => { clearTimeout(t); rej(new Error("ws error")); };
       sock.onclose = () => { clearTimeout(t); rej(new Error("ws closed")); };
     });
-    opened;
     // msg0：id + wrap
     const m0 = new Uint8Array(8 + wrap.length);
     m0.set(creds.id, 0);

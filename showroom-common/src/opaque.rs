@@ -1,4 +1,4 @@
-//! OPAQUE 登录协议（RFC 9380 / opaque-ke 3.x，plan-16 / SPEC §16）：CLI 与 Web 共用一份实现，
+//! OPAQUE 登录协议（RFC 9807 / opaque-ke 4.x，plan-16 / SPEC §16）：CLI 与 Web 共用一份实现，
 //! 密码经盲化 OPRF 永不上线，服务端只存注册记录（信封）而非离线可验证哈希。
 //!
 //! Suite：Ristretto255（OPRF + KE）+ TripleDH + **Identity KSF**——argon2id 硬化由
@@ -22,19 +22,19 @@ use opaque_ke::{
     CipherSuite, ClientLogin, ClientLoginFinishParameters, ClientRegistration,
     ClientRegistrationFinishParameters, CredentialFinalization, CredentialRequest,
     CredentialResponse, Identifiers, RegistrationRequest, RegistrationResponse, ServerLogin,
-    ServerLoginStartParameters, ServerRegistration, ServerSetup,
+    ServerLoginParameters, ServerRegistration, ServerSetup,
 };
 use rand::{CryptoRng, RngCore};
 
 use crate::Result;
 
 /// Suite：Ristretto255 + TripleDH + Identity KSF（argon2id 由 `rwd` 外部承担，见模块注）。
+/// v4 起 KeGroup 并入 KeyExchange 泛型（TripleDh<G, H>），哈希显式为 Sha512。
 pub struct Suite;
 
 impl CipherSuite for Suite {
     type OprfCs = opaque_ke::Ristretto255;
-    type KeGroup = opaque_ke::Ristretto255;
-    type KeyExchange = TripleDh;
+    type KeyExchange = TripleDh<opaque_ke::Ristretto255, sha2::Sha512>;
     type Ksf = opaque_ke::ksf::Identity;
 }
 
@@ -100,6 +100,7 @@ pub fn login_start(
 /// 返回 (ke3_b64, session_key)：session_key=AKE 双侧同源输出，plan-18 用作 SRTP
 /// 密钥下发的 HMAC 绑定密钥（对端伪造不得，MITM 换钥即验签失败）。
 pub fn login_finish(
+    rng: &mut (impl RngCore + CryptoRng),
     state: ClientLogin<Suite>,
     pw: &str,
     user: &str,
@@ -110,6 +111,7 @@ pub fn login_finish(
         .map_err(|e| format!("bad ke2: {e}"))?;
     let out = state
         .finish(
+            rng,
             &r,
             ke2,
             ClientLoginFinishParameters { context: None, identifiers: ids(user), ksf: None },
@@ -160,10 +162,39 @@ pub fn server_setup_new(rng: &mut (impl RngCore + CryptoRng)) -> String {
 }
 
 /// 加载服务端 OPRF key（serve 启动 / user-add 设密码 / passwd-set 进程内注册）。
-/// 输入为 b64 串（opaque.key 文件内容）。
-pub fn server_setup_load(b64_key: &str) -> Result<ServerSetup<Suite>> {
-    Ok(ServerSetup::<Suite>::deserialize(&unb64(b64_key)?)
-        .map_err(|e| format!("bad opaque.key: {e}"))?)
+/// 输入为 b64 串（opaque.key 文件内容）。返回 (setup, 是否走了 v3 迁移)——迁移方由
+/// 唯一落盘方（showroomctl ops::opaque_setup）回写 v4 使兼容分支退役（见其注释）。
+/// 兼容 v3 旧格式：v3 布局 seed(64)+sk(32)+fake_sk(32)，v4 布局 seed(64)+sk(32)+fake_pk(32)
+/// （均 128B，长度不可分——先按 v4 解析，失败且尾段能作为合法标量时走 v3 迁移：
+/// 由 fake sk 基点乘法重导公钥替换尾段。seed 与真实 sk 原样保留，故真实登录不受
+/// 误判影响——dummy 公钥仅用于未知用户同形应答。用户注册记录两端格式未变，无需迁移）。
+pub fn server_setup_load(b64_key: &str) -> Result<(ServerSetup<Suite>, bool)> {
+    let raw = unb64(b64_key)?;
+    if let Ok(setup) = ServerSetup::<Suite>::deserialize(&raw) {
+        return Ok((setup, false));
+    }
+    if raw.len() == 128 {
+        use curve25519_dalek::constants::RISTRETTO_BASEPOINT_POINT;
+        use curve25519_dalek::scalar::Scalar;
+        let fake_sk = Scalar::from_canonical_bytes(raw[96..128].try_into().unwrap())
+            .into_option()
+            .filter(|s| s != &Scalar::ZERO);
+        if let Some(sk) = fake_sk {
+            let fake_pk = (RISTRETTO_BASEPOINT_POINT * sk).compress().to_bytes();
+            let mut v4 = Vec::with_capacity(128);
+            v4.extend_from_slice(&raw[..96]);
+            v4.extend_from_slice(&fake_pk);
+            let setup = ServerSetup::<Suite>::deserialize(&v4)
+                .map_err(|e| format!("bad opaque.key (v3 migration): {e}"))?;
+            return Ok((setup, true));
+        }
+    }
+    Err(format!("bad opaque.key: {} bytes", raw.len()).into())
+}
+
+/// setup 序列化为 b64（即 opaque.key 落盘形态；迁移回写方使用）。
+pub fn server_setup_b64(setup: &ServerSetup<Suite>) -> String {
+    b64(&setup.serialize())
 }
 
 /// 注册第二步（服务端）：m1 → m2。credential_identifier=user（OPRF 域分离）。
@@ -206,7 +237,7 @@ pub fn server_login_start(
         record.cloned(),
         ke1,
         user.as_bytes(),
-        ServerLoginStartParameters { context: None, identifiers: ids(user) },
+        ServerLoginParameters { context: None, identifiers: ids(user) },
     )
     .map_err(|e| format!("server login start: {e}"))?;
     Ok((b64(&out.message.serialize()), out.state.serialize().to_vec()))
@@ -218,7 +249,9 @@ pub fn server_login_finish(state_bytes: &[u8], ke3_b64: &str) -> Result<Vec<u8>>
         .map_err(|e| format!("bad pending login state: {e}"))?;
     let ke3 = CredentialFinalization::<Suite>::deserialize(&unb64(ke3_b64)?)
         .map_err(|e| format!("bad ke3: {e}"))?;
-    let out = state.finish(ke3).map_err(|e| format!("login finish (ke3 rejected): {e}"))?;
+    let out = state
+        .finish(ke3, ServerLoginParameters::default())
+        .map_err(|e| format!("login finish (ke3 rejected): {e}"))?;
     Ok(out.session_key.to_vec())
 }
 
@@ -242,7 +275,8 @@ mod tests {
     #[test]
     fn registration_login_roundtrip() {
         let mut rng = OsRng;
-        let setup = server_setup_load(&server_setup_new(&mut rng)).unwrap();
+        let (setup, migrated) = server_setup_load(&server_setup_new(&mut rng)).unwrap();
+        assert!(!migrated, "新生成恒为 v4");
 
         let (cstate, m1) = reg_start(&mut rng, "hunter2", "alice").unwrap();
         let m2 = server_reg_start(&setup, &m1, "alice").unwrap();
@@ -254,7 +288,7 @@ mod tests {
         let (lstate, ke1) = login_start(&mut rng, "hunter2", "alice").unwrap();
         let (ke2, sstate) =
             server_login_start(&mut rng, &setup, Some(&record), &ke1, "alice").unwrap();
-        let ke3 = login_finish(lstate, "hunter2", "alice", &ke2).unwrap().0;
+        let ke3 = login_finish(&mut rng, lstate, "hunter2", "alice", &ke2).unwrap().0;
         assert!(server_login_finish(&sstate, &ke3).is_ok());
     }
 
@@ -262,7 +296,8 @@ mod tests {
     #[test]
     fn wrong_password_fails_client_finish() {
         let mut rng = OsRng;
-        let setup = server_setup_load(&server_setup_new(&mut rng)).unwrap();
+        let (setup, migrated) = server_setup_load(&server_setup_new(&mut rng)).unwrap();
+        assert!(!migrated, "新生成恒为 v4");
         let (cstate, m1) = reg_start(&mut rng, "hunter2", "alice").unwrap();
         let m2 = server_reg_start(&setup, &m1, "alice").unwrap();
         let record_b64 =
@@ -272,18 +307,19 @@ mod tests {
         let (lstate, ke1) = login_start(&mut rng, "wrong-pw", "alice").unwrap();
         let (ke2, _sstate) =
             server_login_start(&mut rng, &setup, Some(&record), &ke1, "alice").unwrap();
-        assert!(login_finish(lstate, "wrong-pw", "alice", &ke2).is_err());
+        assert!(login_finish(&mut rng, lstate, "wrong-pw", "alice", &ke2).is_err());
     }
 
     // 未知用户：record=None 仍产出 ke2（防枚举同形），客户端 finish 失败；ke3 伪造被拒
     #[test]
     fn unknown_user_dummy_path() {
         let mut rng = OsRng;
-        let setup = server_setup_load(&server_setup_new(&mut rng)).unwrap();
+        let (setup, migrated) = server_setup_load(&server_setup_new(&mut rng)).unwrap();
+        assert!(!migrated, "新生成恒为 v4");
         let (lstate, ke1) = login_start(&mut rng, "whatever", "ghost").unwrap();
         let (ke2, _sstate) = server_login_start(&mut rng, &setup, None, &ke1, "ghost").unwrap();
         assert!(!ke2.is_empty());
-        assert!(login_finish(lstate, "whatever", "ghost", &ke2).is_err());
+        assert!(login_finish(&mut rng, lstate, "whatever", "ghost", &ke2).is_err());
 
         // 已注册用户 + 伪造 ke3（来自另一账号的成功登录）→ 服务端拒绝
         let (cstate, m1) = reg_start(&mut rng, "pw-a", "alice").unwrap();
@@ -299,7 +335,7 @@ mod tests {
         let (ls3, ke1c) = login_start(&mut rng, "pw-a", "alice").unwrap();
         let (ke2c, _s3) =
             server_login_start(&mut rng, &setup, Some(&record_a), &ke1c, "alice").unwrap();
-        let (ke3c, _) = login_finish(ls3, "pw-a", "alice", &ke2c).unwrap();
+        let (ke3c, _) = login_finish(&mut rng, ls3, "pw-a", "alice", &ke2c).unwrap();
         assert!(server_login_finish(&sstate_b, &ke3c).is_err());
         let _ = ls2;
     }
@@ -322,5 +358,111 @@ mod tests {
         assert_ne!(a1, a3);
         // 确定性：同输入同输出
         assert_eq!(a1, rwd("pw", "alice").unwrap());
+    }
+
+    // v3 opaque.key 迁移（opaque-ke 4 升级遗留兼容）：v3 布局 seed(64)+sk(32)+fake_sk(32)。
+    // fake_sk 特意选「作为 v4 pk 解析必失败」的标量（其压缩编码非合法 ristretto 点），
+    // 锁定迁移分支必走（防退化为「v4 误解析成功」的假绿）；迁移后 setup 全流程登录可用。
+    #[test]
+    fn server_setup_v3_migration() {
+        use curve25519_dalek::constants::RISTRETTO_BASEPOINT_POINT;
+        use curve25519_dalek::ristretto::CompressedRistretto;
+        use curve25519_dalek::scalar::Scalar;
+        use curve25519_dalek::traits::IsIdentity;
+        use rand::RngCore as _;
+
+        let mut rng = OsRng;
+        // 找一个「字节串不是合法非单位元 ristretto 点」的标量（v4 尾段解析必失败）
+        let bad_pk_scalar = (1u8..=64u8)
+            .map(Scalar::from)
+            .find(|s| {
+                CompressedRistretto(s.to_bytes())
+                    .decompress()
+                    .is_none_or(|p| p.is_identity())
+            })
+            .expect("64 个候选中必有不可解压点");
+        let real_sk = Scalar::random(&mut rng);
+        let mut seed = [0u8; 64];
+        rng.fill_bytes(&mut seed);
+        let blob = [seed.as_slice(), real_sk.to_bytes().as_slice(), bad_pk_scalar.to_bytes().as_slice()].concat();
+        // 前置断言：该 blob 以 v4 直接解析必失败（否则测试没有钉住迁移分支）
+        assert!(ServerSetup::<Suite>::deserialize(&blob).is_err(), "v3 blob 不应被 v4 直接解析");
+        let (setup, migrated) = server_setup_load(&b64(&blob)).unwrap();
+        assert!(migrated, "v3 布局必走迁移分支");
+        // v3 real_sk 对应公钥 = 基点乘法——与迁移推导同一曲线事实，全流程往返兜底验证
+        let _ = RISTRETTO_BASEPOINT_POINT * real_sk;
+
+        let (cstate, m1) = reg_start(&mut rng, "hunter2", "mig").unwrap();
+        let m2 = server_reg_start(&setup, &m1, "mig").unwrap();
+        let record = server_record_from_b64(
+            &reg_finish(&mut rng, cstate, "hunter2", "mig", &m2).unwrap(),
+        )
+        .unwrap();
+        let (lstate, ke1) = login_start(&mut rng, "hunter2", "mig").unwrap();
+        let (ke2, sstate) =
+            server_login_start(&mut rng, &setup, Some(&record), &ke1, "mig").unwrap();
+        let ke3 = login_finish(&mut rng, lstate, "hunter2", "mig", &ke2).unwrap().0;
+        assert!(server_login_finish(&sstate, &ke3).is_ok());
+    }
+
+    // v3 客户端 ↔ v4 服务端互操作：线上存量 CLI（v3 报文）登录新服务端必须仍通。
+    // 上游 opaque-ke 4 的 migration.rs 只验证 v3 注册记录可被 v4 读取，不覆盖 v3 报文
+    // （ke1/ke2/ke3 与 TripleDH transcript）；本测试以真实 v3 客户端全程实证。
+    #[test]
+    fn v3_client_interop_v4_server() {
+        use opaque_ke_3::key_exchange::tripledh::TripleDh as V3TripleDh;
+        use opaque_ke_3::{
+            CipherSuite as V3CipherSuite, ClientLogin as V3ClientLogin,
+            ClientLoginFinishParameters as V3LoginParams,
+            ClientRegistration as V3ClientRegistration,
+            ClientRegistrationFinishParameters as V3RegParams,
+            CredentialResponse as V3CredResp, RegistrationResponse as V3RegResp,
+        };
+        struct V3Suite;
+        impl V3CipherSuite for V3Suite {
+            type OprfCs = opaque_ke_3::Ristretto255;
+            type KeGroup = opaque_ke_3::Ristretto255;
+            type KeyExchange = V3TripleDh;
+            type Ksf = opaque_ke_3::ksf::Identity;
+        }
+        // v3 参数须配 v3 自己的 Identifiers（两版本类型不互通，字段同形）
+        fn v3ids(user: &str) -> opaque_ke_3::Identifiers<'_> {
+            opaque_ke_3::Identifiers { client: Some(user.as_bytes()), server: Some(SERVER_ID) }
+        }
+
+        let mut rng = OsRng;
+        let (setup, migrated) = server_setup_load(&server_setup_new(&mut rng)).unwrap();
+        assert!(!migrated, "新生成恒为 v4");
+        let r = rwd("hunter2", "alice").unwrap();
+
+        // v3 注册报文 m1 → v4 server_reg_start → m2 → v3 客户端 finish → v3 记录被 v4 读取
+        let v3reg = V3ClientRegistration::<V3Suite>::start(&mut rng, &r).unwrap();
+        let m1 = b64(&v3reg.message.serialize());
+        let m2 = server_reg_start(&setup, &m1, "alice").unwrap();
+        let v3fin = v3reg
+            .state
+            .finish(
+                &mut rng,
+                &r,
+                V3RegResp::<V3Suite>::deserialize(&unb64(&m2).unwrap()).unwrap(),
+                V3RegParams { identifiers: v3ids("alice"), ksf: None },
+            )
+            .unwrap();
+        let record = server_record_from_b64(&b64(&v3fin.message.serialize())).unwrap();
+
+        // v3 登录报文 ke1 → v4 server_login_start → ke2 → v3 客户端 finish → ke3 → v4 验证
+        let v3login = V3ClientLogin::<V3Suite>::start(&mut rng, &r).unwrap();
+        let ke1 = b64(&v3login.message.serialize());
+        let (ke2, sstate) =
+            server_login_start(&mut rng, &setup, Some(&record), &ke1, "alice").unwrap();
+        let v3out = v3login
+            .state
+            .finish(
+                &r,
+                V3CredResp::<V3Suite>::deserialize(&unb64(&ke2).unwrap()).unwrap(),
+                V3LoginParams { context: None, identifiers: v3ids("alice"), ksf: None },
+            )
+            .unwrap();
+        assert!(server_login_finish(&sstate, &b64(&v3out.message.serialize())).is_ok());
     }
 }

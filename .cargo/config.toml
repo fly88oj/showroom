@@ -1,0 +1,7 @@
+# wasm32-unknown-unknown 构建专用 flags。
+# getrandom 0.4（ed25519-dalek 3 → curve25519-dalek 5 → rand_core 0.10 链路引入）在该目标
+# 无默认后端，须显式选 custom 后端；钩子实现见 showroom-common/src/wasm_shim.rs
+# （__getrandom_v03_custom，与 getrandom 0.2 的 register_custom_getrandom 并存，同一熵池）。
+# 原生构建不受此段影响。
+[target.wasm32-unknown-unknown]
+rustflags = ['--cfg', 'getrandom_backend="custom"']

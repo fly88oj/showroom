@@ -14,7 +14,6 @@ use std::path::PathBuf;
 #[cfg(not(target_arch = "wasm32"))]
 use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
 
-use aes_gcm::aead::generic_array::GenericArray;
 use aes_gcm::aead::{Aead, KeyInit};
 use aes_gcm::Aes256Gcm;
 use base64::engine::general_purpose::{STANDARD_NO_PAD, URL_SAFE_NO_PAD};
@@ -52,6 +51,13 @@ pub const SIG_WINDOW_SECS: i64 = 300;
 // —— 信封 v1 常量（SPEC §2；pub 供 wasm 垫片与控制台 JS 长度核算复用）——
 pub const KEY_LEN: usize = 32; // AES-256
 pub const NONCE_LEN: usize = 12;
+
+/// aes-gcm 定长 key/nonce 的数组引用视图（aead 0.6 起 GenericArray→Array）。
+/// 定长输入走不失败的 `Into`（`From<&[T; N]> for &Array`），收口一处，
+/// 免 19 处调用点各写 try_from+expect。
+pub(crate) fn gcm_key(k: &[u8; KEY_LEN]) -> &aes_gcm::aead::Key<Aes256Gcm> { k.into() }
+
+pub(crate) fn gcm_nonce(n: &[u8; NONCE_LEN]) -> &aes_gcm::aead::Nonce<Aes256Gcm> { n.into() }
 pub const TAG_LEN: usize = 16;
 pub const SEG: usize = 4 * 1024 * 1024; // 每段明文 4MiB
 pub const WRAP_LEN: usize = 384; // RSA-3072 模长
@@ -410,7 +416,7 @@ pub fn seal<W: Write>(
     }
     out.write_all(&wrapped)?;
     let mut total = wrapped.len() as u64;
-    let cipher = Aes256Gcm::new(GenericArray::from_slice(&k));
+    let cipher = Aes256Gcm::new(gcm_key(&k));
     let mut buf = vec![0u8; SEG];
     loop {
         let n = read_full(&mut plain, &mut buf)?;
@@ -420,7 +426,7 @@ pub fn seal<W: Write>(
         let mut nonce = [0u8; NONCE_LEN];
         OsRng.fill_bytes(&mut nonce);
         let ct = cipher
-            .encrypt(GenericArray::from_slice(&nonce), &buf[..n])
+            .encrypt(gcm_nonce(&nonce), &buf[..n])
             .map_err(|_| io::Error::other("aes-gcm encrypt segment"))?;
         out.write_all(&nonce)?;
         out.write_all(&ct)?;
@@ -450,7 +456,7 @@ pub fn open(
         .as_slice()
         .try_into()
         .map_err(|_| io::Error::other("unwrapped key not 32 bytes"))?;
-    let cipher = Aes256Gcm::new(GenericArray::from_slice(&k));
+    let cipher = Aes256Gcm::new(gcm_key(&k));
     let mut total: u64 = 0;
     let mut nonce = [0u8; NONCE_LEN];
     let mut ct = vec![0u8; SEG + TAG_LEN];
@@ -468,7 +474,7 @@ pub fn open(
             ));
         }
         let pt = cipher
-            .decrypt(GenericArray::from_slice(&nonce), &ct[..n])
+            .decrypt(gcm_nonce(&nonce), &ct[..n])
             .map_err(|_| {
                 io::Error::other("aes-gcm segment auth failed (tag mismatch / tampered data)")
             })?;

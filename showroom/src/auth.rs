@@ -145,7 +145,7 @@ pub fn login(
         .ok_or("登录失败：服务端未返回 ke2")?
         .to_string();
     let (ke3, session_key) =
-        opaque::login_finish(state, &pw, &user, &ke2).map_err(|_| LOGIN_FAIL_TEXT.to_string())?;
+        opaque::login_finish(&mut rng, state, &pw, &user, &ke2).map_err(|_| LOGIN_FAIL_TEXT.to_string())?;
     let v = post_json(&c, &base, "/_api/auth/login-finish", &json!({"user": user, "ke3": ke3}), &[])?;
     let bind_token = v["bind_token"]
         .as_str()

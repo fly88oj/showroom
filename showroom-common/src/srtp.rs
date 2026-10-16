@@ -13,7 +13,6 @@
 
 use std::fmt;
 
-use aes_gcm::aead::generic_array::GenericArray;
 use aes_gcm::aead::{Aead, KeyInit};
 use aes_gcm::Aes256Gcm;
 use rand::{CryptoRng, RngCore};
@@ -97,7 +96,7 @@ pub struct SealStream {
 impl SealStream {
     pub fn new(k: [u8; KEY_LEN], rng: Box<dyn SessionRng + Send>) -> Self {
         SealStream {
-            cipher: Aes256Gcm::new(GenericArray::from_slice(&k)),
+            cipher: Aes256Gcm::new(crate::gcm_key(&k)),
             rng,
             carry: Vec::new(),
             finished: false,
@@ -135,7 +134,7 @@ impl SealStream {
         self.rng.fill_bytes(&mut nonce);
         let ct = self
             .cipher
-            .encrypt(GenericArray::from_slice(&nonce), plain)
+            .encrypt(crate::gcm_nonce(&nonce), plain)
             .map_err(|_| SrtpError::AuthFailed)?;
         out.extend_from_slice(&nonce);
         out.extend_from_slice(&ct);
@@ -171,7 +170,7 @@ impl OpenStream {
         OpenStream {
             priv_key: None,
             key: Some(k),
-            cipher: Some(Aes256Gcm::new(GenericArray::from_slice(&k))),
+            cipher: Some(Aes256Gcm::new(crate::gcm_key(&k))),
             buf: Vec::new(),
             finished: false,
         }
@@ -199,7 +198,7 @@ impl OpenStream {
                 .map_err(|_| SrtpError::BadKey)?;
             let k: [u8; KEY_LEN] = k.as_slice().try_into().map_err(|_| SrtpError::BadKey)?;
             self.key = Some(k);
-            self.cipher = Some(Aes256Gcm::new(GenericArray::from_slice(&k)));
+            self.cipher = Some(Aes256Gcm::new(crate::gcm_key(&k)));
         }
         let cipher = self.cipher.clone().expect("cipher 已建立");
         let blk = NONCE_LEN + SEG + TAG_LEN;
@@ -209,7 +208,7 @@ impl OpenStream {
             self.buf.drain(..NONCE_LEN);
             let ct: Vec<u8> = self.buf.drain(..SEG + TAG_LEN).collect();
             let pt = cipher
-                .decrypt(GenericArray::from_slice(&nonce), ct.as_slice())
+                .decrypt(crate::gcm_nonce(&nonce), ct.as_slice())
                 .map_err(|_| SrtpError::AuthFailed)?;
             out.extend_from_slice(&pt);
         }
@@ -235,7 +234,7 @@ impl OpenStream {
             self.buf.drain(..NONCE_LEN);
             let ct = std::mem::take(&mut self.buf);
             let pt = cipher
-                .decrypt(GenericArray::from_slice(&nonce), ct.as_slice())
+                .decrypt(crate::gcm_nonce(&nonce), ct.as_slice())
                 .map_err(|_| SrtpError::AuthFailed)?;
             out.extend_from_slice(&pt);
         }
@@ -258,7 +257,7 @@ pub struct TWriter {
 
 impl TWriter {
     pub fn new(k: [u8; KEY_LEN], rng: Box<dyn SessionRng + Send>) -> Self {
-        TWriter { cipher: Aes256Gcm::new(GenericArray::from_slice(&k)), rng }
+        TWriter { cipher: Aes256Gcm::new(crate::gcm_key(&k)), rng }
     }
 
     /// 把一段明文封成一条完整记录追加到 out（立即产出，无缓冲）。
@@ -267,7 +266,7 @@ impl TWriter {
         self.rng.fill_bytes(&mut nonce);
         let ct = self
             .cipher
-            .encrypt(GenericArray::from_slice(&nonce), plain)
+            .encrypt(crate::gcm_nonce(&nonce), plain)
             .map_err(|_| SrtpError::AuthFailed)?;
         out.extend_from_slice(&nonce);
         out.extend_from_slice(&(ct.len() as u32).to_be_bytes());
@@ -284,7 +283,7 @@ pub struct TReader {
 
 impl TReader {
     pub fn new(k: [u8; KEY_LEN]) -> Self {
-        TReader { cipher: Aes256Gcm::new(GenericArray::from_slice(&k)), buf: Vec::new() }
+        TReader { cipher: Aes256Gcm::new(crate::gcm_key(&k)), buf: Vec::new() }
     }
 
     /// 喂入网络字节；每解出一条记录即把明文追加到 out。
@@ -307,7 +306,7 @@ impl TReader {
             nonce.copy_from_slice(&self.buf[..NONCE_LEN]);
             let pt = self
                 .cipher
-                .decrypt(GenericArray::from_slice(&nonce), &self.buf[NONCE_LEN + 4..total])
+                .decrypt(crate::gcm_nonce(&nonce), &self.buf[NONCE_LEN + 4..total])
                 .map_err(|_| SrtpError::AuthFailed)?;
             out.extend_from_slice(&pt);
             self.buf.drain(..total);

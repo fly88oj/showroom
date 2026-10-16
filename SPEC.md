@@ -313,7 +313,7 @@ UI：发布页单表单双镜像源（tar 上传→压缩→上传→发布；�
 目标体验：控制台一步登录（账号+密码），密钥生成/绑定/签名全程无感；管理员发账号时设初始密码；
 CLI `showroom login` 一次后全部子命令免密码（gh/ssh 模型）；CI/机器用户同样走账号密码 login。
 
-### 16.1 登录协议：OPAQUE（RFC 9380，opaque-ke 3.x，Ristretto255 suite）
+### 16.1 登录协议：OPAQUE（RFC 9807，opaque-ke 4.x，Ristretto255 suite）
 - **选型**：OPAQUE——密码经盲化 OPRF 永不上线；服务端只存注册记录（信封），无离线可验证哈希；
   每次 KE 全新临时份额天然防重放。非 PAKE 的挑战/签名方案（H(pw,挑战) 上网线即可被离线字典）
   与 HKDF(pw) 对称凭证（可重放 bearer）均被否决。实现收口 showroom-common（两端同 crate 同

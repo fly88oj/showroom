@@ -36,6 +36,14 @@ export function Projects({ base, onOpenSettings }: { base: string; onOpenSetting
   const [firstLoad, setFirstLoad] = useState(true);
   const [loadErr, setLoadErr] = useState<string | null>(null);
 
+  // 渲染纯度（react-hooks/purity）：Date.now 不进渲染体；5s 滴答驱动 §4 在途标记
+  // （发布中/上传中/60s 重建窗口）的过期回落显示
+  const [now, setNow] = useState(() => Date.now());
+  useEffect(() => {
+    const id = window.setInterval(() => setNow(Date.now()), 5000);
+    return () => clearInterval(id);
+  }, []);
+
   useEffect(() => {
     (async () => {
       try { await refreshProjects(); setLoadErr(null); } catch { setLoadErr("加载失败"); }
@@ -99,7 +107,7 @@ export function Projects({ base, onOpenSettings }: { base: string; onOpenSetting
             ) : projects.map((p) => {
               // §4 本地在途标记优先（发布中/上传中/60s 重建中·异常滚动窗口），过期回落服务端 status
               const mk = marks[p.project];
-              const effStatus = mk && mk.until > Date.now()
+              const effStatus = mk && mk.until > now
                 ? (mk.kind === "rebuilding" ? "restarting" : mk.kind === "failed" ? "dead"
                   : mk.kind === "uploading" ? "uploading" : "publishing")
                 : p.status;
@@ -189,7 +197,7 @@ export function Projects({ base, onOpenSettings }: { base: string; onOpenSetting
               );
             })}
             {!firstLoad && loadErr && projects.length === 0 && (
-              <TableRow><TableCell colSpan={7} className="py-6 text-center text-xs text-bad">{loadErr}　<Button size="sm" variant="outline" onClick={() => void refreshProjects(true).then(() => setLoadErr(null)).catch(() => setLoadErr("加载失败"))}>重试</Button></TableCell></TableRow>
+              <TableRow><TableCell colSpan={7} className="py-6 text-center text-xs text-bad">{loadErr} <Button size="sm" variant="outline" onClick={() => void refreshProjects(true).then(() => setLoadErr(null)).catch(() => setLoadErr("加载失败"))}>重试</Button></TableCell></TableRow>
             )}
             {!firstLoad && !loadErr && projects.length === 0 && (
               <TableRow><TableCell colSpan={7} className="py-6 text-center text-xs text-muted-foreground">尚无项目——到「发布」页发布第一个 Demo。</TableCell></TableRow>

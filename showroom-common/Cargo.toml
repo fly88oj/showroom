@@ -8,19 +8,29 @@ edition = "2021"
 crate-type = ["rlib", "cdylib"]
 
 [dependencies]
-ed25519-dalek = "2"
-rsa = "0.9"
+ed25519-dalek = "3"
+rsa = "0.9" # 0.10 尚为 rc（2026-10），稳定后跟进
+# opaque.key v3→v4 迁移专用：由 v3 残留的 fake sk 标量重导 ristretto 公钥（基点乘法）；
+# 特性面与 opaque-ke 4 的 curve25519-dalek 完全一致（同版本同 feature → 树内仅一份）。
+curve25519-dalek = { version = "4", default-features = false, features = ["zeroize"] }
+# sha2/hmac 锚 0.10/0.12：opaque-ke 4 与 rsa 0.9 均锚 digest 0.10，Suite 泛型与 OAEP
+# 哈希只在 digest 0.10 trait 面上成立；升 0.11/0.13 需等上游统一（跟进条件：opaque-ke/rsa
+# 的 digest 锚进 0.11）。
 hmac = "0.12" # plan-18 §3.3：SRTP 密钥下发 OPAQUE 绑定（HMAC-SHA256）
-aes-gcm = "0.10"
+aes-gcm = "0.11"
 sha2 = "0.10"
+# rand 锚 0.8：opaque-ke 4 与 rsa 0.9 的泛型 RNG 都在 rand_core 0.6 栈上；rand 0.10 起
+# RngCore→Rng/OsRng→SysRng 大改名且锚 rand_core 0.10，两栈并存会在调用点断裂。
+# 跟进条件：opaque-ke/rsa 升到 rand_core 0.10 锚定的版本。
 rand = "0.8"
-base64 = "0.22"
+base64 = "0.23"
 hex = "0.4"
-# plan-16（SPEC §16）OPAQUE 登录：default-features=false 免 getrandom "js"（§8.3 禁引
-# wasm-bindgen；wasm 熵走既有 custom 后端桥，见 wasm_shim.rs）；ristretto255-voprf 即 Suite 全集。
-opaque-ke = { version = "3", default-features = false, features = ["ristretto255-voprf"] }
+# plan-16（SPEC §16）OPAQUE 登录：v4 起原 ristretto255-voprf 特性更名 ristretto255；
+# default-features=false 免 serde。v4 序列化变化仅 ServerSetup（dummy 记录改只存公钥），
+# server_setup_load 带 v3→v4 迁移分支，用户注册记录不受影响（RFC 9807 同步，核心协议未变）。
+opaque-ke = { version = "4", default-features = false, features = ["ristretto255"] }
 # rwd 硬化（argon2id）：纯 Rust 无 C 工具链可交叉 wasm32；只用核心 hash_password_into。
-argon2 = { version = "0.5", default-features = false, features = ["alloc"] }
+argon2 = { version = "0.6", default-features = false, features = ["alloc"] }
 
 # wasm32 专用：getrandom 无该目标默认后端（js feature 会引 wasm-bindgen，SPEC §8.3 禁用），
 # 走 "custom" 后端桥到熵池（见 lib.rs register_custom_getrandom / wasm_shim.rs）；
@@ -28,4 +38,13 @@ argon2 = { version = "0.5", default-features = false, features = ["alloc"] }
 # 原生侧的解压消费方在 showroomctl——那里已直接依赖 zstd，common 原生构建不重复引入）
 [target.'cfg(target_arch = "wasm32")'.dependencies]
 getrandom = { version = "0.2", features = ["custom"] }
-zstd = "0.13"
+# getrandom 0.4：仅为其 Error 类型与 custom 钩子符号约定（见 wasm_shim __getrandom_v03_custom）。
+# 链路：ed25519-dalek 3 → curve25519-dalek 5 → rand_core 0.10 → getrandom 0.4，该目标无默认
+# 后端；后端开关 cfg getrandom_backend="custom" 在根 .cargo/config.toml 的 wasm32 段。
+getrandom-04 = { package = "getrandom", version = "0.4", default-features = false }
+zstd = "0.14"
+
+[dev-dependencies]
+# 仅测试：v3 客户端 ↔ v4 服务端互操作回归（线上存量 CLI 报文为 v3；上游 migration.rs
+# 只覆盖 v3 记录，不覆盖 v3 报文）。不进生产依赖树。
+opaque-ke-3 = { package = "opaque-ke", version = "3.0.0", default-features = false, features = ["ristretto255-voprf"] }

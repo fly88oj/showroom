@@ -10,7 +10,7 @@ Showroom 的安全前提：控制面流量可能经过不可信的明文链路�
 
 ### 1.1 选型与原理
 
-登录采用 **OPAQUE**（RFC 9380，opaque-ke 3.x，Ristretto255 suite）——增强型 PAKE：
+登录采用 **OPAQUE**（RFC 9807，opaque-ke 4.x，Ristretto255 suite）——增强型 PAKE：
 
 - **密码零上线**：密码先经 argon2id 硬化为 rwd，再经盲化 OPRF 与服务端交互——**任何一步都不把密码或其可验证材料送上网络**；
 - **服务端无离线可验证哈希**：服务端只存注册记录信封（`state/users/<u>/pass.opaque`，b64 0600）；拖库后无法离线字典攻击；

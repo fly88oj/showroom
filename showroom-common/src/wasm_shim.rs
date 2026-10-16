@@ -44,7 +44,6 @@ use std::collections::HashMap;
 use std::panic::{self, AssertUnwindSafe};
 use std::sync::Mutex;
 
-use aes_gcm::aead::generic_array::GenericArray;
 use aes_gcm::aead::{Aead, KeyInit};
 use aes_gcm::Aes256Gcm;
 use base64::engine::general_purpose::{STANDARD_NO_PAD, URL_SAFE_NO_PAD};
@@ -165,6 +164,26 @@ pub fn custom_getrandom(buf: &mut [u8]) -> Result<(), getrandom::Error> {
             Ok(())
         }
         None => Err(getrandom::Error::UNSUPPORTED),
+    }
+}
+
+/// getrandom 0.4 自定义后端钩子（0.4 起注册宏改为符号约定；开关 cfg
+/// `getrandom_backend="custom"` 在根 .cargo/config.toml 的 wasm32 段）。链路：
+/// ed25519-dalek 3 → curve25519-dalek 5 → rand_core 0.10 → getrandom 0.4——该链
+/// 在本目标需要可链接的熵符号；与上方 0.2 后端同一熵池（未注入熵即报错）。
+#[no_mangle]
+extern "Rust" fn __getrandom_v03_custom(
+    dest: *mut u8,
+    len: usize,
+) -> Result<(), getrandom_04::Error> {
+    let buf = unsafe { core::slice::from_raw_parts_mut(dest, len) };
+    let mut g = GLOBAL_RNG.lock().unwrap();
+    match g.as_mut() {
+        Some(r) => {
+            r.fill_bytes(buf);
+            Ok(())
+        }
+        None => Err(getrandom_04::Error::new_custom(1)),
     }
 }
 
@@ -303,7 +322,7 @@ fn seal_begin(pem: &[u8], seed: Option<[u8; KEY_LEN]>) -> Result<i32, i32> {
         return Err(E_KEY); // 非 RSA-3072（模长≠384）
     }
     let st = SealState {
-        cipher: Aes256Gcm::new(GenericArray::from_slice(&k)),
+        cipher: Aes256Gcm::new(crate::gcm_key(&k)),
         rng,
         carry: Vec::new(),
         pending_header: Some(wrapped),
@@ -318,7 +337,7 @@ fn seal_seg(st: &mut SealState, plain: &[u8], w: &mut W<'_>) -> Result<(), i32> 
     st.rng.fill_bytes(&mut nonce);
     let ct = st
         .cipher
-        .encrypt(GenericArray::from_slice(&nonce), plain)
+        .encrypt(crate::gcm_nonce(&nonce), plain)
         .map_err(|_| E_CRYPTO)?;
     w.put(&nonce);
     w.put(&ct);
@@ -545,7 +564,7 @@ fn open_push(sid: i32, data: &[u8], out: *mut u8, cap: usize) -> Result<i32, i32
         let k = pk.decrypt(Oaep::new::<Sha256>(), &wrap).map_err(|_| E_CRYPTO)?;
         drop(pk);
         let k: [u8; KEY_LEN] = k.as_slice().try_into().map_err(|_| E_CRYPTO)?;
-        st.cipher = Some(Aes256Gcm::new(GenericArray::from_slice(&k)));
+        st.cipher = Some(Aes256Gcm::new(crate::gcm_key(&k)));
     }
     let cipher = st.cipher.clone().expect("cipher 已建立");
     let mut w = W { buf: unsafe { std::slice::from_raw_parts_mut(out, cap) }, pos: 0 };
@@ -556,7 +575,7 @@ fn open_push(sid: i32, data: &[u8], out: *mut u8, cap: usize) -> Result<i32, i32
         st.buf.drain(..NONCE_LEN);
         let ct: Vec<u8> = st.buf.drain(..SEG + TAG_LEN).collect();
         let pt = cipher
-            .decrypt(GenericArray::from_slice(&nonce), ct.as_slice())
+            .decrypt(crate::gcm_nonce(&nonce), ct.as_slice())
             .map_err(|_| E_CRYPTO)?;
         w.put(&pt);
     }
@@ -570,7 +589,7 @@ fn open_push(sid: i32, data: &[u8], out: *mut u8, cap: usize) -> Result<i32, i32
             st.buf.drain(..NONCE_LEN);
             let ct: Vec<u8> = std::mem::take(&mut st.buf);
             let pt = cipher
-                .decrypt(GenericArray::from_slice(&nonce), ct.as_slice())
+                .decrypt(crate::gcm_nonce(&nonce), ct.as_slice())
                 .map_err(|_| E_CRYPTO)?;
             w.put(&pt);
         }
@@ -958,7 +977,9 @@ pub extern "C" fn sr_login_finish(
         };
         let user = s.user.clone();
         let (ke3, sk) =
-            crate::opaque::login_finish(s.state, &pw, &user, &ke2).map_err(|_| E_CRYPTO)?;
+            with_global_rng(|r| crate::opaque::login_finish(r, s.state, &pw, &user, &ke2))
+                .map_err(|_| E_CRYPTO)?
+                .map_err(|_| E_CRYPTO)?;
         // AKE 会话密钥留槽（sr_login_session_key 取用；plan-18 密钥绑定验证）
         login_key_set(sid, sk);
         write_cstr(&ke3, out, cap)

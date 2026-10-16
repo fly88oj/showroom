@@ -29,15 +29,15 @@ async function loadWasm(): Promise<WebAssembly.Exports> {
   const paths = ["showroom_bg.wasm", "/_console/showroom_bg.wasm"];
   let lastErr: unknown = null;
   for (const p of paths) {
+    // 流式失败回落 ArrayBuffer 逐级降级；两级皆败才记错换下一路径
     try {
-      return (await WebAssembly.instantiateStreaming(fetch(p), {})).instance.exports;
+      try {
+        return (await WebAssembly.instantiateStreaming(fetch(p), {})).instance.exports;
+      } catch {
+        return (await WebAssembly.instantiate(await (await fetch(p)).arrayBuffer(), {})).instance.exports;
+      }
     } catch (e) {
       lastErr = e;
-      try {
-        return (await WebAssembly.instantiate(await (await fetch(p)).arrayBuffer(), {})).instance.exports;
-      } catch (e2) {
-        lastErr = e2;
-      }
     }
   }
   throw lastErr;

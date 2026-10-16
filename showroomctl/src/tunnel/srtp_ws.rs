@@ -78,7 +78,7 @@ async fn srtp_ws_session(sock: WebSocket, inner: Router, root: std::path::PathBu
         let resp = dispatch(inner.clone(), &req_bytes).await?;
         let mut wire = Vec::with_capacity(resp.len() + 64);
         writer.record(&resp, &mut wire).map_err(|e| e.to_string())?;
-        sink.send(Message::Binary(wire)).await.map_err(|e| e.to_string())?;
+        sink.send(Message::Binary(wire.into())).await.map_err(|e| e.to_string())?;
     }
     Ok(())
 }

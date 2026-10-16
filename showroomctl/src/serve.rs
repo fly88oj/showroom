@@ -1528,7 +1528,7 @@ mod tests {
         .await;
         assert_eq!(code, 200, "login-begin: {}", String::from_utf8_lossy(&body));
         let ke2 = serde_json::from_slice::<Value>(&body).unwrap()["ke2"].as_str().unwrap().to_string();
-        let (ke3, _sk) = showroom_common::opaque::login_finish(st, pw, user, &ke2).unwrap();
+        let (ke3, _sk) = showroom_common::opaque::login_finish(&mut rng, st, pw, user, &ke2).unwrap();
         let (code, body) = call(
             s,
             "POST",
@@ -1928,7 +1928,7 @@ FRP=none"}}"#).unwrap_err();
         let (_, b) = call(&s, "POST", "/_api/auth/login-begin",
             &serde_json::to_vec(&json!({"user":"alice","ke1": ke1})).unwrap(), &[]).await;
         let ke2 = serde_json::from_slice::<Value>(&b).unwrap()["ke2"].as_str().unwrap().to_string();
-        let (ke3, _sk) = showroom_common::opaque::login_finish(st, "pw-a", "alice", &ke2).unwrap();
+        let (ke3, _sk) = showroom_common::opaque::login_finish(&mut rng, st, "pw-a", "alice", &ke2).unwrap();
         let body3 = serde_json::to_vec(&json!({"user":"alice","ke3": ke3})).unwrap();
         let (c, _) = call(&s, "POST", "/_api/auth/login-finish", &body3, &[]).await;
         assert_eq!(c, 200);
@@ -2051,12 +2051,12 @@ FRP=none"}}"#).unwrap_err();
         let (_, b) = call(&s, "POST", "/_api/auth/login-begin",
             &serde_json::to_vec(&json!({"user":"alice","ke1": ke1})).unwrap(), &[]).await;
         let ke2 = serde_json::from_slice::<Value>(&b).unwrap()["ke2"].as_str().unwrap().to_string();
-        assert!(showroom_common::opaque::login_finish(st, "new-pw", "alice", &ke2).is_ok());
+        assert!(showroom_common::opaque::login_finish(&mut rng, st, "new-pw", "alice", &ke2).is_ok());
         let (st2, ke1b) = showroom_common::opaque::login_start(&mut rng, "old-pw", "alice").unwrap();
         let (_, b) = call(&s, "POST", "/_api/auth/login-begin",
             &serde_json::to_vec(&json!({"user":"alice","ke1": ke1b})).unwrap(), &[]).await;
         let ke2b = serde_json::from_slice::<Value>(&b).unwrap()["ke2"].as_str().unwrap().to_string();
-        assert!(showroom_common::opaque::login_finish(st2, "old-pw", "alice", &ke2b).is_err(), "旧密码失效");
+        assert!(showroom_common::opaque::login_finish(&mut rng, st2, "old-pw", "alice", &ke2b).is_err(), "旧密码失效");
 
         // 裸 pw-commit（无在途 pw-begin）→ E_STATE（登录态端点，如实报错）
         let (c, b) = call(&s, "POST", "/_api/auth/pw-commit", &b2,
@@ -2132,7 +2132,7 @@ FRP=none"}}"#).unwrap_err();
         let (_, b) = call(&s, "POST", "/_api/auth/login-begin",
             &serde_json::to_vec(&json!({"user":"alice","ke1": ke1})).unwrap(), &[]).await;
         let ke2 = serde_json::from_slice::<Value>(&b).unwrap()["ke2"].as_str().unwrap().to_string();
-        assert!(showroom_common::opaque::login_finish(st, &pw, "alice", &ke2).is_ok());
+        assert!(showroom_common::opaque::login_finish(&mut rng, st, &pw, "alice", &ke2).is_ok());
 
         // 全无密码参数 → E_NAME
         let b1 = br#"{"user":"alice"}"#;

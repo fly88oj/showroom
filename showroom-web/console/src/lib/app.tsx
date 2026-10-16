@@ -308,7 +308,7 @@ function DataProvider({ children }: { children: ReactNode }) {
     tab, setTab, pubPrefill, setPubPrefill,
     projects, refreshProjects, projOp, rollback, publishDone,
     images, ensureImages, rmImage, space, refreshSpace, marks, markRow,
-  }), [tab, pubPrefill, projects, refreshProjects, projOp, rollback, publishDone,
+  }), [tab, setTab, pubPrefill, projects, refreshProjects, projOp, rollback, publishDone,
     images, ensureImages, rmImage, space, refreshSpace, marks, markRow]);
   return <DataCtx.Provider value={value}>{children}</DataCtx.Provider>;
 }

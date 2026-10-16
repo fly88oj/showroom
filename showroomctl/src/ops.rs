@@ -722,7 +722,8 @@ pub struct UserAdded {
 }
 
 /// 服务端 OPRF key（plan-16 §1.2）：`state/opaque.key`（b64 0600）缺失自动生成（幂等；
-/// 同 platform_rsa 模式，serve 启动与 CLI 设密码路径共用）。
+/// 同 platform_rsa 模式，serve 启动与 CLI 设密码路径共用）。opaque-ke 3→4 升级遗留的
+/// v3 旧格式在此自愈：迁移成功即回写 v4（每部署至多一次），此后兼容分支退役。
 pub fn opaque_setup(root: &Path) -> R<opaque::server_types::Setup> {
     let p = state::opaque_key_path(root);
     let b64_key = match fs::read_to_string(&p) {
@@ -733,7 +734,12 @@ pub fn opaque_setup(root: &Path) -> R<opaque::server_types::Setup> {
             s
         }
     };
-    opaque::server_setup_load(&b64_key).map_err(|e| ApiError::state(format!("{e}")))
+    let (setup, migrated) =
+        opaque::server_setup_load(&b64_key).map_err(|e| ApiError::state(format!("{e}")))?;
+    if migrated {
+        state::write_private(&p, &opaque::server_setup_b64(&setup))?;
+    }
+    Ok(setup)
 }
 
 /// 进程内 OPAQUE 注册（user-add 设密码 / passwd-set 替换共用，plan-16 §1.4）：注册协议
@@ -1188,7 +1194,7 @@ mod tests {
         let (st, ke1) = showroom_common::opaque::login_start(&mut rng, &login_pw, "carol").unwrap();
         let (ke2, sst) =
             showroom_common::opaque::server_login_start(&mut rng, &setup, Some(&record), &ke1, "carol").unwrap();
-        let (ke3, _) = showroom_common::opaque::login_finish(st, &login_pw, "carol", &ke2).unwrap();
+        let (ke3, _) = showroom_common::opaque::login_finish(&mut rng, st, &login_pw, "carol", &ke2).unwrap();
         assert!(showroom_common::opaque::server_login_finish(&sst, &ke3).is_ok());
     }
 
@@ -1209,7 +1215,7 @@ mod tests {
         let (st, ke1) = showroom_common::opaque::login_start(&mut rng, "old-pw", "alice").unwrap();
         let (ke2, _) = showroom_common::opaque::server_login_start(
             &mut rng, &setup, Some(&rec1), &ke1, "alice").unwrap();
-        assert!(showroom_common::opaque::login_finish(st, "old-pw", "alice", &ke2).is_ok());
+        assert!(showroom_common::opaque::login_finish(&mut rng, st, "old-pw", "alice", &ke2).is_ok());
 
         // 替换
         user_passwd_set(&root, "alice", "new-pw").unwrap();
@@ -1221,11 +1227,11 @@ mod tests {
         let (st2, ke1b) = showroom_common::opaque::login_start(&mut rng, "old-pw", "alice").unwrap();
         let (ke2b, _) = showroom_common::opaque::server_login_start(
             &mut rng, &setup, Some(&rec2), &ke1b, "alice").unwrap();
-        assert!(showroom_common::opaque::login_finish(st2, "old-pw", "alice", &ke2b).is_err(), "旧密码失效");
+        assert!(showroom_common::opaque::login_finish(&mut rng, st2, "old-pw", "alice", &ke2b).is_err(), "旧密码失效");
         let (st3, ke1c) = showroom_common::opaque::login_start(&mut rng, "new-pw", "alice").unwrap();
         let (ke2c, sst) = showroom_common::opaque::server_login_start(
             &mut rng, &setup, Some(&rec2), &ke1c, "alice").unwrap();
-        let (ke3, _) = showroom_common::opaque::login_finish(st3, "new-pw", "alice", &ke2c).unwrap();
+        let (ke3, _) = showroom_common::opaque::login_finish(&mut rng, st3, "new-pw", "alice", &ke2c).unwrap();
         assert!(showroom_common::opaque::server_login_finish(&sst, &ke3).is_ok(), "新密码可用");
         // 既有钥匙与账号级 admin 不受影响（R4）
         assert!(state::tokens_dir(&root, "alice").join(format!("{kid}.pub")).exists());
