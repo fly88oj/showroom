@@ -48,12 +48,7 @@ pub fn split_image_ref(image: &str) -> (String, String) {
 /// 附加服务对齐（plan-19 §B.2）：目标集合内——先 rm 再 run（附加服务无公网端口，
 /// 秒级重建可接受，免去配置漂移比对）；不在集合内的旧附加服务删除（由调用方扫描）。
 /// 单服务失败只记日志不中止（主服务已健康；下次 publish/reconcile 收敛）。
-/// 附加服务对齐（公开单/多服务版：reconcile/autoheal 重建缺失附加服务用）。
-pub fn align_services_pub(project: &str, services: &[state::Svc], env_file: &str) {
-    align_services(project, services, env_file);
-}
-
-fn align_services(project: &str, services: &[state::Svc], env_file: &str) {
+pub fn align_services(project: &str, services: &[state::Svc], env_file: &str) {
     let net = dockerops::DOCKER_NET;
     // 删除不再存在的旧附加服务（防孤儿）
     let live: std::collections::BTreeSet<String> =
@@ -173,7 +168,7 @@ fn health_probe(port: u16) -> bool {
 fn mem_available_kb() -> R<u64> {
     let text = fs::read_to_string("/proc/meminfo")
         .map_err(|e| ApiError::state(format!("read /proc/meminfo: {e}")))?;
-    state::parse_meminfo_available_kb(&text)
+    state::parse_meminfo_kb(&text, "MemAvailable:")
         .ok_or_else(|| ApiError::state("/proc/meminfo missing MemAvailable"))
 }
 

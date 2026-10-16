@@ -30,7 +30,7 @@ async function postChunk(uploadId: string, seq: number, ptr: number, len: number
 
 export interface UpRecord { seed: string; project: string; tag: string; size: number; zsize: number; name: string }
 
-export function saveUpSession(uploadId: string, rec: UpRecord) {
+function saveUpSession(uploadId: string, rec: UpRecord) {
   localStorage.setItem("sr.up." + uploadId, JSON.stringify(rec));
 }
 export function loadUpSession(id: string): UpRecord | null {
@@ -42,7 +42,7 @@ export function latestUpId(): string | null {
 }
 
 /** 从 startSeq 继续上传；note(sent,total) 进度回调。完成即 import-end + 会话清理 + 空间失效。 */
-export async function uploadRest(
+async function uploadRest(
   uploadId: string, sid: number, blob: Blob, startSeq: number,
   sent0: number, total: number, note?: (sent: number, total: number) => void,
   onSpaceInvalidate?: () => void,

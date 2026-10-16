@@ -194,7 +194,7 @@ fn main() {
     // 密钥过期自动重登+原命令重试（§密钥生命周期）：E_AUTH+expired → 密码重登 → 自动重执行原命令
     let mut retried_reauth = false;
     loop {
-        match execute(&cli) {
+        match run(&cli) {
             Ok(()) => break,
             Err(e) => {
                 let err_str = e.to_string();
@@ -202,9 +202,7 @@ fn main() {
                     retried_reauth = true;
                     eprintln!("\n━━━ 本机密钥已过期（30 分钟无活动自动过期）━━━");
                     eprintln!("请输入密码获取新密钥，原命令将自动继续执行。\n");
-                    match crate::auth::reauth_on_expired(
-                        &crate::config::Config::load().unwrap_or_default(), None
-                    ) {
+                    match crate::auth::login(&crate::config::Config::load().unwrap_or_default(), None, None, false) {
                         Ok(_) => {
                             eprintln!("━━━ 重新登录成功，继续执行 ━━━\n");
                             continue; // 重试原命令
@@ -220,11 +218,6 @@ fn main() {
             }
         }
     }
-}
-
-fn execute(cli: &Cli) -> Result<(), String> {
-    // 密钥生命周期：main 的 retry loop 在 E_AUTH+expired 时自动重登后重新调用此函数
-    run(cli)
 }
 
 // ———— publish/deploy 共用的 positional 解析 ————

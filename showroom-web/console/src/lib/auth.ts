@@ -33,66 +33,59 @@ export function ensureSeed() {
 }
 
 // —— OPAQUE 客户端适配层（plan-16 §2.2 报文序列 / §6.1 垫片导出）——
-// ABI：b64 串进出；输出 NUL 结尾、容量不足 -(所需) ≤ -40；finish 一次性消费会话；密码错误 = -7。
-// 垫片随包分发（initWasm 已断言导出齐备），无降级分支。
+// ABI：b64 串进出；输出 NUL 结尾、容量不足 -(所需) ≤ -40；finish 一次性消费会话（无 end 清理步）；密码错误 = -7。
+// 登录/注册两对报文同构，参数化垫片导出收敛为一套实现。
+
+type StartFn = (pp: number, pl: number, up: number, ul: number) => number;
+type MsgFn = (sid: number, p: number, c: number) => number;
+type FinishFn = (sid: number, pp: number, pl: number, rp: number, rl: number, out: number, cap: number) => number;
+
+function shimStart(startFn: StartFn, msgFn: MsgFn, what: string, user: string, pass: string): { sid: number; msg: string } {
+  const [pp, pl] = put(enc.encode(pass)), [up, ul] = put(enc.encode(user));
+  let sid: number;
+  try {
+    sid = startFn(pp, pl, up, ul);
+  } finally { unput(pp, pl); unput(up, ul); }
+  if (sid <= 0) throw { error: "E_NET", msg: `${what} 失败（${sid}；-6=熵未注入）` };
+  const msg = shimCStr((p, c) => msgFn(sid, p, c), 2048);
+  return { sid, msg };
+}
+
+/** 返回输出串；失败抛错（err.code=垫片返回码，登录侧据此把 -7 译为「密码错误」）。 */
+function shimFinish(finishFn: FinishFn, what: string, sid: number, pass: string, resp: string, cap: number): string {
+  const [pp, pl] = put(enc.encode(pass)), [rp, rl] = put(enc.encode(resp));
+  const out = (ex.sr_alloc as (n: number) => number)(cap);
+  const r = finishFn(sid, pp, pl, rp, rl, out, cap);
+  unput(pp, pl); unput(rp, rl);
+  const msg = r > 0 ? readCStr(out, r) : null;
+  unput(out, cap);
+  if (!msg) throw { error: "E_NET", code: r, msg: `${what} 失败（${r}）` };
+  return msg;
+}
 
 export function opaqueStart(user: string, pass: string): { sid: number; ke1: string } {
-  {
-    const [pp, pl] = put(enc.encode(pass)), [up, ul] = put(enc.encode(user));
-    let sid: number;
-    try {
-      sid = (ex.sr_login_start as (a: number, b: number, c: number, d: number) => number)(pp, pl, up, ul);
-    } finally { unput(pp, pl); unput(up, ul); }
-    if (sid <= 0) throw { error: "E_NET", msg: `login_start 失败（${sid}；-6=熵未注入）` };
-    const ke1 = shimCStr((p, c) => (ex.sr_login_ke1 as (a: number, b: number, c: number) => number)(sid, p, c), 2048);
-    return { sid, ke1 };
-  }
+  const r = shimStart(ex.sr_login_start as StartFn, ex.sr_login_ke1 as MsgFn, "login_start", user, pass);
+  return { sid: r.sid, ke1: r.msg };
 }
 
 export function opaqueFinish(sid: number, pass: string, ke2: string): string {
-  {
-    const [pp, pl] = put(enc.encode(pass)), [kp, kl] = put(enc.encode(ke2));
-    const cap = 2048, out = (ex.sr_alloc as (n: number) => number)(cap);
-    const r = (ex.sr_login_finish as (a: number, b: number, c: number, d: number, e: number, f: number, g: number) => number)(sid, pp, pl, kp, kl, out, cap);
-    unput(pp, pl); unput(kp, kl);
-    const ke3 = r > 0 ? readCStr(out, r) : null;
-    unput(out, cap);
-    if (r === -7) throw { error: "E_PW_LOCAL", msg: "" };
-    if (!ke3) throw { error: "E_NET", msg: `login_finish 失败（${r}）` };
-    return ke3;
+  try {
+    return shimFinish(ex.sr_login_finish as FinishFn, "login_finish", sid, pass, ke2, 2048);
+  } catch (e) {
+    if ((e as { code?: number }).code === -7) throw { error: "E_PW_LOCAL", msg: "" };
+    throw e;
   }
 }
-
-export function opaqueEnd(_sid: number) { /* 真垫片会话在 finish 时一次性自弃 */ }
 
 // —— OPAQUE 注册适配（改密码：m1 → m2 → record）——
 export function opaqueRegStart(user: string, pass: string): { sid: number; m1: string } {
-  {
-    const [pp, pl] = put(enc.encode(pass)), [up, ul] = put(enc.encode(user));
-    let sid: number;
-    try {
-      sid = (ex.sr_reg_start as (a: number, b: number, c: number, d: number) => number)(pp, pl, up, ul);
-    } finally { unput(pp, pl); unput(up, ul); }
-    if (sid <= 0) throw { error: "E_NET", msg: `reg_start 失败（${sid}；-6=熵未注入）` };
-    const m1 = shimCStr((p, c) => (ex.sr_reg_msg as (a: number, b: number, c: number) => number)(sid, p, c), 2048);
-    return { sid, m1 };
-  }
+  const r = shimStart(ex.sr_reg_start as StartFn, ex.sr_reg_msg as MsgFn, "reg_start", user, pass);
+  return { sid: r.sid, m1: r.msg };
 }
 
 export function opaqueRegFinish(sid: number, pass: string, m2: string): string {
-  {
-    const [pp, pl] = put(enc.encode(pass)), [mp, ml] = put(enc.encode(m2));
-    const cap = 4096, out = (ex.sr_alloc as (n: number) => number)(cap);
-    const r = (ex.sr_reg_finish as (a: number, b: number, c: number, d: number, e: number, f: number, g: number) => number)(sid, pp, pl, mp, ml, out, cap);
-    unput(pp, pl); unput(mp, ml);
-    const record = r > 0 ? readCStr(out, r) : null;
-    unput(out, cap);
-    if (!record) throw { error: "E_NET", msg: `reg_finish 失败（${r}）` };
-    return record;
-  }
+  return shimFinish(ex.sr_reg_finish as FinishFn, "reg_finish", sid, pass, m2, 4096);
 }
-
-export function opaqueRegEnd(_sid: number) { /* 同上 */ }
 
 // —— 一步登录（plan-16 §2.2/§3）：login-begin → 本地 finish → login-finish → key-bind → 进入 ——
 export async function postAuthJson(path: string, body: unknown) {
@@ -125,21 +118,10 @@ export async function passwordLogin(user: string, pass: string) {
   state.boundAdmin = false;
   if (!user) throw { error: "E_STATE", msg: "账号为空，请重新输入" };
   const st = opaqueStart(user, pass);
-  let r: { ke2?: string };
-  try {
-    r = (await postAuthJson("/_api/auth/login-begin", { user, ke1: st.ke1 })) as { ke2?: string };
-  } catch (e) {
-    opaqueEnd(st.sid);
-    throw e;
-  }
-  let ke3: string;
-  let sessionKey: Uint8Array;
-  try {
-    ke3 = opaqueFinish(st.sid, pass, r.ke2 as string);
-    sessionKey = loginSessionKey(st.sid); // AKE 输出：验证 SRTP 密钥下发绑定（plan-18 §3.3）
-  } finally {
-    opaqueEnd(st.sid);
-  }
+  const r = (await postAuthJson("/_api/auth/login-begin", { user, ke1: st.ke1 })) as { ke2?: string };
+  // finish 一次性消费会话（垫片自弃），无需显式 end
+  const ke3 = opaqueFinish(st.sid, pass, r.ke2 as string);
+  const sessionKey = loginSessionKey(st.sid); // AKE 输出：验证 SRTP 密钥下发绑定（plan-18 §3.3）
   const r2 = (await postAuthJson("/_api/auth/login-finish", { user, ke3 })) as {
     bind_token: string;
     srtp_id?: string;
@@ -158,7 +140,7 @@ export async function passwordLogin(user: string, pass: string) {
   localStorage.setItem("sr.user", user);
 }
 
-export let heartbeatTimer: ReturnType<typeof setInterval> | null = null;
+let heartbeatTimer: ReturnType<typeof setInterval> | null = null;
 
 export function stopHeartbeat() {
   if (heartbeatTimer) clearInterval(heartbeatTimer);

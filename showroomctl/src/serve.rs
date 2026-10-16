@@ -79,12 +79,6 @@ impl LoginRate {
     }
 }
 
-impl Default for LoginRate {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
 /// login-begin 存下的服务端登录状态（序列化字节 + 过期时刻）。
 pub struct PendingLogin {
     pub state: Vec<u8>,

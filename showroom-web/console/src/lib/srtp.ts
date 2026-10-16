@@ -14,12 +14,10 @@ const REQUEST_TIMEOUT_MS = 30000;
 export interface SrtpCreds { id: Uint8Array; pubPem: string }
 
 let creds: SrtpCreds | null = null;
-let tier1 = false;          // 一级已验证可用（粘性）
 let tier2Sticky = false;    // 一级不可用（页面会话内粘性）
 let ws: WebSocket | null = null;
 let wsReady: Promise<WebSocket> | null = null;
 
-export function srtpActive(): boolean { return tier1; }
 
 /** 登录成功后注入凭据（key_mac 已验——见 verifyKeyMac）并预备通道。 */
 export function setCreds(id: Uint8Array, pubPem: string) {
@@ -228,11 +226,9 @@ export async function srtpTry(httpBytes: Uint8Array): Promise<Uint8Array | null>
   if (tier2Sticky || !creds) return null;
   try {
     const resp = await srtpRequest(httpBytes);
-    tier1 = true;
     return resp;
   } catch {
     tier2Sticky = true;
-    tier1 = false;
     try { ws?.close(); } catch { /* */ }
     ws = null;
     wsReady = null;
@@ -251,7 +247,6 @@ export function srtpTeardown() {
   ws = null;
   wsReady = null;
   creds = null;
-  tier1 = false;
   tier2Sticky = false;
 }
 

@@ -785,15 +785,9 @@ pub fn mem_admission(need_mb: u64, mem_available_kb: u64, reserve_mb: u64) -> Re
     Ok(())
 }
 
-/// /proc/meminfo 的 MemAvailable 行（`MemAvailable:  12345678 kB`）→ KB 数；缺失/畸形 → None。
-pub fn parse_meminfo_available_kb(text: &str) -> Option<u64> {
-    let line = text.lines().find(|l| l.starts_with("MemAvailable:"))?;
-    line.split_whitespace().nth(1)?.parse().ok()
-}
-
-/// /proc/meminfo 的 MemTotal 行 → KB 数（plan-15 hw 推导输入；缺失/畸形 → None）。
-pub fn parse_meminfo_total_kb(text: &str) -> Option<u64> {
-    let line = text.lines().find(|l| l.starts_with("MemTotal:"))?;
+/// /proc/meminfo 指定行（如 `MemAvailable:  12345678 kB`）→ KB 数；缺失/畸形 → None。
+pub fn parse_meminfo_kb(text: &str, prefix: &str) -> Option<u64> {
+    let line = text.lines().find(|l| l.starts_with(prefix))?;
     line.split_whitespace().nth(1)?.parse().ok()
 }
 
@@ -2248,14 +2242,14 @@ MemAvailable:   18472896 kB
 Buffers:          523264 kB
 Cached:         13121516 kB
 ";
-        assert_eq!(parse_meminfo_available_kb(sample), Some(18_472_896));
-        assert_eq!(parse_meminfo_available_kb("MemAvailable:  1024 kB\n"), Some(1024));
+        assert_eq!(parse_meminfo_kb(sample, "MemAvailable:"), Some(18_472_896));
+        assert_eq!(parse_meminfo_kb("MemAvailable:  1024 kB\n", "MemAvailable:"), Some(1024));
         // 缺行 / 无数字 / 非数字 / 相近前缀（MemAvailableX 不匹配）→ None
-        assert_eq!(parse_meminfo_available_kb("MemTotal: 100 kB\n"), None);
-        assert_eq!(parse_meminfo_available_kb("MemAvailable:\n"), None);
-        assert_eq!(parse_meminfo_available_kb("MemAvailable: abc kB\n"), None);
-        assert_eq!(parse_meminfo_available_kb("MemAvailableX: 1 kB\n"), None);
-        assert_eq!(parse_meminfo_available_kb(""), None);
+        assert_eq!(parse_meminfo_kb("MemTotal: 100 kB\n", "MemAvailable:"), None);
+        assert_eq!(parse_meminfo_kb("MemAvailable:\n", "MemAvailable:"), None);
+        assert_eq!(parse_meminfo_kb("MemAvailable: abc kB\n", "MemAvailable:"), None);
+        assert_eq!(parse_meminfo_kb("MemAvailableX: 1 kB\n", "MemAvailable:"), None);
+        assert_eq!(parse_meminfo_kb("", "MemAvailable:"), None);
     }
 
     // 10. Redis 浏览白名单（§10.3）：db / q / key 边界 + 值 4KB 截断

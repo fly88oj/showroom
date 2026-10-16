@@ -8,7 +8,7 @@ import { Input } from "@/components/ui/input";
 import { Textarea } from "@/components/ui/textarea";
 import { toast } from "sonner";
 import { api } from "@/lib/api";
-import { opaqueEnd, opaqueFinish, opaqueRegEnd, opaqueRegFinish, opaqueRegStart, opaqueStart, postAuthJson } from "@/lib/auth";
+import { opaqueFinish, opaqueRegFinish, opaqueRegStart, opaqueStart, postAuthJson } from "@/lib/auth";
 import { state } from "@/lib/state";
 
 /** 设置：对外访问域名 + 平台公钥 PEM 收纳（修改密码入口在顶栏用户菜单，非本对话框） */
@@ -98,38 +98,19 @@ export function PasswordDialog({ open, onOpenChange, onDone }: { open: boolean; 
     try {
       // ① 当前密码校验（完整 login 序列但不 login-finish：不产生登录态）
       const st = opaqueStart(state.user, cur);
-      let ke2: string;
+      const ke2 = ((await postAuthJson("/_api/auth/login-begin", { user: state.user, ke1: st.ke1 })) as { ke2: string }).ke2;
       try {
-        ke2 = ((await postAuthJson("/_api/auth/login-begin", { user: state.user, ke1: st.ke1 })) as { ke2: string }).ke2;
-      } catch (err) {
-        opaqueEnd(st.sid);
-        throw err;
-      }
-      try {
-        opaqueFinish(st.sid, cur, ke2);
+        opaqueFinish(st.sid, cur, ke2); // finish 一次性消费会话
       } catch (err) {
         if ((err as { error?: string }).error === "E_PW_LOCAL") {
           throw { error: "E_PW_CUR", msg: "" };
         }
         throw err;
-      } finally {
-        opaqueEnd(st.sid);
       }
       // ② pw 三件
       const rs = opaqueRegStart(state.user, nw);
-      let m2: string;
-      try {
-        m2 = ((await api("POST", "/_api/auth/pw-begin", { user: state.user, m1: rs.m1 })) as { m2: string }).m2;
-      } catch (err) {
-        opaqueRegEnd(rs.sid);
-        throw err;
-      }
-      let record: string;
-      try {
-        record = opaqueRegFinish(rs.sid, nw, m2);
-      } finally {
-        opaqueRegEnd(rs.sid);
-      }
+      const m2 = ((await api("POST", "/_api/auth/pw-begin", { user: state.user, m1: rs.m1 })) as { m2: string }).m2;
+      const record = opaqueRegFinish(rs.sid, nw, m2); // finish 一次性消费会话
       await api("POST", "/_api/auth/pw-commit", { user: state.user, record });
       setCur(""); setNw(""); setNw2("");
       onOpenChange(false);

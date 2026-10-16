@@ -44,7 +44,7 @@ export function sealEnd(sid: number) {
 }
 
 /** seal 会话深接口（与 openSession 对称）：push/flush 返回已拷贝密文，调用方零 wasm 义务。 */
-export function sealSession(pem: string, seedBytes: Uint8Array) {
+function sealSession(pem: string, seedBytes: Uint8Array) {
   const sid = sealBegin(pem, seedBytes);
   return {
     /** 推入明文分片 → 密文段（可能 null：未跨段界）。 */

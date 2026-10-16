@@ -27,11 +27,11 @@ base64 = "0.23"
 # e8920c6，Apache-2.0+NOTICE 随目录）——构建不依赖 github（项目网络环境现实）；
 # 互操作实测（tcp 传输 × 官方 frps 0.70.0 全绿）见 docs/architecture.md 隧道段。
 frpc-rust = { path = "vendor/frpc-rust" }
-# chmlfrp getcfg（cf-v2.uapis.cn）HTTPS 拉取；rustls 后端与 frpc-rust 的 reqwest 特性面统一。
+# chmlfrp getcfg（cf-v2.uapis.cn）HTTPS 拉取 + registry v2 API（blocking）；rustls 后端与 frpc-rust 的 reqwest 特性面统一。
 # 锚 0.12：vendored frpc 钉 reqwest 0.12，升 0.13 = 树内两套 reqwest+两套 TLS provider
 # （0.13 默认 aws-lc 引 C 工具链），单 GET 客户端零收益；0.12 线仍在维护。跟进条件：
 # vendored frpc 升级其 reqwest 锚，或 0.12 线停更。
-reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "json"] }
+reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "json", "blocking"] }
 # FRP_TOML（原生 frp 配置直载）反序列化；版本随 frpc-rust 锁定一致。
 toml = "0.8"
 

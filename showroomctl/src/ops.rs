@@ -332,7 +332,7 @@ fn heal_services(root: &Path, p: &str, c: &crate::state::Conf, statuses: &std::c
                 Some(e) => e.to_string(),
                 None => continue,
             };
-            publish::align_services_pub(p, std::slice::from_ref(v), &env_file);
+            publish::align_services(p, std::slice::from_ref(v), &env_file);
             log.push(format!("{p}: service {} {}", v.name, if statuses.contains_key(&name) { "restarted (was exited)" } else { "rebuilt (was missing)" }));
         }
     }
@@ -378,11 +378,6 @@ pub fn reconcile(root: &Path) -> Vec<String> {
                     }
                 }
             }
-        }
-    }
-    for (p, c) in state::all_confs(root) {
-        if !c.stopped {
-            log.extend(heal_services(root, &p, &c, &statuses));
         }
     }
     for (p, c) in state::all_confs(root) {
@@ -965,7 +960,7 @@ pub fn admin_status(root: &Path) -> R<Value> {
     }
     let mem_mb = fs::read_to_string("/proc/meminfo")
         .ok()
-        .and_then(|t| state::parse_meminfo_available_kb(&t))
+        .and_then(|t| state::parse_meminfo_kb(&t, "MemAvailable:"))
         .map(|kb| kb / 1024);
     let containers = dockerops::run("docker", &["ps", "-a", "--format", "{{.Names}}\t{{.State}}"])
         .map(|out| state::parse_container_lines(&out).into_iter()

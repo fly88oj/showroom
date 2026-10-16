@@ -6,8 +6,8 @@ export const NONCE = 12, TAG = 16;
 export const CHUNK = 8 * 1024 * 1024;      // 上传分片粒度（§8.1）
 export const DUMP_CHUNK = 4 * 1024 * 1024; // 备份下载分片粒度（§10.4，服务端上限 4MB）
 export const NAME_RE = /^[a-z0-9][a-z0-9-]{0,30}$/;        // 账号（user）
-export const PROJ_RE = /^[a-zA-Z0-9][a-zA-Z0-9-]{0,30}$/;  // 项目（§11 放宽：允许大写）
-export const RESERVED = new Set(["v2", "_api", "_bootstrap", "_console"]);
+const PROJ_RE = /^[a-zA-Z0-9][a-zA-Z0-9-]{0,30}$/;  // 项目（§11 放宽：允许大写）
+const RESERVED = new Set(["v2", "_api", "_bootstrap", "_console"]);
 
 // §6 环境变量 → 中文用途（帮助页与环境变量弹窗共用）
 export const ENV_DESC: Record<string, string> = {

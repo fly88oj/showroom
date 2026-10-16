@@ -28,11 +28,6 @@ pub const POLICY_KEYS: [(&str, &str); 9] = [
     ("UPLOAD_SPACE_FACTOR", "4"),
 ];
 
-/// 固定缺省渲染（plan-15 §2.2 签名）：已有键 verbatim 保留，缺键补默认，键序固定（幂等写盘）。
-pub fn render_policy(existing: Option<&str>) -> String {
-    render_policy_hw(existing, None)
-}
-
 /// hw 自适应渲染（补充需求：首跑按实测硬件推导缺省）：
 /// 仅当**文件缺失**（existing=None，整文件首生成）时用 hw 值补 RESERVE_MEM_MB/DISK_RESERVE_GB；
 /// 已有文件一律保留既有键、缺键补固定缺省（用户显式值永远优先）。
@@ -539,7 +534,7 @@ pub fn plan_setup(host: &HostEnv, obs: &Obs) -> Vec<Action> {
     let policy_path = root.join("state/policy.env");
     let policy_existing = obs.files.get(&policy_path).cloned();
     let policy_contents = if policy_existing.is_some() {
-        render_policy(policy_existing.as_deref())
+        render_policy_hw(policy_existing.as_deref(), None)
     } else {
         render_policy_hw(None, Some(&hw))
     };
@@ -761,7 +756,7 @@ pub fn observe(root: &Path, host: &HostEnv) -> Obs {
     }
     // 硬件观测：MemTotal / df / size / nproc（失败零值 → hw clamp 下限）
     if let Ok(t) = fs::read_to_string("/proc/meminfo") {
-        if let Some(kb) = state::parse_meminfo_total_kb(&t) {
+        if let Some(kb) = state::parse_meminfo_kb(&t, "MemTotal:") {
             obs.mem_total_mb = kb / 1024;
         }
     }
@@ -1133,10 +1128,10 @@ mod tests {
     // —— render_policy / hw（步1 已覆盖，此处仅回归键数）——
     #[test]
     fn render_policy_variants() {
-        let fresh = render_policy(None);
+        let fresh = render_policy_hw(None, None);
         assert_eq!(state::parse_kv(&fresh).len(), POLICY_KEYS.len());
-        assert_eq!(render_policy(Some(&fresh)), fresh);
-        let m = state::parse_kv(&render_policy(Some("MAX_SLOTS=5\n")));
+        assert_eq!(render_policy_hw(Some(&fresh), None), fresh);
+        let m = state::parse_kv(&render_policy_hw(Some("MAX_SLOTS=5\n"), None));
         assert_eq!(m["MAX_SLOTS"], "5");
     }
 
