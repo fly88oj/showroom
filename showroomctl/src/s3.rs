@@ -204,9 +204,8 @@ pub fn list_objects(root: &Path, project: &str, prefix: &str) -> R<(Vec<ObjEntry
     Ok((objects, truncated))
 }
 
-/// 取对象：先 stat 后 cat（超限拒绝，防大对象整读进内存）。
-/// 返回 (size, 内容字节)；cap 由调用方给（预览 64KB / 下载 8MB）。
-pub fn get_object(root: &Path, project: &str, key: &str, cap: u64) -> R<(u64, Vec<u8>)> {
+/// 对象元数据（stat）：返回 size。预览超限时 serve 只取元数据做友好提示（不整读大对象）。
+pub fn stat_object(root: &Path, project: &str, key: &str) -> R<u64> {
     check_mc_path("对象键", key)?;
     let (ak, sk, bucket) = project_creds(root, project)?;
     let creds = format!("{ak}\n{sk}\n");
@@ -220,17 +219,24 @@ pub fn get_object(root: &Path, project: &str, key: &str, cap: u64) -> R<(u64, Ve
         "stat",
     )?;
     // mc stat --json：一行对象元数据（size 字段）
-    let size = stat
-        .lines()
+    stat.lines()
         .find_map(|l| serde_json::from_str::<Value>(l).ok())
         .and_then(|v| v["size"].as_u64())
-        .ok_or_else(|| ApiError::new("E_NOTFOUND", format!("对象不存在或不可读: {key}")))?;
+        .ok_or_else(|| ApiError::new("E_NOTFOUND", format!("对象不存在或不可读: {key}")))
+}
+
+/// 取对象：先 stat 后 cat（超限拒绝，防大对象整读进内存）。
+/// 返回 (size, 内容字节)；cap 由调用方给（预览 64KB / 下载 8MB）。
+pub fn get_object(root: &Path, project: &str, key: &str, cap: u64) -> R<(u64, Vec<u8>)> {
+    let size = stat_object(root, project, key)?;
     if size > cap {
         return Err(ApiError::state(format!(
-            "对象 {key}（{size} 字节）超过单次响应上限 {} 字节；大文件请在项目容器内用 S3_* 凭据直取",
-            cap
+            "对象 {key}（{} 字节）超过单次响应上限 {} 字节；大文件请在项目容器内用 S3_* 环境变量直取",
+            size, cap
         )));
     }
+    let (ak, sk, bucket) = project_creds(root, project)?;
+    let creds = format!("{ak}\n{sk}\n");
     let data = exec_mc_bytes(
         &format!(
             "read -r AK; read -r SK\n\

@@ -801,22 +801,37 @@ async fn dispatch(
             user_check(&s.root, &project, &user)?;
             let key = qget(&q, "key")?;
             let root = s.root.clone();
-            let (size, data) = blk({
+            let project2 = project.clone();
+            // 先 stat：超过预览上限的大对象不整读，返回元数据+友好说明（UI 展示提示而非报错）
+            let size = blk({
                 let k = key.clone();
-                move || s3::get_object(&root, &project, &k, s3::PREVIEW_CAP)
+                move || s3::stat_object(&root, &project, &k)
             })
             .await?;
-            // 文本能预览则给文本（UTF-8 校验），二进制只给大小与标记
-            match String::from_utf8(data) {
-                Ok(text) => Ok(Json(json!({"key": key, "size": size, "is_text": true, "text": text}))),
-                Err(e) => {
-                    let bytes = e.into_bytes();
-                    let head: String = bytes[..8.min(bytes.len())].iter().map(|b| format!("{b:02x}")).collect();
-                    Ok(Json(json!({
-                        "key": key, "size": size, "is_text": false,
-                        "note": "二进制对象（预览不可用，可下载）",
-                        "prefix_hex": head,
-                    })))
+            if size > s3::PREVIEW_CAP {
+                Ok(Json(json!({
+                    "key": key, "size": size, "is_text": false,
+                    "note": "文件超过预览上限（64 KB）；8 MB 内可下载，更大请在项目容器内用 S3_* 环境变量直取",
+                })))
+            } else {
+                let root = s.root.clone();
+                let (size, data) = blk({
+                    let k = key.clone();
+                    move || s3::get_object(&root, &project2, &k, s3::PREVIEW_CAP)
+                })
+                .await?;
+                // 文本能预览则给文本（UTF-8 校验），二进制只给大小与标记
+                match String::from_utf8(data) {
+                    Ok(text) => Ok(Json(json!({"key": key, "size": size, "is_text": true, "text": text}))),
+                    Err(e) => {
+                        let bytes = e.into_bytes();
+                        let head: String = bytes[..8.min(bytes.len())].iter().map(|b| format!("{b:02x}")).collect();
+                        Ok(Json(json!({
+                            "key": key, "size": size, "is_text": false,
+                            "note": "二进制对象（预览不可用，可下载）",
+                            "prefix_hex": head,
+                        })))
+                    }
                 }
             }
         }

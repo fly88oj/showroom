@@ -365,7 +365,14 @@ export function Data({ onOpenSettings }: { onOpenSettings: () => void }) {
   async function pickS3(key: string) {
     try {
       const j = (await api("GET", `/_api/s3-get?project=${encodeURIComponent(dbProject)}&key=${encodeURIComponent(key)}`)) as { size?: number; is_text?: boolean; text?: string; note?: string };
-      setS3Sel({ key, size: Number(j.size ?? 0), isText: !!j.is_text, text: j.text, note: j.note });
+      const size = Number(j.size ?? 0);
+      // 超预览上限的 note 按是否可下载分档（>8MB 下载也不可用，避免误导）
+      const note = !j.is_text && size > 64 * 1024
+        ? size <= 8 * 1024 * 1024
+          ? "文件超过预览上限（64 KB），可点击右上「下载」获取（8 MB 内）。"
+          : `文件 ${fmtSize(size)} 超过预览（64 KB）与浏览器下载（8 MB）上限，请在项目容器内用 S3_* 环境变量直取。`
+        : j.note;
+      setS3Sel({ key, size, isText: !!j.is_text, text: j.text, note });
     } catch (e) {
       toast.error(`对象读取失败：${(e as { msg?: string }).msg ?? ""}`);
     }
@@ -392,7 +399,7 @@ export function Data({ onOpenSettings }: { onOpenSettings: () => void }) {
   }
 
   /** 字节数可读化（B/KB/MB） */
-  const fmtSize = (n: number) => (n < 1024 ? `${n} B` : n < 1024 * 1024 ? `${(n / 1024).toFixed(1)} KB` : `${(n / 1024 / 1024).toFixed(1)} MB`);
+  const fmtSize = (n: number) => (n < 1024 ? `${n} B` : n < 1024 * 1024 ? `${(n / 1024).toFixed(1)} KB` : n < 1024 ** 3 ? `${(n / 1024 / 1024).toFixed(1)} MB` : `${(n / 1024 ** 3).toFixed(2)} GB`);
 
   useEffect(() => {
     setRdKeys(null); setRdSel(null); setRdCount(""); setRdDbs(null); setRdDb("");
@@ -422,7 +429,7 @@ export function Data({ onOpenSettings }: { onOpenSettings: () => void }) {
         <TabsList variant="line" className="h-9 w-fit gap-0.5">
           <TabsTrigger value="pg">PostgreSQL</TabsTrigger>
           <TabsTrigger value="redis">Redis</TabsTrigger>
-          <TabsTrigger value="s3">S3 对象</TabsTrigger>
+          <TabsTrigger value="s3">OSS</TabsTrigger>
         </TabsList>
 
         {/* —— PostgreSQL —— */}
@@ -652,33 +659,36 @@ export function Data({ onOpenSettings }: { onOpenSettings: () => void }) {
           </p>
         </TabsContent>
 
-        {/* —— S3 对象（每项目独立桶，只读浏览）—— */}
+        {/* —— OSS 对象存储（每项目独立桶，只读浏览）—— */}
         <TabsContent value="s3" className="flex flex-col gap-3">
           <div className="flex flex-wrap items-end gap-3">
-            <Field>
+            {/* Field(vertical) 的 `*:w-full` 会把直接子元素强拉满宽（输入框 1168px 实测）——
+                查询行改裸 FieldLabel+Input 组合绕开；左右两栏容器拉满宽无害仍用 Field */}
+            <div className="flex flex-col gap-2">
               <FieldLabel htmlFor="s3-prefix">对象前缀（回车进入）</FieldLabel>
               <Input
                 id="s3-prefix" className="w-56 font-mono" placeholder="如 data/ 或留空…"
                 value={s3Prefix} onChange={(e) => setS3Prefix(e.target.value)}
                 onKeyDown={(e) => e.key === "Enter" && queryS3()}
               />
-            </Field>
+            </div>
             <Button variant="outline" disabled={!dbProject} onClick={queryS3}>查询</Button>
             <Button variant="outline" disabled={!s3Prefix} onClick={s3Up}>上一级</Button>
-            <span className="text-xs text-muted-foreground" aria-live="polite">
-              {s3Count}{s3Trunc ? "（列表上限 500 已截断）" : ""}
+            <span className="pb-1.5 text-xs text-muted-foreground" aria-live="polite">
+              {s3Count}{s3Trunc ? "（列表上限 500 已截断，可用前缀缩小范围）" : ""}
             </span>
           </div>
           <div className="grid gap-3 md:grid-cols-2">
             <Field>
               <FieldLabel>对象列表（目录可进入，文件可预览）</FieldLabel>
-              <div className="rounded-lg border">
+              {/* 与右栏同构限高滚动（h-64）：海量列表不再把页面撑长，两栏底边对齐 */}
+              <ScrollArea className="h-64 rounded-md border bg-background">
                 <Table>
                   <TableHeader>
-                    <TableRow className="bg-muted/30">
+                    <TableRow>
                       <TableHead className="font-mono">对象</TableHead>
-                      <TableHead className="w-24 font-mono">大小</TableHead>
-                      <TableHead className="w-40 font-mono">修改时间</TableHead>
+                      <TableHead className="w-20 font-mono">大小</TableHead>
+                      <TableHead className="w-36 font-mono">修改时间</TableHead>
                     </TableRow>
                   </TableHeader>
                   <TableBody>
@@ -692,20 +702,26 @@ export function Data({ onOpenSettings }: { onOpenSettings: () => void }) {
                         className={cn("cursor-pointer hover:bg-accent", s3Sel?.key === o.key && "bg-accent")}
                         onClick={() => (o.is_dir ? enterS3Dir(o.key) : void pickS3(o.key))}
                       >
-                        <TableCell className="max-w-0 truncate font-mono text-xs">{o.is_dir ? `${o.name}` : o.name}</TableCell>
+                        <TableCell className="max-w-0 truncate font-mono text-xs">{o.name}</TableCell>
                         <TableCell className="font-mono text-xs">{o.is_dir ? "—" : fmtSize(o.size)}</TableCell>
                         <TableCell className="font-mono text-xs">{o.last_modified || "—"}</TableCell>
                       </TableRow>
                     ))}
                   </TableBody>
                 </Table>
-              </div>
+              </ScrollArea>
             </Field>
             <Field>
-              <FieldLabel>
-                预览 {s3Sel && <Badge variant="outline" className="ml-1 font-mono">{fmtSize(s3Sel.size)}</Badge>}
-              </FieldLabel>
-              <ScrollArea className="h-56 rounded-md border bg-background">
+              {/* 标题行右侧放下载动作：选中即见、零高度增量；超限（>8MB）不渲染按钮（说明在预览文本里） */}
+              <div className="flex items-center justify-between">
+                <FieldLabel>
+                  预览 {s3Sel && <Badge variant="outline" className="ml-1 font-mono">{fmtSize(s3Sel.size)}</Badge>}
+                </FieldLabel>
+                {s3Sel && s3Sel.size <= 8 * 1024 * 1024 && (
+                  <Button variant="outline" size="sm" className="w-fit" onClick={downloadS3}>下载</Button>
+                )}
+              </div>
+              <ScrollArea className="h-64 rounded-md border bg-background">
                 <pre className="p-2 font-mono text-xs leading-5 whitespace-pre-wrap">
                   {s3Sel
                     ? s3Sel.isText
@@ -716,11 +732,8 @@ export function Data({ onOpenSettings }: { onOpenSettings: () => void }) {
               </ScrollArea>
             </Field>
           </div>
-          {s3Sel && (
-            <Button variant="outline" className="w-fit" onClick={downloadS3}>下载</Button>
-          )}
           <p className="text-xs text-muted-foreground">
-            每个项目一个独立的桶（权限仅限本桶，桶外不可见）；管理员可浏览任意项目的桶。对象键支持字母数字与 . _ - /；列表单次 500 条、预览 64KB、下载 8MB 上限，更大对象请在项目容器内用 S3_* 凭据直取。
+            每个项目一个独立的桶（权限仅限本桶，桶外不可见）；管理员可浏览任意项目的桶。对象键支持字母数字与 . _ - /；列表单次 500 条、预览 64KB、下载 8MB 上限，更大对象请在项目容器内用 S3_* 环境变量直取。
           </p>
         </TabsContent>
       </Tabs>
