@@ -394,7 +394,7 @@ pub fn registry_spec(root: &Path) -> ContainerSpec {
 
 /// minoss（S3 兼容对象存储，plan-22）镜像：用户自维护的 MinIO 分叉，钉具体 RELEASE tag
 /// （ghcr 多架构发布；镜像内置 mc——每项目供给经 docker exec sr-minoss mc 完成）。
-pub const MINOSS_IMAGE: &str = "ghcr.io/fly88oj/minoss:RELEASE.2026-11-17T11-32-21Z";
+pub const MINOSS_IMAGE: &str = "ghcr.io/fly88oj/minoss:RELEASE.2026-11-17T14-06-43Z";
 /// minoss root 用户名（固定服务账号；密钥在 state/middleware.cred 的 minio 行，首跑生成绝不轮换）。
 pub const MINIO_ROOT_USER: &str = "showroom";
 

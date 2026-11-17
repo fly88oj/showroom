@@ -8,7 +8,7 @@
 - 平台增加 S3 兼容对象存储，供部署的容器应用使用；实现采用自维护 MinIO 分叉
   [fly88oj/minoss](https://github.com/fly88oj/minoss)（AGPLv3；release 镜像
   `ghcr.io/fly88oj/minoss`，**镜像内置 mc**，基座 ubi-micro 含 sh）。
-- ①镜像**钉具体 RELEASE tag**（本批钉 `RELEASE.2026-11-17T11-32-21Z`，多架构 ghcr 发布）；
+- ①镜像**钉具体 RELEASE tag**（本批钉 `RELEASE.2026-11-17T14-06-43Z`，多架构 ghcr 发布）；
 - ②**每项目独立桶 + 独立密钥**（对齐 PostgreSQL 每项目库/角色模型）；
 - ③**不映射任何 host 端口**（S3 9000 与 Console 9001 均 仅 showroom-net 内网）；
 - ④控制台 Data 页本期一并做 S3 浏览（对齐 Redis 浏览的只读形态：浏览/预览/下载）。

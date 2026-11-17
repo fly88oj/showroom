@@ -185,7 +185,7 @@ sudo docker run -d --name sr-minoss --network showroom-net --restart unless-stop
   -e MINIO_ROOT_USER=showroom \
   -e MINIO_ROOT_PASSWORD='<minoss-root-密钥>' \
   -v /srv/showroom/_middleware/minoss:/data \
-  ghcr.io/fly88oj/minoss:RELEASE.2026-11-17T11-32-21Z \
+  ghcr.io/fly88oj/minoss:RELEASE.2026-11-17T14-06-43Z \
   server /data --console-address ":9001"
 ```
 
