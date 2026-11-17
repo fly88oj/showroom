@@ -359,6 +359,22 @@ fn publish_mode(
         }
     }
 
+    // mw 集合（env 注入/S3 供给共用；提前到一切副作用之前——重名检查须零副作用拒绝）
+    let mw = crate::middleware::HostEnv::load(root).middleware;
+    // S3 桶名重名检查（plan-22 §2.1）：桶名=项目名小写归一，大小写仅差的两项目会撞桶。
+    if mw.contains("minoss") {
+        let lower = project.to_ascii_lowercase();
+        if let Some((other, _)) = state::all_confs(root)
+            .into_iter()
+            .find(|(q, _)| q != project && q.to_ascii_lowercase() == lower)
+        {
+            return Err(ApiError::new(
+                "E_NAME",
+                format!("项目 '{other}' 与 '{project}' 小写形式同为 '{lower}'，S3 桶名（sr-{lower}）会冲突"),
+            ));
+        }
+    }
+
     // DB 供给（SPEC §9.2 首建不重建，数据保留）：存量库（归一化新名或 §11 迁移沿用旧名）存在则
     // 沿用并仅对齐角色密码（下方 env 全量重写 + 容器滚动重启使新凭据生效）；不存在才 CREATE。
     // 归一化切换（旧名 → 新名）由 db-reset 终结，publish 不做迁移。
@@ -375,15 +391,22 @@ fn publish_mode(
     };
     dockerops::psql(&sql)?;
 
+    // S3 供给（plan-22 §2.2）：minoss 启用时每项目桶+密钥（每次发布轮换密钥，对齐 DB 密码模型；
+    // 禁用 → None，env 不注入 S3_* 组——语义与 REDIS_* 一致）
+    let s3_secret = if mw.contains("minoss") {
+        Some(crate::s3::provision(root, project)?)
+    } else {
+        None
+    };
+
     // env 文件（SPEC §6 全字段具体化；§11 无 SHOWROOM_SLOT；§15.2 禁用组不注入）
     fs::create_dir_all(state::projects_dir(root))?;
-    let mw = crate::middleware::HostEnv::load(root).middleware;
     let disc_full = state::disc_for(project, cport, &services);
     let disc: Vec<(&str, &str, u16)> =
         disc_full.iter().map(|(a, b, c)| (a.as_str(), b.as_str(), *c)).collect();
     fs::write(
         state::env_path(root, project),
-        state::env_file_contents(project, &db, &db_pass, redisdb, &mw, &disc, &uenv),
+        state::env_file_contents(project, &db, &db_pass, redisdb, &mw, &disc, &uenv, s3_secret.as_deref()),
     )?;
 
     // 容器：同项目唯一 host 端口 → 先停旧、以 -new 起新、健康后删旧改名

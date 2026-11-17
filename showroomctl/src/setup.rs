@@ -392,6 +392,30 @@ pub fn registry_spec(root: &Path) -> ContainerSpec {
     }
 }
 
+/// minoss（S3 兼容对象存储，plan-22）镜像：用户自维护的 MinIO 分叉，钉具体 RELEASE tag
+/// （ghcr 多架构发布；镜像内置 mc——每项目供给经 docker exec sr-minoss mc 完成）。
+pub const MINOSS_IMAGE: &str = "ghcr.io/fly88oj/minoss:RELEASE.2026-11-17T11-32-21Z";
+/// minoss root 用户名（固定服务账号；密钥在 state/middleware.cred 的 minio 行，首跑生成绝不轮换）。
+pub const MINIO_ROOT_USER: &str = "showroom";
+
+/// minoss 规格：S3 API 9000 与 Console 9001 均仅 showroom-net 内网（不映射 host 端口，
+/// 2026-11-17 用户裁决）；数据卷 bind 挂载；console 端口显式固定（缺省随机）。
+pub fn minoss_spec(root: &Path, root_user: &str, root_pass: &str) -> ContainerSpec {
+    let user = format!("MINIO_ROOT_USER={root_user}");
+    let pass = format!("MINIO_ROOT_PASSWORD={root_pass}");
+    let data = format!("{}:/data", root.join("_middleware/minoss").display());
+    ContainerSpec {
+        name: "sr-minoss".into(),
+        image: MINOSS_IMAGE.into(),
+        flags: flags(&[
+            "--network", dockerops::DOCKER_NET, "--restart", "unless-stopped",
+            "-e", &user, "-e", &pass, "-v", &data,
+        ]),
+        // entrypoint 对非 minio 首参自动前缀 minio → `minio server /data --console-address :9001`
+        cmd_args: flags(&["server", "/data", "--console-address", ":9001"]),
+    }
+}
+
 // —— Obs：现状观察值（plan 的唯一世界输入；observe 收集，单测喂 fake）——
 
 #[derive(Debug, Clone, Default, PartialEq)]
@@ -489,16 +513,63 @@ pub fn expected_dirs(root: &Path, host: &HostEnv) -> Vec<(PathBuf, u32)> {
     v
 }
 
-/// pg 超级用户密码：优先既有 middleware.cred（沿用，绝不轮换）；缺文件 → 生成 32hex（首跑）。
+// —— cred 文件（plan-22 行感知）：`name:value` 多行——postgres:<pass> / minio:<user>:<secret> ——
+// 旧单行文件（仅 postgres:…）按行解析自然兼容；两分支互不覆写对方行。
+
+/// 取 cred 文件中 name 行的 value（缺行/空值 → None）。
+fn cred_value(text: &str, name: &str) -> Option<String> {
+    let prefix = format!("{name}:");
+    text.lines()
+        .find_map(|l| l.strip_prefix(&prefix))
+        .filter(|v| !v.is_empty())
+        .map(str::to_string)
+}
+
+/// 替换/追加 name 行（其余行原样保留）；existing 为 None 时新建单行文件。
+fn cred_file_with(existing: Option<&str>, name: &str, value: &str) -> String {
+    let prefix = format!("{name}:");
+    let mut out: Vec<String> = existing
+        .unwrap_or("")
+        .lines()
+        .filter(|l| !l.starts_with(&prefix))
+        .map(str::to_string)
+        .collect();
+    out.push(format!("{name}:{value}"));
+    format!("{}\n", out.join("\n"))
+}
+
+/// pg 超级用户密码：优先既有 middleware.cred 的 postgres 行（沿用，绝不轮换）；
+/// 缺行 → 生成 32hex（首跑）。
 fn pg_password(root: &Path, obs: &Obs) -> (String, bool) {
     if let Some(t) = obs.files.get(&pg_cred_path(root)) {
-        if let Some((_, pw)) = t.trim().split_once(':') {
-            if !pw.is_empty() {
-                return (pw.to_string(), false);
-            }
+        if let Some(pw) = cred_value(t, "postgres") {
+            return (pw, false);
         }
     }
     (state::rand_hex(16), true)
+}
+
+/// minoss root 凭据（(user, secret), 首跑?）：沿用既有 minio 行（绝不轮换）；
+/// 缺行 → 固定用户名 + 生成 32hex。坏行（缺冒号/空段）按缺失处理（下次 setup 重生成）。
+fn minio_creds(root: &Path, obs: &Obs) -> ((String, String), bool) {
+    if let Some(t) = obs.files.get(&pg_cred_path(root)) {
+        if let Some(v) = cred_value(t, "minio") {
+            if let Some((u, s)) = v.split_once(':') {
+                if !u.is_empty() && !s.is_empty() {
+                    return ((u.to_string(), s.to_string()), false);
+                }
+            }
+        }
+    }
+    ((MINIO_ROOT_USER.to_string(), state::rand_hex(16)), true)
+}
+
+/// 运行期读取 minio 行（s3 供给/拆除用）：文件缺失/行缺失 → None（mw 未启用或 setup 未收敛）。
+pub fn minio_creds_of(root: &Path) -> Option<(String, String)> {
+    let t = fs::read_to_string(pg_cred_path(root)).ok()?;
+    let v = cred_value(&t, "minio")?;
+    let (u, s) = v.split_once(':')?;
+    (!u.is_empty() && !s.is_empty()).then(|| (u.to_string(), s.to_string()))
 }
 
 pub fn pg_cred_path(root: &Path) -> PathBuf {
@@ -555,15 +626,36 @@ pub fn plan_setup(host: &HostEnv, obs: &Obs) -> Vec<Action> {
         }
     }
 
+    // cred 文件（plan-22 行感知）：postgres/minio 各自沿用或首跑生成，整体一次落盘
+    // ——两分支对同一文件写作必须合并，后写覆盖先写会丢对方的行。
+    let mut cred_text: Option<String> = obs.files.get(&pg_cred_path(&root)).cloned();
+    let mut cred_dirty = false;
+    let mut pg_pass: Option<String> = None;
     if host.middleware.contains("postgres") {
         let (pass, fresh) = pg_password(&root, obs);
         if fresh {
-            full.push(Action::WriteFile {
-                path: pg_cred_path(&root),
-                contents: format!("postgres:{pass}\n"),
-                mode: 0o600,
-            });
+            cred_text = Some(cred_file_with(cred_text.as_deref(), "postgres", &pass));
+            cred_dirty = true;
         }
+        pg_pass = Some(pass);
+    }
+    let mut minio: Option<(String, String)> = None;
+    if host.middleware.contains("minoss") {
+        let (c, fresh) = minio_creds(&root, obs);
+        if fresh {
+            cred_text = Some(cred_file_with(cred_text.as_deref(), "minio", &format!("{}:{}", c.0, c.1)));
+            cred_dirty = true;
+        }
+        minio = Some(c);
+    }
+    if cred_dirty {
+        full.push(Action::WriteFile {
+            path: pg_cred_path(&root),
+            contents: cred_text.unwrap_or_default(),
+            mode: 0o600,
+        });
+    }
+    if let Some(pass) = pg_pass {
         full.push(Action::ContainerUp { spec: postgres_spec(&root, &pass, &hw) });
     }
     if host.middleware.contains("redis") {
@@ -572,6 +664,9 @@ pub fn plan_setup(host: &HostEnv, obs: &Obs) -> Vec<Action> {
     }
     if host.middleware.contains("registry") {
         full.push(Action::ContainerUp { spec: registry_spec(&root) });
+    }
+    if let Some((mu, mp)) = minio {
+        full.push(Action::ContainerUp { spec: minoss_spec(&root, &mu, &mp) });
     }
 
     if host.caddy {
@@ -1160,7 +1255,7 @@ mod tests {
                 _ => None,
             })
             .collect();
-        assert_eq!(ctrs, vec!["sr-postgres", "sr-redis", "sr-registry"]);
+        assert_eq!(ctrs, vec!["sr-postgres", "sr-redis", "sr-registry", "sr-minoss"]);
         for a in &plan {
             if let Action::ContainerUp { spec } = a {
                 if spec.name == "sr-postgres" {
@@ -1479,6 +1574,85 @@ mod tests {
         assert!(rg.flags.contains(&"/srv/showroom/_middleware/registry:/var/lib/registry".to_string()));
         assert!(rg.flags.contains(&"/srv/showroom/state/registry.htpasswd:/etc/docker/registry/htpasswd:ro".to_string()));
         assert_eq!(rg.cmd_args, Vec::<String>::new());
+
+        // minoss（plan-22）：钉 RELEASE tag；root 凭据 env；bind 数据卷；console 固定 9001；
+        // 不映射任何 host 端口（2026-11-17 用户裁决——9000/9001 仅 showroom-net 内网）
+        let ms = minoss_spec(root, "showroom", "feedface");
+        assert_eq!(ms.name, "sr-minoss");
+        assert!(ms.image.starts_with("ghcr.io/fly88oj/minoss:RELEASE."), "{}", ms.image);
+        assert!(ms.flags.contains(&"MINIO_ROOT_USER=showroom".to_string()));
+        assert!(ms.flags.contains(&"MINIO_ROOT_PASSWORD=feedface".to_string()));
+        assert!(ms.flags.contains(&"/srv/showroom/_middleware/minoss:/data".to_string()));
+        assert!(!ms.flags.iter().any(|f| f == "-p"), "不映射 host 端口：{:?}", ms.flags);
+        assert_eq!(ms.cmd_args, vec!["server", "/data", "--console-address", ":9001"]);
+    }
+
+    // cred 文件行感知（plan-22）：多行 name:value 读写；旧单行文件兼容；两分支互不覆写
+    #[test]
+    fn cred_file_line_aware_roundtrip() {
+        assert_eq!(cred_value("postgres:abc\n", "postgres"), Some("abc".into()));
+        // 旧单行文件 + 追加 minio 行：postgres 行照常可读（向后兼容关键路径）
+        let both = cred_file_with(Some("postgres:abc\n"), "minio", "showroom:def");
+        assert_eq!(both, "postgres:abc\nminio:showroom:def\n");
+        assert_eq!(cred_value(&both, "postgres"), Some("abc".into()));
+        assert_eq!(cred_value(&both, "minio"), Some("showroom:def".into()));
+        // 替换不覆写：minio 行轮换后 postgres 行原样
+        let rotated = cred_file_with(Some(&both), "minio", "showroom:xyz");
+        assert_eq!(rotated, "postgres:abc\nminio:showroom:xyz\n");
+        // 空值/缺行
+        assert_eq!(cred_value("postgres:\n", "postgres"), None);
+        assert_eq!(cred_value("minio:a:b\n", "postgres"), None);
+        // 运行期读取器：坏行（缺第二段）→ None
+        let root = troot("cred");
+        fs::create_dir_all(root.join("state")).unwrap();
+        fs::write(pg_cred_path(&root), "postgres:abc\nminio:onlyuser\n").unwrap();
+        assert_eq!(minio_creds_of(&root), None);
+        fs::write(pg_cred_path(&root), "postgres:abc\nminio:showroom:def\n").unwrap();
+        assert_eq!(minio_creds_of(&root), Some(("showroom".into(), "def".into())));
+    }
+
+    // plan：minoss 启停的 cred/容器收敛（plan-22 §2.3）。plan_setup 内部用 state::root()
+    // 取路径（纯函数，不落盘）——路径键须与它对齐（与既有 spec 测试的 /srv/showroom 同源）。
+    #[test]
+    fn plan_minoss_cred_and_container_convergence() {
+        let root = state::root();
+        let host = HostEnv::default_for("");
+        // 首跑：cred 文件一次落盘两行（合并写——后写不得丢前写）
+        let obs = Obs::default();
+        let plan = plan_setup(&host, &obs);
+        let cred_wf = plan.iter().find_map(|a| match a {
+            Action::WriteFile { path, contents, .. } if *path == pg_cred_path(&root) => Some(contents.clone()),
+            _ => None,
+        });
+        let cred = cred_wf.expect("首跑须写 middleware.cred");
+        assert!(cred.starts_with("postgres:"), "{cred}");
+        assert!(cred.contains('\n') && cred.lines().count() == 2, "postgres+minio 两行：{cred}");
+        assert!(cred.contains("minio:showroom:"), "{cred}");
+        assert!(plan.iter().any(|a| matches!(a, Action::ContainerUp { spec } if spec.name == "sr-minoss")));
+
+        // 幂等：既有文件两行齐 → 不再写 cred；容器存在 → 无 ContainerUp
+        let mut obs2 = Obs::default();
+        obs2.files.insert(pg_cred_path(&root), cred);
+        obs2.containers.insert("sr-postgres".into());
+        obs2.containers.insert("sr-redis".into());
+        obs2.containers.insert("sr-registry".into());
+        obs2.containers.insert("sr-minoss".into());
+        let plan2 = plan_setup(&host, &obs2);
+        assert!(!plan2.iter().any(|a| matches!(a, Action::WriteFile { path, .. } if *path == pg_cred_path(&root))), "cred 齐全不重写");
+        assert!(!plan2.iter().any(|a| matches!(a, Action::ContainerUp { spec } if spec.name == "sr-minoss")));
+
+        // 禁用 minoss：多则停删 sr-minoss；cred 里既有 minio 行不触发重写
+        let mut off = host.clone();
+        off.middleware.remove("minoss");
+        let mut obs3 = obs2.clone();
+        obs3.containers.remove("sr-minoss");
+        let plan3 = plan_setup(&off, &obs3);
+        assert!(!plan3.iter().any(|a| matches!(a, Action::ContainerUp { spec } if spec.name == "sr-minoss")));
+        assert!(!plan3.iter().any(|a| matches!(a, Action::ContainerRm { name } if name == "sr-minoss")), "容器已不在则无需删");
+        let mut obs4 = obs2;
+        obs4.containers.insert("sr-minoss".into());
+        let plan4 = plan_setup(&off, &obs4);
+        assert!(plan4.iter().any(|a| matches!(a, Action::ContainerRm { name } if name == "sr-minoss")));
     }
 
     // 备份裁剪：名字时间序保留最近 keep 份，更旧删除；非备份名不碰

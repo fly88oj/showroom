@@ -24,12 +24,12 @@
 │   隧道客户端 → 网关 127.0.0.1:8082（首批 6B 探测）→ Caddy :8081（site B）。配置源：          │
 │   chmlfrp=getcfg 拉面板 ini；native=FRP_TOML 直载（Source 抽象；会话重建时重读）。          │
 │                                                                                          │
-│   showroomctl serve（控制面）── docker CLI/exec ──▶ 展项容器 · sr-postgres · sr-redis     │
+│   showroomctl serve（控制面）── docker CLI/exec ──▶ 展项容器 · sr-postgres · sr-redis · sr-minoss │
 │        │  状态读写                                                                        │
 │        ▼                                                                                 │
 │   /srv/showroom（btrfs 子卷 @showroom）                                                  │
 │   ├─ state/（policy.env · host.env · ports.reg · tokens/ · users/ · projects/ · routes/）│
-│   ├─ _middleware/{postgres,redis,registry}/（中间件数据卷）                              │
+│   ├─ _middleware/{postgres,redis,registry,minoss}/（中间件数据卷）                        │
 │   └─ _tmp/（import/dump 暂存，即用即删 + 24h gc）                                        │
 │                                                                                          │
 │   systemd timers → showroomctl reconcile / autoheal / gc-images / gc-registry /          │
@@ -171,7 +171,7 @@ docker --restart unless-stopped：进程级兜底
 │  ├─ projects/<project>.env       # 注入容器的连接信息（§4 契约）
 │  ├─ projects/<project>.last2     # 上一 tag（回滚目标）
 │  └─ routes/<project>.caddy       # 展项路由片段（主 Caddyfile import）
-├─ _middleware/{postgres,redis,registry}/   # 中间件容器数据卷（bind）
+├─ _middleware/{postgres,redis,registry,minoss}/   # 中间件容器数据卷（bind）
 ├─ _bootstrap/public/              # /_api/tool/* 下发源（CLI/Skill/公钥；控制台登录后内下载，R8 无静态匿名分发面）
 ├─ _console/                       # WASM 控制台静态资源
 └─ _tmp/                           # import/dump 暂存（即用即删 + 24h gc）
@@ -230,7 +230,7 @@ diff = 期望 − 实际 → Action 列表（有序、可命名，幂等判定�
 
 ## 4. 环境变量契约（publish 自动注入）
 
-容器以 `--env-file` 注入以下变量，值全部具体化；应用按 12-factor 读环境即可，`showroom env` 随时查看。**中间件自适应**（§15.2）：禁用的中间件对应变量组（如 `REDIS_*`）不再注入，publish 照常，`ps`/`env` 标注「未启用」：
+容器以 `--env-file` 注入以下变量，值全部具体化；应用按 12-factor 读环境即可，`showroom env` 随时查看。**中间件自适应**（§15.2）：禁用的中间件对应变量组（如 `REDIS_*`/`S3_*`）不再注入，publish 照常，`ps`/`env` 标注「未启用」：
 
 ```
 DB_HOST=sr-postgres          DB_PORT=5432
@@ -239,6 +239,8 @@ DB_PASSWORD=<随机生成>
 DATABASE_URL=postgresql://<user>:<password>@sr-postgres:5432/<dbname>
 REDIS_HOST=sr-redis          REDIS_PORT=6379        REDIS_DB=<按项目分配，池 REDIS_DBS 默认 256>
 REDIS_URL=redis://sr-redis:6379/<n>
+S3_ENDPOINT_URL=http://sr-minoss:9000    # minoss 启用时注入（plan-22；每项目独立桶+密钥）
+S3_ACCESS_KEY_ID=<派生>  S3_SECRET_ACCESS_KEY=<轮换>  S3_BUCKET=sr-<project 小写>
 SHOWROOM_PROJECT=<project>   SHOWROOM_BASE_PATH=/<project>/
 ```
 

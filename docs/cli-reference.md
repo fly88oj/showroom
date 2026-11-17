@@ -218,7 +218,7 @@ showroom skill [install]     # install 为缺省动作，当前唯一动作（�
 | 命令 | 说明 |
 |---|---|
 | `showroomctl setup [--apply] [--lan-host <地址>] [--public-host <地址>]` | 主机自举：无 `--apply`=diff 模式（列变更与偏差）；`--apply` 幂等收敛目录/policy/中间件容器/Caddy/systemd/调优。首跑按探测值生成 `state/host.env`，限额缺省随实测硬件推导 |
-| `showroomctl middleware status\|enable <名>\|disable <名> [--force]\|set <名> <k>=<v> [--confirm]` | 中间件编排：期望/实际/漂移对照；`set redis databases=N`（16–256）为 Redis 逻辑库扩容确认流（无 `--confirm` 只见提示不动容器——变更需重启实例） |
+| `showroomctl middleware status\|enable <名>\|disable <名> [--force]\|set <名> <k>=<v> [--confirm]` | 中间件编排：期望/实际/漂移对照；`<名>` ∈ postgres/redis/registry/minoss（minoss=S3 对象存储，plan-22；禁用组 S3_* env 不再注入）；`set redis databases=N`（16–256）为 Redis 逻辑库扩容确认流（无 `--confirm` 只见提示不动容器——变更需重启实例） |
 | `showroomctl upgrade [--bin <路径>]` | 就地升级二进制（探针→备份→原子替换→restart 探活→失败回滚；默认取 `/tmp/showroomctl`；同步 user CLI 与 `_bootstrap/`） |
 
 ### 服务与运维

@@ -23,7 +23,7 @@ showroom deploy v1          # 推镜像 + 发布 + 打印 URL，一步到位
 | 自愈 | systemd timer 驱动 `reconcile`（状态比对、幂等重建）与 `autoheal`（退出拉起、unhealthy 重启）；容器 `--restart unless-stopped` 兜底 |
 | 多通道发布 | 内网走 registry 直推（快通道），公网走加密 import 通道（大文件分片断点续传）；CLI 自动探测、失败自动回落 |
 | 磁盘准入与镜像管理 | 上传前按 `膨胀因子×密封体积 ≤ 可用−预留` 准入（`showroom space` 三数可见）；`showroom rm-image` 删除即内联 GC **立即**回收空间，闭环「上传不够→删除→立即可传」 |
-| 共享数据库维护 | 每个项目独立供给 PostgreSQL 库与 Redis 逻辑库，凭据自动注入容器；发布者经 CLI/控制台自助执行 SQL、预览表、加密备份与恢复（zstd-19 压缩、端到端加密） |
+| 共享数据库与对象存储 | 每个项目独立供给 PostgreSQL 库、Redis 逻辑库与 S3 桶（minoss，桶级 IAM 隔离），凭据自动注入容器；发布者经 CLI/控制台自助执行 SQL、预览表、加密备份与恢复（zstd-19 压缩、端到端加密）、浏览/下载 S3 对象 |
 | 主机自举 | `showroomctl setup --apply` 一条命令幂等收敛目录/中间件/Caddy/systemd/调优（声明式 host.env）；`middleware` 子命令与 Web 主机编排面板支持两段式变更与 Redis 扩容确认流 |
 | WASM 控制台 | 纯静态单页控制台（React + shadcn/ui，Vite 构建；密码学层为 Rust 编译 wasm32，无 wasm-bindgen 依赖），浏览器本地完成 OPAQUE 登录、签名与加解密，密钥不出本机；CLI 与 Web 走同一套密码学（showroom-common） |
 
@@ -40,9 +40,9 @@ showroom deploy v1          # 推镜像 + 发布 + 打印 URL，一步到位
                    │   │  │ site B（:8081 纯端口匹配，公网面）                          │ │
  访客（项目页面）──┘   │  │   公网隧道（serve 内隧道客户端→网关 8082→:8081）命中的站点；无 /v2   │ │
                        │  └───────────────────────────────────────────────────────────┘ │
-                       │     ┌─ showroomctl ─┐   ┌─ sr-postgres ─┬─ sr-redis ─┐        │
-                       │     │ 状态+控制面    ├──▶│ 共享中间件（docker 网络 showroom-net）│
-                       │     └───────────────┘   └───────────────┴────────────┘        │
+                       │     ┌─ showroomctl ─┐   ┌ sr-postgres ─┬ sr-redis ─┬ sr-registry ─┐ │
+                       │     │ 状态+控制面    ├──▶│ 共享中间件（docker 网络 showroom-net，含 sr-minoss S3）│
+                       │     └───────────────┘   └──────────────┴───────────┴──────────────┘ │
                        │        /srv/showroom（btrfs 子卷：状态、快照、_tmp）            │
                        └───────────────────────────────────────────────────────────────┘
 ```

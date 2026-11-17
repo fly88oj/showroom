@@ -73,6 +73,14 @@ export function Data({ onOpenSettings }: { onOpenSettings: () => void }) {
   const [rdSel, setRdSel] = useState<{ key: string; type?: string; ttl?: string; value: string } | null>(null);
   const [rdCount, setRdCount] = useState("");
 
+  // —— S3（每项目独立桶；只读浏览：列目录/文本预览/下载）——
+  interface S3Row { name: string; key: string; size: number; last_modified: string; is_dir: boolean }
+  const [s3Objects, setS3Objects] = useState<S3Row[] | null>(null);
+  const [s3Trunc, setS3Trunc] = useState(false);
+  const [s3Prefix, setS3Prefix] = useState("");
+  const [s3Count, setS3Count] = useState("");
+  const [s3Sel, setS3Sel] = useState<{ key: string; size: number; isText: boolean; text?: string; note?: string } | null>(null);
+
   function setProject(v: string) {
     setDbProject(v); setProjErr("");
     setTables(null); setTable(""); setPreview(null); setPreviewFb(""); setPage(1);
@@ -319,8 +327,76 @@ export function Data({ onOpenSettings }: { onOpenSettings: () => void }) {
     }
   }
 
+  // —— S3 ——
+  async function queryS3For(prefixVal?: string) {
+    const bad = checkProj(dbProject);
+    if (bad) { setProjErr(bad); return; }
+    const prefix = prefixVal ?? s3Prefix;
+    try {
+      const j = (await api("GET", `/_api/s3-objects?project=${encodeURIComponent(dbProject)}&prefix=${encodeURIComponent(prefix)}`)) as { objects?: S3Row[]; truncated?: boolean };
+      setS3Objects(j.objects || []);
+      setS3Trunc(!!j.truncated);
+      setS3Sel(null);
+      const n = (j.objects || []).length;
+      setS3Count(prefix ? `目录 ${prefix}：${n} 项` : `桶根：${n} 项`);
+    } catch (e) {
+      setS3Objects([]);
+      setS3Count("");
+      toast.error(`对象列表获取失败：${(e as { msg?: string }).msg ?? ""}`);
+    }
+  }
+  const queryS3 = () => queryS3For();
+
+  /** 进入子目录（prefix 恒以 / 结尾，来自 is_dir 行的完整键） */
+  function enterS3Dir(key: string) {
+    setS3Prefix(key);
+    void queryS3For(key);
+  }
+
+  /** 返回上一级：去掉末段；到根则空串 */
+  function s3Up() {
+    const trimmed = s3Prefix.replace(/\/+$/, "");
+    const idx = trimmed.lastIndexOf("/");
+    const up = idx < 0 ? "" : trimmed.slice(0, idx + 1);
+    setS3Prefix(up);
+    void queryS3For(up);
+  }
+
+  async function pickS3(key: string) {
+    try {
+      const j = (await api("GET", `/_api/s3-get?project=${encodeURIComponent(dbProject)}&key=${encodeURIComponent(key)}`)) as { size?: number; is_text?: boolean; text?: string; note?: string };
+      setS3Sel({ key, size: Number(j.size ?? 0), isText: !!j.is_text, text: j.text, note: j.note });
+    } catch (e) {
+      toast.error(`对象读取失败：${(e as { msg?: string }).msg ?? ""}`);
+    }
+  }
+
+  async function downloadS3() {
+    if (!s3Sel) return;
+    try {
+      const j = (await api("GET", `/_api/s3-download?project=${encodeURIComponent(dbProject)}&key=${encodeURIComponent(s3Sel.key)}`)) as { content_b64?: string };
+      if (!j.content_b64) throw new Error("响应缺少内容");
+      const bin = atob(j.content_b64);
+      const buf = new Uint8Array(bin.length);
+      for (let i = 0; i < bin.length; i++) buf[i] = bin.charCodeAt(i);
+      const name = s3Sel.key.split("/").pop() || s3Sel.key;
+      const blob = new Blob([buf], { type: "application/octet-stream" });
+      const a = document.createElement("a");
+      a.href = URL.createObjectURL(blob);
+      a.download = name;
+      a.click();
+      setTimeout(() => URL.revokeObjectURL(a.href), 60000);
+    } catch (e) {
+      apiFailToast(e, "对象下载");
+    }
+  }
+
+  /** 字节数可读化（B/KB/MB） */
+  const fmtSize = (n: number) => (n < 1024 ? `${n} B` : n < 1024 * 1024 ? `${(n / 1024).toFixed(1)} KB` : `${(n / 1024 / 1024).toFixed(1)} MB`);
+
   useEffect(() => {
     setRdKeys(null); setRdSel(null); setRdCount(""); setRdDbs(null); setRdDb("");
+    setS3Objects(null); setS3Sel(null); setS3Count(""); setS3Prefix(""); setS3Trunc(false);
   }, [dbProject]);
 
   return (
@@ -346,6 +422,7 @@ export function Data({ onOpenSettings }: { onOpenSettings: () => void }) {
         <TabsList variant="line" className="h-9 w-fit gap-0.5">
           <TabsTrigger value="pg">PostgreSQL</TabsTrigger>
           <TabsTrigger value="redis">Redis</TabsTrigger>
+          <TabsTrigger value="s3">S3 对象</TabsTrigger>
         </TabsList>
 
         {/* —— PostgreSQL —— */}
@@ -572,6 +649,78 @@ export function Data({ onOpenSettings }: { onOpenSettings: () => void }) {
           </div>
           <p className="text-xs text-muted-foreground">
             每个项目一个独立的键空间；管理员可见全部项目的键空间。键列表单次最多 200 条（可能截断），值超过 4KB 会被服务端截断。
+          </p>
+        </TabsContent>
+
+        {/* —— S3 对象（每项目独立桶，只读浏览）—— */}
+        <TabsContent value="s3" className="flex flex-col gap-3">
+          <div className="flex flex-wrap items-end gap-3">
+            <Field>
+              <FieldLabel htmlFor="s3-prefix">对象前缀（回车进入）</FieldLabel>
+              <Input
+                id="s3-prefix" className="w-56 font-mono" placeholder="如 data/ 或留空…"
+                value={s3Prefix} onChange={(e) => setS3Prefix(e.target.value)}
+                onKeyDown={(e) => e.key === "Enter" && queryS3()}
+              />
+            </Field>
+            <Button variant="outline" disabled={!dbProject} onClick={queryS3}>查询</Button>
+            <Button variant="outline" disabled={!s3Prefix} onClick={s3Up}>上一级</Button>
+            <span className="text-xs text-muted-foreground" aria-live="polite">
+              {s3Count}{s3Trunc ? "（列表上限 500 已截断）" : ""}
+            </span>
+          </div>
+          <div className="grid gap-3 md:grid-cols-2">
+            <Field>
+              <FieldLabel>对象列表（目录可进入，文件可预览）</FieldLabel>
+              <div className="rounded-lg border">
+                <Table>
+                  <TableHeader>
+                    <TableRow className="bg-muted/30">
+                      <TableHead className="font-mono">对象</TableHead>
+                      <TableHead className="w-24 font-mono">大小</TableHead>
+                      <TableHead className="w-40 font-mono">修改时间</TableHead>
+                    </TableRow>
+                  </TableHeader>
+                  <TableBody>
+                    {s3Objects === null ? (
+                      <TableRow><TableCell colSpan={3} className="py-4 text-center text-xs text-muted-foreground">（点击「查询」载入对象列表）</TableCell></TableRow>
+                    ) : s3Objects.length === 0 ? (
+                      <TableRow><TableCell colSpan={3} className="py-4 text-center text-xs text-muted-foreground">（无对象）</TableCell></TableRow>
+                    ) : s3Objects.map((o) => (
+                      <TableRow
+                        key={o.key}
+                        className={cn("cursor-pointer hover:bg-accent", s3Sel?.key === o.key && "bg-accent")}
+                        onClick={() => (o.is_dir ? enterS3Dir(o.key) : void pickS3(o.key))}
+                      >
+                        <TableCell className="max-w-0 truncate font-mono text-xs">{o.is_dir ? `${o.name}` : o.name}</TableCell>
+                        <TableCell className="font-mono text-xs">{o.is_dir ? "—" : fmtSize(o.size)}</TableCell>
+                        <TableCell className="font-mono text-xs">{o.last_modified || "—"}</TableCell>
+                      </TableRow>
+                    ))}
+                  </TableBody>
+                </Table>
+              </div>
+            </Field>
+            <Field>
+              <FieldLabel>
+                预览 {s3Sel && <Badge variant="outline" className="ml-1 font-mono">{fmtSize(s3Sel.size)}</Badge>}
+              </FieldLabel>
+              <ScrollArea className="h-56 rounded-md border bg-background">
+                <pre className="p-2 font-mono text-xs leading-5 whitespace-pre-wrap">
+                  {s3Sel
+                    ? s3Sel.isText
+                      ? s3Sel.text || "（空文件）"
+                      : s3Sel.note || "（二进制对象）"
+                    : "（未选择文件）"}
+                </pre>
+              </ScrollArea>
+            </Field>
+          </div>
+          {s3Sel && (
+            <Button variant="outline" className="w-fit" onClick={downloadS3}>下载</Button>
+          )}
+          <p className="text-xs text-muted-foreground">
+            每个项目一个独立的桶（权限仅限本桶，桶外不可见）；管理员可浏览任意项目的桶。对象键支持字母数字与 . _ - /；列表单次 500 条、预览 64KB、下载 8MB 上限，更大对象请在项目容器内用 S3_* 凭据直取。
           </p>
         </TabsContent>
       </Tabs>

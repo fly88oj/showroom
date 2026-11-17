@@ -99,13 +99,14 @@ state/users/<user>/reg.cred     registry basic_auth user:hash（bcrypt）
 state/projects/<project>.conf   key=value: owner tag port cport mem cpu redisdb updated（磁盘键名沿用 owner=）
 state/projects/<project>.env    见下方环境变量契约
 state/projects/<project>.last2  上一 tag（老项目回滚兜底；现行=versions.json 发布历史）
-_middleware/{postgres,redis,registry}/  数据卷(bind)
+state/middleware.cred    中间件凭据，每行 name:value——postgres:<pg 超级用户密码> / minio:<root 用户>:<root 密钥>（0600，首跑生成绝不轮换）
+_middleware/{postgres,redis,registry,minoss}/  数据卷(bind)
 _tmp/                   import 暂存（即用即删）
 ```
 URL 规则：恒 `/{project}/`（§11 起项目级单路径；路由文件 `routes/<project>.caddy`）。
 
-## 6. 发布者环境变量契约（publish 时自动生成注入，值全部具体化，无占位符遗留；§11 起共 12 键）
-容器启动 `--env-file` 注入，应用侧按 12-factor 读环境即可；`showroom env` / `GET /_api/env` 可随时查看这些值（连接地址一目了然）。§15.2 自适应：禁用 redis 中间件时 `REDIS_*` 组（4 键）不注入，其余 8 键照常：
+## 6. 发布者环境变量契约（publish 时自动生成注入，值全部具体化，无占位符遗留）
+容器启动 `--env-file` 注入，应用侧按 12-factor 读环境即可；`showroom env` / `GET /_api/env` 可随时查看这些值（连接地址一目了然）。§15.2 自适应：禁用 redis 中间件时 `REDIS_*` 组（4 键）不注入，禁用 minoss 中间件时 `S3_*` 组（4 键）不注入，其余键照常：
 ```
 DB_HOST=sr-postgres          DB_PORT=5432
 DB_NAME=sr_<project 的 - → _>  DB_USER=<同 DB_NAME>
@@ -113,9 +114,21 @@ DB_PASSWORD=<随机生成>
 DATABASE_URL=postgresql://<user>:<password>@sr-postgres:5432/<dbname>
 REDIS_HOST=sr-redis          REDIS_PORT=6379     REDIS_DB=<按项目分配，池 REDIS_DBS 默认 256>
 REDIS_URL=redis://sr-redis:6379/<n>
+S3_ENDPOINT_URL=http://sr-minoss:9000            # plan-22：minoss 启用且已供给时注入
+S3_ACCESS_KEY_ID=sr<sha256(project) 前 16 hex>   S3_SECRET_ACCESS_KEY=<每次发布随机轮换>
+S3_BUCKET=sr-<project 小写>
 SHOWROOM_PROJECT=<project>   SHOWROOM_BASE_PATH=/<project>/
 SHOWROOM_SVC_<NAME>_HOST=<容器名>   SHOWROOM_SVC_<NAME>_PORT=<端口>   # plan-19：全体服务含 main
 ```
+
+**S3 对象存储供给（plan-22）**：minoss 中间件（§15）启用时，publish 在 DB 供给后做每项目
+S3 供给——桶 `sr-<project 小写>`（项目名允许大写而桶名必须小写；发布归一化阶段对
+小写重名跨项目检查，撞名 E_NAME）+ 访问键 `sr<sha256(project)[..16]>`（确定性/防撞/
+纯字母数字，rm 可重算拆除）+ 密钥 `rand_hex(16)` 每次发布轮换（对齐 DB 密码模型，env
+文件持久化供 reconcile 重建复用）+ 桶级 IAM 策略（`s3:*` 限本桶两层 arn）。执行经
+`docker exec -i sr-minoss mc`（镜像内置 mc；凭据恒走 stdin，argv 零秘密——psql 同款
+纪律）。db-reset 沿用 env 中的 S3 密钥重灌（凭据保持不变）；rm 删桶（含对象）+用户+
+策略（对齐 DROP DATABASE 语义）。
 
 **自定义环境变量（plan-20/21）**：两层——①**全体变量**（CLI `--env` 可重复 /
 API `env:{K:V}` / 控制台「自定义环境变量（全体容器）」）：追加在平台默认块**之后**
@@ -131,8 +144,9 @@ ${DB_USER}:${DB_PASSWORD}@${DB_HOST}:${DB_PORT}/${DB_NAME}` 或直接
 全体块+专属追加）。未定义引用原样保留；递归上限 5 层。
 
 **附加服务的中间件连接**：附加服务容器与主服务共用同一份 env 文件基础（含全部
-DB_*/REDIS_* 凭据与 SHOWROOM_SVC_* 发现键）——**每个容器都可直连 sr-postgres/
-sr-redis**，凭据同源、权限同库（同一项目的全部服务共享该项目的 DB/Redis 库）。
+DB_*/REDIS_*/S3_* 凭据与 SHOWROOM_SVC_* 发现键）——**每个容器都可直连 sr-postgres/
+sr-redis/sr-minoss**，凭据同源、权限同库同桶（同一项目的全部服务共享该项目的
+DB/Redis 库与 S3 桶）。
 
 **回滚 = 整体恢复**（主服务 + 附加服务 + 两层变量都回到目标版本的快照）。
 **配置随版本走（plan-20 用户裁决）**：每次发布把当时的完整配置
@@ -218,6 +232,14 @@ UI 与信息架构由 §17 定义（五标签：我的项目/发布/镜像库/�
 - CLI `showroom db dump` 同步三段式：begin → 1s 轮询 status 至 ready（1h 上限，failed 即时报错）→ 4MB chunk 循环落本地临时信封（每片≤4MB，内存恒定）→ 一次性私钥解密流式写目标文件/stdout。
 - 陈旧清理：`_tmp` 下 `.status` 并入 gc-images 的 24h 清理（原有 .bin/.meta 不变）。
 
+### 10.5 S3 对象浏览（plan-22，只读）
+- 端点（全部 `[签名+user_check 项目归属]`；后端用**项目自身凭据**访问——桶级策略隔离的实证路径）：
+  - `GET /_api/s3-objects ?project=&prefix=` → `{objects:[{name,key,size,last_modified,is_dir}],truncated}`（`mc ls --json` 非递归一层；文件夹行 key 带 `/` 结尾供下钻；单次 500 条截断）
+  - `GET /_api/s3-get ?project=&key=` → `{key,size,is_text,text?|note}`（文本预览 ≤64KB，UTF-8 校验；二进制给 note+prefix_hex）
+  - `GET /_api/s3-download ?project=&key=` → `{key,size,content_b64}`（≤8MB；超出 E_STATE 提示容器内直取）
+- 前缀/对象键白名单 `^[A-Za-z0-9._/-]+$`（≤512 字符，E_NAME 越界拒绝——脚本拼接与路径歧义双防）。
+- minoss 禁用或项目未注入 S3_*（禁用期发布）→ E_STATE 如实报错；控制台「数据 → S3 对象」只读浏览（目录下钻/文本预览/下载），不做上传删除。
+
 ## 11. 无槽位（slot）模型
 **动机**：简化概念（Demo 定向展示）；多版本并存=发布者自建多个相近名称项目；项目名默认随机提升被字典遍历发现的门槛。
 - 项目名规则放宽：`^[a-zA-Z0-9][a-zA-Z0-9-]{0,30}$`（保留名不变）；**发布入口默认预填随机 `[a-zA-Z0-9]{8}`**，发布者不改直接用。
@@ -281,7 +303,7 @@ UI：发布页单表单双镜像源（tar 上传→压缩→上传→发布；�
 ### 15.1 声明式期望状态
 - `state/host.env`（setup 生成、可改、幂等应用）：
   ```
-  MIDDLEWARE="postgres registry redis"     # 集合：按需增减（如无 redis 主机）
+  MIDDLEWARE="postgres registry redis minoss"   # 集合：按需增减（如无 redis 主机）；minoss=S3 对象存储（plan-22）
   CADDY=yes  LAN_HOST=<内网地址>  PUBLIC_HOST=  TUNING=sysctl  DEDUP=weekly
   FRP=none  FRP_TOKEN=  FRP_TUNNEL=  FRP_TOML=   # 隧道（整文件 0600；见下行注）
   ```
@@ -304,7 +326,7 @@ UI：发布页单表单双镜像源（tar 上传→压缩→上传→发布；�
 ### 15.2 中间件子命令（CLI+admin 端点同源）
 - `showroomctl middleware status|enable <名>|disable <名> [--force]|set <名> <k>=<v>`
 - admin 端点：GET /_api/admin/host（期望状态+实际偏差+建议）、POST /_api/admin/host（改 host.env 后自动 setup --apply 的 diff→apply 两段式：先返回变更清单，confirm=true 执行）
-- env 注入自适应：禁用的中间件对应变量组（REDIS_*）不再注入，publish 照常；ps/env 标注「未启用」。
+- env 注入自适应：禁用的中间件对应变量组（REDIS_*/S3_*）不再注入，publish 照常；ps/env 标注「未启用」。sr-minoss 容器不映射任何 host 端口（S3 9000 与 Console 9001 仅 showroom-net 内网；镜像钉 `ghcr.io/fly88oj/minoss:<RELEASE tag>`，root 凭据在 state/middleware.cred 的 minio 行）。
 ### 15.3 Redis 逻辑库自动扩容
 - admin/status 与 /_api/admin/host 常驻检查：`已用库数 + 头 room` vs `REDIS_DBS`；余量 <20% 时状态面板黄条提示「建议扩容」。
 - 扩容流程（databases 变更需重启实例）：管理员 `showroomctl middleware set redis databases=256`（或 Web 表单；取值 16–256——Conf.redisdb 为 u8，单实例至多 256 库）→ showroom 提示「需重启 Redis（约 3 秒，数据 AOF 持久，运行中应用的连接将自动重连）」→ confirm → 停旧容器→新容器带 `--databases N` 起来→自动验证 ping+库数→回报结果。**不静默重启**——用户明确要求提示管理员确认。

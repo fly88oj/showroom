@@ -528,6 +528,21 @@ pub fn reset(root: &Path, p: &str, confirm: bool) -> R<()> {
         .and_then(|v| v.parse().ok())
         .or_else(|| state::Conf::load(root, p).ok().map(|c| c.redisdb))
         .ok_or_else(|| ApiError::state("env 文件缺 REDIS_DB"))?;
+    // S3（plan-22）：凭据保持不变语义同 DB——沿用 env 里的 S3 密钥重灌桶/用户/策略；
+    // minoss 启用但项目未注入过（禁用期发布）→ 生成新密钥（升级路径）。
+    let mw = crate::middleware::HostEnv::load(root).middleware;
+    let s3_secret: Option<String> = if mw.contains("minoss") {
+        let sk = env.get("S3_SECRET_ACCESS_KEY").filter(|v| !v.is_empty()).cloned();
+        Some(match sk {
+            Some(sk) => {
+                crate::s3::provision_with_secret(root, p, &sk)?;
+                sk
+            }
+            None => crate::s3::provision(root, p)?,
+        })
+    } else {
+        None
+    };
 
     let mut conf = state::Conf::load(root, p)
         .map_err(|e| ApiError::state(format!("read conf: {e}")))?;
@@ -554,14 +569,16 @@ pub fn reset(root: &Path, p: &str, confirm: bool) -> R<()> {
     dockerops::psql(&sql)?;
     conf.legacyslot = None; // 归一化在此终结
     conf.save(root, p)?;
-    let mw = crate::middleware::HostEnv::load(root).middleware;
     // 发现键随 conf 重建（plan-19：db-reset 场景 conf 已在——按其服务集重建 env）
     let conf = state::Conf::load(root, p)?;
     let disc_full = state::disc_for(p, conf.cport, &conf.services);
     let disc: Vec<(&str, &str, u16)> =
         disc_full.iter().map(|(a, b, c)| (a.as_str(), b.as_str(), *c)).collect();
     let uenv = conf.uenv.clone();
-    fs::write(state::env_path(root, p), state::env_file_contents(p, &new_db, &db_pass, redisdb, &mw, &disc, &uenv))?;
+    fs::write(
+        state::env_path(root, p),
+        state::env_file_contents(p, &new_db, &db_pass, redisdb, &mw, &disc, &uenv, s3_secret.as_deref()),
+    )?;
     Ok(())
 }
 

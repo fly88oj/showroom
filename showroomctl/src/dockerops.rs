@@ -77,11 +77,12 @@ pub fn psql(sql: &str) -> R<()> {
 
 // —— SPEC §9 数据库维护：定库 psql / pg_dump（pg_restore 的流式管道在 dbmaint）——
 
-/// `docker exec -i sr-postgres <args>` 执行底座：stdin 全量送入（独立线程，防大 SQL 与大输出管道互锁），
+/// `docker exec -i <ctr> <args>` 执行底座：stdin 全量送入（独立线程，防大 SQL 与大输出管道互锁），
 /// stdout/stderr 全量收集（wait_with_output 内部并行排空），返回 (成功?, stdout, stderr)。
-fn exec_pg(args: &[&str], stdin_data: &[u8]) -> R<(bool, Vec<u8>, Vec<u8>)> {
+/// pg（psql SQL）与 minoss（sh -c 脚本 + 凭据行）共用——凭据恒走 stdin，argv 零秘密。
+pub fn exec_stdin(ctr: &str, args: &[&str], stdin_data: &[u8]) -> R<(bool, Vec<u8>, Vec<u8>)> {
     let mut child = Command::new("docker")
-        .args(["exec", "-i", "sr-postgres"])
+        .args(["exec", "-i", ctr])
         .args(args)
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
@@ -98,6 +99,11 @@ fn exec_pg(args: &[&str], stdin_data: &[u8]) -> R<(bool, Vec<u8>, Vec<u8>)> {
         .map_err(|e| ApiError::state(format!("docker exec wait: {e}")))?;
     let _ = writer.join();
     Ok((out.status.success(), out.stdout, out.stderr))
+}
+
+/// sr-postgres 专用薄封装（psql 家族）。
+fn exec_pg(args: &[&str], stdin_data: &[u8]) -> R<(bool, Vec<u8>, Vec<u8>)> {
+    exec_stdin("sr-postgres", args, stdin_data)
 }
 
 /// 定库 psql：SQL 恒走 stdin（绝不进 argv）；extra 为固定旗标（-t -A -F …）。

@@ -6,6 +6,7 @@ mod dockerops;
 mod middleware;
 mod ops;
 mod publish;
+mod s3;
 mod serve;
 mod setup;
 mod state;

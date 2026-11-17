@@ -24,7 +24,7 @@ import { randAlnum } from "@/lib/bytes";
 import { StatusBadge } from "@/components/StatusBadge";
 import { NAME_RE } from "@/lib/state";
 
-const MW_NAMES = ["postgres", "redis", "registry"] as const;
+const MW_NAMES = ["postgres", "redis", "registry", "minoss"] as const;
 const KIND_CN: Record<string, string> = {
   CreateDir: "建目录", WriteFile: "写文件", BtrfsSubvol: "btrfs 子卷", NetworkCreate: "建网络",
   ContainerUp: "起容器", ContainerRm: "删容器", PackageInstall: "装软件包",
@@ -553,7 +553,7 @@ function HostPanel() {
       setHost(j);
       if (!resync) return;
       const mwSet = new Set(Array.isArray(j.host_env?.MIDDLEWARE) ? j.host_env.MIDDLEWARE : String(j.host_env?.MIDDLEWARE ?? "").split(/\s+/).filter(Boolean));
-      setMw({ postgres: mwSet.has("postgres"), redis: mwSet.has("redis"), registry: mwSet.has("registry") });
+      setMw({ postgres: mwSet.has("postgres"), redis: mwSet.has("redis"), registry: mwSet.has("registry"), minoss: mwSet.has("minoss") });
       setPolicyEdit({
         disk: j.policy?.DISK_RESERVE_GB != null ? String(j.policy.DISK_RESERVE_GB) : "",
         mem: j.policy?.RESERVE_MEM_MB != null ? String(j.policy.RESERVE_MEM_MB) : "",

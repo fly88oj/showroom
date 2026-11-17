@@ -86,6 +86,9 @@ pub fn rm(root: &Path, p: &str) -> R<()> {
         sql.push_str(&format!("DROP DATABASE IF EXISTS \"{db}\" WITH (FORCE);\nDROP ROLE IF EXISTS \"{db}\";\n"));
     }
     let _ = dockerops::psql(&sql);
+    // S3 拆除（plan-22）：桶（含对象）+ 用户 + 策略，尽力幂等（对齐 DROP DATABASE 语义；
+    // minoss 禁用/容器缺失时失败被容忍——供给物本就不在）
+    let _ = crate::s3::teardown(root, p);
     let _ = fs::remove_file(state::route_path(root, p));
     for path in [
         state::conf_path(root, p),

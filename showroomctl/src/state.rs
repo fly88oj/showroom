@@ -485,6 +485,19 @@ pub fn db_ident(p: &str) -> String {
     format!("sr_{}", p.replace('-', "_"))
 }
 
+/// S3 桶名（plan-22 §2.1）：`sr-` + project 小写（S3 桶名仅允许小写字母数字与连字符、
+/// 3-63 字符；项目名正则归一后必合法，长度 ≤34）。大小写仅差的两项目会撞桶——
+/// 由发布归一化阶段的小写重名检查拦截（publish），不在本函数兜底。
+pub fn s3_bucket_ident(p: &str) -> String {
+    format!("sr-{}", p.to_ascii_lowercase())
+}
+
+/// S3 访问键（plan-22 §2.1）：`sr` + sha256(project) 前 16 hex——确定性（rm 可重算拆除）、
+/// 大小写不同的项目不撞（哈希敏感）、纯字母数字（MinIO 访问键字符集安全）。
+pub fn s3_access_key(p: &str) -> String {
+    format!("sr{}", &sha256_hex(p.as_bytes())[..16])
+}
+
 /// v1.4 前老库候选（§9 双名思路）：verbatim `sr_{p}_{s}` 与归一化 `sr_{p_n}_{s_n}`（相同去重）。
 /// 仅用于 legacy 存量库的存在性查找（conf.legacyslot 指路）。
 pub fn legacy_db_idents(p: &str, s: &str) -> Vec<String> {
@@ -540,6 +553,10 @@ pub fn svc_discovery_lines(services: &[(&str, &str, u16)]) -> String {
     out
 }
 
+/// env 文件全量构造（§6 键表 + plan-19 发现键 + plan-20 自定义块 + plan-22 S3 块）。
+/// 参数展开自三组凭据/键组（DB/REDIS/S3），逐组注入而非打包结构体——与各调用方
+/// （publish/dbmaint）的既有取参形状对齐（too_many_arguments 先例：showroom main.rs §12.1）。
+#[allow(clippy::too_many_arguments)]
 pub fn env_file_contents(
     p: &str,
     db: &str,
@@ -548,6 +565,7 @@ pub fn env_file_contents(
     mw: &BTreeSet<String>,
     services: &[(&str, &str, u16)],
     uenv: &[(String, String)],
+    s3_secret: Option<&str>,
 ) -> String {
     let redis = if mw.contains("redis") {
         format!(
@@ -559,6 +577,19 @@ pub fn env_file_contents(
     } else {
         String::new()
     };
+    // S3_* 组（plan-22）：minoss 启用且已供给时注入 4 键；桶名/访问键由项目名确定性派生，
+    // 此处只接收轮换出的密钥。禁用语义与 REDIS_* 一致（整组不注入）。
+    let s3 = match s3_secret {
+        Some(sk) => format!(
+            "S3_ENDPOINT_URL=http://sr-minoss:9000\n\
+             S3_ACCESS_KEY_ID={ak}\n\
+             S3_SECRET_ACCESS_KEY={sk}\n\
+             S3_BUCKET={bucket}\n",
+            ak = s3_access_key(p),
+            bucket = s3_bucket_ident(p),
+        ),
+        None => String::new(),
+    };
     let base = format!(
         "DB_HOST=sr-postgres\n\
          DB_PORT=5432\n\
@@ -567,6 +598,7 @@ pub fn env_file_contents(
          DB_PASSWORD={db_pass}\n\
          DATABASE_URL=postgresql://{db}:{db_pass}@sr-postgres:5432/{db}\n\
          {redis}\
+         {s3}\
          SHOWROOM_PROJECT={p}\n\
          SHOWROOM_BASE_PATH={bp}\n\
          {disc}",
@@ -1701,8 +1733,9 @@ mod tests {
     // 2b. env 文件往返（§6 全字段具体化；§11 无 SHOWROOM_SLOT；§15.2 mw 自适应注入）
     #[test]
     fn env_file_roundtrip() {
-        let full_mw: BTreeSet<String> = ["postgres", "redis", "registry"].iter().map(|s| s.to_string()).collect();
-        let txt = env_file_contents("demo", &db_ident("demo"), "s3cret", 3, &full_mw, &[], &[]);
+        let full_mw: BTreeSet<String> =
+            ["postgres", "redis", "registry", "minoss"].iter().map(|s| s.to_string()).collect();
+        let txt = env_file_contents("demo", &db_ident("demo"), "s3cret", 3, &full_mw, &[], &[], Some("sk1"));
         let m = parse_kv(&txt);
         assert_eq!(m["DB_HOST"], "sr-postgres");
         assert_eq!(m["DB_PORT"], "5432");
@@ -1714,32 +1747,42 @@ mod tests {
         assert_eq!(m["REDIS_PORT"], "6379");
         assert_eq!(m["REDIS_DB"], "3");
         assert_eq!(m["REDIS_URL"], "redis://sr-redis:6379/3");
+        // plan-22：minoss 供给后注入 S3_* 4 键（桶/访问键派生自项目名，密钥为轮换值）
+        assert_eq!(m["S3_ENDPOINT_URL"], "http://sr-minoss:9000");
+        assert_eq!(m["S3_ACCESS_KEY_ID"], s3_access_key("demo"));
+        assert_eq!(m["S3_SECRET_ACCESS_KEY"], "sk1");
+        assert_eq!(m["S3_BUCKET"], "sr-demo");
         assert_eq!(m["SHOWROOM_PROJECT"], "demo");
         assert_eq!(m["SHOWROOM_BASE_PATH"], "/demo/");
         assert!(!m.contains_key("SHOWROOM_SLOT"), "§11 移除 SHOWROOM_SLOT");
-        // 大写/连字符项目：库名归一化，BASE_PATH 原样
-        let up = parse_kv(&env_file_contents("Demo-9", &db_ident("Demo-9"), "pw", 0, &full_mw, &[], &[]));
+        // 大写/连字符项目：库名归一化，BASE_PATH 原样；S3 桶名小写归一
+        let up = parse_kv(&env_file_contents("Demo-9", &db_ident("Demo-9"), "pw", 0, &full_mw, &[], &[], Some("sk2")));
         assert_eq!(up["DB_NAME"], "sr_Demo_9");
+        assert_eq!(up["S3_BUCKET"], "sr-demo-9");
+        assert_eq!(up["S3_ACCESS_KEY_ID"], s3_access_key("Demo-9"));
+        assert_ne!(s3_access_key("Demo-9"), s3_access_key("demo-9"), "大小写不同的项目访问键不撞");
         assert_eq!(up["SHOWROOM_BASE_PATH"], "/Demo-9/");
         // legacy 库名沿用时 env 同样指向旧名（§9→§11 过渡期）
-        let lg = parse_kv(&env_file_contents("skill-demo", "sr_skill-demo_stable", "pw", 1, &full_mw, &[], &[]));
+        let lg = parse_kv(&env_file_contents("skill-demo", "sr_skill-demo_stable", "pw", 1, &full_mw, &[], &[], None));
         assert_eq!(lg["DB_NAME"], "sr_skill-demo_stable");
         for k in [
             "DB_HOST", "DB_PORT", "DB_NAME", "DB_USER", "DB_PASSWORD", "DATABASE_URL",
             "REDIS_HOST", "REDIS_PORT", "REDIS_DB", "REDIS_URL", "SHOWROOM_PROJECT",
-            "SHOWROOM_BASE_PATH",
+            "SHOWROOM_BASE_PATH", "S3_ENDPOINT_URL", "S3_ACCESS_KEY_ID", "S3_SECRET_ACCESS_KEY", "S3_BUCKET",
         ] {
             assert!(up.contains_key(k) || m.contains_key(k), "missing {k}");
         }
 
-        // §15.2：redis 禁用 → REDIS_* 组不再注入（DB_* 照常，publish 照常）
+        // §15.2：redis 禁用 → REDIS_* 组不再注入（DB_* 照常，publish 照常）；
+        // minoss 未供给（s3_secret=None）→ S3_* 组同样不注入
         let no_redis: BTreeSet<String> = ["postgres", "registry"].iter().map(|s| s.to_string()).collect();
-        let nr = env_file_contents("demo", &db_ident("demo"), "s3cret", 3, &no_redis, &[], &[]);
+        let nr = env_file_contents("demo", &db_ident("demo"), "s3cret", 3, &no_redis, &[], &[], None);
         assert!(!nr.contains("REDIS_"), "{nr}");
+        assert!(!nr.contains("S3_"), "{nr}");
         let nrm = parse_kv(&nr);
         assert_eq!(nrm["DB_NAME"], "sr_demo");
         assert_eq!(nrm["SHOWROOM_BASE_PATH"], "/demo/");
-        assert_eq!(nrm.len(), 8, "§15.2 缺 REDIS_* 后恰 8 键");
+        assert_eq!(nrm.len(), 8, "§15.2 缺 REDIS_*/S3_* 后恰 8 键");
     }
 
     // 2c. 库名归一化 + legacy 检测沿用（§9→§11：候选按优先级，纯函数裁决）

@@ -44,7 +44,7 @@ sudo showroomctl setup --apply    # 幂等执行；二次运行期望 `plan: 0 a
 
 | 键 | 取值 | 默认 | 含义 |
 |---|---|---|---|
-| `MIDDLEWARE` | 空格集合 ⊆ postgres/redis/registry | `postgres redis registry` | 中间件集合（禁用组 env 不再注入） |
+| `MIDDLEWARE` | 空格集合 ⊆ postgres/redis/registry/minoss | `postgres redis registry minoss` | 中间件集合（禁用组 env 不再注入；minoss=S3 对象存储 plan-22） |
 | `CADDY` | yes/no | yes | 安装(pacman)+渲染 Caddyfile |
 | `LAN_HOST` | 地址 | 首跑 `hostname -I` 首地址 | site A（内网面）地址；BASE_URL 由此派生 |
 | `PUBLIC_HOST` | 地址/空 | 空 | site B（公网面）地址；空=纯内网主机 |
@@ -178,9 +178,18 @@ sudo docker run -d --name sr-registry --network showroom-net --restart unless-st
   -v /srv/showroom/_middleware/registry:/var/lib/registry \
   -v /srv/showroom/state/registry.htpasswd:/etc/docker/registry/htpasswd:ro \
   registry:2
+
+# minoss（S3 对象存储，plan-22；root 凭据=middleware.cred 的 minio 行，首跑生成绝不轮换；
+# 不映射任何 host 端口——S3 9000 / Console 9001 仅 showroom-net 内网）
+sudo docker run -d --name sr-minoss --network showroom-net --restart unless-stopped \
+  -e MINIO_ROOT_USER=showroom \
+  -e MINIO_ROOT_PASSWORD='<minoss-root-密钥>' \
+  -v /srv/showroom/_middleware/minoss:/data \
+  ghcr.io/fly88oj/minoss:RELEASE.2026-11-17T11-32-21Z \
+  server /data --console-address ":9001"
 ```
 
-要点（均为平台硬约定）：docker 网络名必须是 `showroom-net`（常量）；容器名 `sr-postgres` / `sr-redis` / `sr-registry` 即网络内 DNS 名（注入展项的 `DB_HOST` / `REDIS_HOST` 依赖它们）；registry 必须 `delete.enabled: true` 且以 `state/registry.htpasswd` 做 basic auth；registry 仅发布到 `127.0.0.1:5000`，外部推拉一律经 Caddy `/v2`。
+要点（均为平台硬约定）：docker 网络名必须是 `showroom-net`（常量）；容器名 `sr-postgres` / `sr-redis` / `sr-registry` / `sr-minoss` 即网络内 DNS 名（注入展项的 `DB_HOST` / `REDIS_HOST` / `S3_ENDPOINT_URL` 依赖它们）；registry 必须 `delete.enabled: true` 且以 `state/registry.htpasswd` 做 basic auth；registry 仅发布到 `127.0.0.1:5000`，外部推拉一律经 Caddy `/v2`；minoss 镜像钉具体 RELEASE tag（升级=改 `setup.rs` 的 `MINOSS_IMAGE` 常量重发），每项目桶/密钥由 publish 自动供给（桶级 IAM 策略隔离，见 plan-22）。
 
 ### A.3 二进制与 systemd 单元
 

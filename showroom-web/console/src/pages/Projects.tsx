@@ -411,7 +411,8 @@ function EnvDialog({ project, onClose }: { project: Project | null; onClose: () 
     ["Redis", env.REDIS_URL || ""],
   ].filter(([, v]) => v) : [];
   const [reveal, setReveal] = useState(false);
-  const val = (k: string) => (k === "DB_PASSWORD" && !reveal ? "••••••••（点右侧显）" : env![k]);
+  const val = (k: string) =>
+    (k === "DB_PASSWORD" || k === "S3_SECRET_ACCESS_KEY") && !reveal ? "••••••••（点右侧显）" : env![k];
   return (
     <Dialog open={!!project} onOpenChange={(v) => !v && onClose()}>
       <DialogContent className="sm:max-w-2xl">
@@ -447,7 +448,7 @@ function EnvDialog({ project, onClose }: { project: Project | null; onClose: () 
                   <TableCell className="font-mono text-xs">{k}</TableCell>
                   <TableCell className="break-all font-mono text-xs">
                     {val(k)}
-                    {k === "DB_PASSWORD" && (
+                    {(k === "DB_PASSWORD" || k === "S3_SECRET_ACCESS_KEY") && (
                       <Button variant="link" size="sm" className="h-auto p-0 ml-1" onClick={() => setReveal((r) => !r)}>{reveal ? "隐藏" : "显示"}</Button>
                     )}
                   </TableCell>

@@ -13,8 +13,8 @@ use crate::dockerops;
 use crate::setup;
 use crate::state::{self, ApiError, R};
 
-/// 中间件名单（host.env MIDDLEWARE 的合法成员）。
-pub const MW_NAMES: [&str; 3] = ["postgres", "redis", "registry"];
+/// 中间件名单（host.env MIDDLEWARE 的合法成员）。minoss=S3 兼容对象存储（plan-22）。
+pub const MW_NAMES: [&str; 4] = ["postgres", "redis", "registry", "minoss"];
 
 /// host.env 文件位置：`state/host.env`（setup 首跑生成；plan-15 §1）。
 pub fn host_env_path(root: &Path) -> PathBuf {
@@ -53,7 +53,7 @@ impl FrpMode {
 /// 不含任何业务限额/秘密之外的设施开关；pg 超级用户密码在 state/middleware.cred（0600）。
 #[derive(Debug, Clone, PartialEq)]
 pub struct HostEnv {
-    /// MIDDLEWARE：空格集合 ⊆ {postgres,redis,registry}
+    /// MIDDLEWARE：空格集合 ⊆ {postgres,redis,registry,minoss}
     pub middleware: BTreeSet<String>,
     /// CADDY=yes/no：安装(pacman)+渲染 Caddyfile
     pub caddy: bool,
@@ -253,7 +253,7 @@ pub fn validate_mw(name: &str) -> R<()> {
     } else {
         Err(ApiError::new(
             "E_NAME",
-            format!("unknown middleware '{name}'（合法：postgres/redis/registry）"),
+            format!("unknown middleware '{name}'（合法：postgres/redis/registry/minoss）"),
         ))
     }
 }
@@ -261,7 +261,7 @@ pub fn validate_mw(name: &str) -> R<()> {
 // —— 编排：status / enable / disable / set / 依赖（plan-15 §2.1、§3、§5）——
 
 /// 引用该中间件的项目清单（disable 门槛与 --force 影响列表）：
-/// postgres/redis=env 注入对应变量组的项目（redis：conf.redisdb 已分配即算，当前=全部项目）；
+/// postgres/minoss=env 注入对应变量组的项目（redis：conf.redisdb 已分配即算，当前=全部项目）；
 /// registry=全部项目（镜像拉取依赖）。纯读 all_confs。
 pub fn mw_dependents(root: &Path, mw: &str) -> Vec<String> {
     let confs = state::all_confs(root);
@@ -271,6 +271,15 @@ pub fn mw_dependents(root: &Path, mw: &str) -> Vec<String> {
             .filter(|(p, _)| {
                 fs::read_to_string(state::env_path(root, p))
                     .map(|t| t.contains("DB_HOST=sr-postgres"))
+                    .unwrap_or(true) // env 缺失按依赖计（publish 下次会注入）
+            })
+            .map(|(p, _)| p)
+            .collect(),
+        "minoss" => confs
+            .into_iter()
+            .filter(|(p, _)| {
+                fs::read_to_string(state::env_path(root, p))
+                    .map(|t| t.contains("S3_ENDPOINT_URL=http://sr-minoss:9000"))
                     .unwrap_or(true) // env 缺失按依赖计（publish 下次会注入）
             })
             .map(|(p, _)| p)
@@ -286,6 +295,7 @@ fn mw_scope_text(mw: &str) -> &'static str {
         "postgres" => "DB_* 环境变量注入",
         "redis" => "REDIS_* 环境变量注入",
         "registry" => "镜像拉取（registry 推拉依赖）",
+        "minoss" => "S3_* 环境变量注入",
         _ => "平台依赖",
     }
 }
@@ -339,6 +349,7 @@ fn action_touches_mw(a: &setup::Action, mw: &str, root: &Path) -> bool {
         }
         setup::Action::WriteFile { path, .. } => match mw {
             "postgres" => *path == setup::pg_cred_path(root),
+            "minoss" => *path == setup::pg_cred_path(root), // minio 行同住 middleware.cred（plan-22）
             "registry" => *path == state::htpasswd_path(root) || path == Path::new(dockerops::CADDY_FILE),
             _ => false,
         },
@@ -818,7 +829,7 @@ mod tests {
     fn hostenv_parse_defaults() {
         let d = HostEnv::parse("").unwrap();
         assert_eq!(d, HostEnv::default_for(""));
-        assert_eq!(d.middleware, mwset(&["postgres", "redis", "registry"]));
+        assert_eq!(d.middleware, mwset(&["postgres", "redis", "registry", "minoss"]));
         assert!(d.caddy && d.tuning && d.dedup);
         assert_eq!((d.lan_host.as_str(), d.public_host.as_str()), ("", ""));
         assert_eq!(d.frp, FrpMode::None);
@@ -1098,7 +1109,7 @@ mod tests {
         assert!(drift.iter().any(|d| d["item"] == "showroom-api.service"), "{drift:?}");
         assert_eq!(v["redis_pool"]["used"], 27);
         assert_eq!(v["policy"]["REDIS_DBS"], 256);
-        assert_eq!(v["host_env"]["MIDDLEWARE"].as_array().map(Vec::len), Some(3));
+        assert_eq!(v["host_env"]["MIDDLEWARE"].as_array().map(Vec::len), Some(4));
         // FRP=none：frp.tunnel 为 null 且无 tunnel 漂移项
         assert!(v["frp"]["tunnel"].is_null());
         assert!(!drift.iter().any(|d| d["item"] == "tunnel"));
@@ -1164,6 +1175,22 @@ mod tests {
             assert_eq!(mw_dependents(&root, mw), vec!["solo".to_string()], "{mw}");
         }
         assert!(mw_dependents(&root, "mysql").is_empty());
+    }
+
+    // mw_dependents minoss 臂（plan-22）：env 探测 S3_ENDPOINT_URL=http://sr-minoss:9000；
+    // 注入过的算依赖、未注入过的不算、env 缺失按依赖计
+    #[test]
+    fn dependents_minoss_by_env_probe() {
+        let root = troot("deps-s3");
+        put_conf(&root, "with-s3");
+        put_conf(&root, "no-s3");
+        put_conf(&root, "no-env");
+        fs::write(state::env_path(&root, "with-s3"), "DB_HOST=sr-postgres\nS3_ENDPOINT_URL=http://sr-minoss:9000\n").unwrap();
+        fs::write(state::env_path(&root, "no-s3"), "DB_HOST=sr-postgres\nS3_BUCKET=elsewhere\n").unwrap();
+        let deps = mw_dependents(&root, "minoss");
+        assert!(deps.contains(&"with-s3".to_string()), "{deps:?}");
+        assert!(deps.contains(&"no-env".to_string()), "env 缺失按依赖计：{deps:?}");
+        assert!(!deps.contains(&"no-s3".to_string()), "未注入 S3_* 不算依赖：{deps:?}");
     }
 
     // disabled_middleware：全集启用 → 空；去 redis → ["redis"]（§15.2 标注数据源）

@@ -105,7 +105,7 @@ showroom rm-image <USER>/<PROJECT>:<TAG>
 
 ## 5. 数据库维护
 
-每个项目独立供给 PostgreSQL 库（`sr_<PROJECT>`，`-`→`_`）与 Redis 逻辑库，凭据由 publish 自动注入容器（`showroom env` 可查）。**维护入口在发布者手里**（主机侧不经手明文）：CLI `showroom db sql|tables|preview|dump|restore|reset` 或控制台「数据」标签（表清单 → 预览表格 → SQL 编辑器 → 加密备份下载/恢复上传），全部经签名 API，公网可用。
+每个项目独立供给 PostgreSQL 库（`sr_<PROJECT>`，`-`→`_`）、Redis 逻辑库与 S3 桶（minoss 启用时 `sr-<project 小写>`，桶级 IAM 隔离、密钥随发布轮换），凭据由 publish 自动注入容器（`showroom env` 可查）；控制台「数据 → S3 对象」可只读浏览/预览/下载本桶对象（plan-22）。**维护入口在发布者手里**（主机侧不经手明文）：CLI `showroom db sql|tables|preview|dump|restore|reset` 或控制台「数据」标签（表清单 → 预览表格 → SQL 编辑器 → 加密备份下载/恢复上传），全部经签名 API，公网可用。
 
 | 操作 | 命令 / 入口 | 备注 |
 |---|---|---|

@@ -25,7 +25,7 @@ use showroom_common as common;
 
 use crate::dbmaint;
 use crate::state::{self, ApiError, R};
-use crate::{middleware, ops, publish, setup, streams};
+use crate::{middleware, ops, publish, s3, setup, streams};
 
 pub const MAX_JSON_BODY: usize = 1024 * 1024;
 
@@ -771,6 +771,72 @@ async fn dispatch(
             let key = qget(&q, "key")?;
             let (t, ttl_ms, value) = blk(move || ops::redis_get(db, &key)).await?;
             Ok(Json(json!({"type": t, "ttl_ms": ttl_ms, "value": value})))
+        }
+
+        // —— S3 浏览（plan-22 §4）：项目归属门禁同 db-*（user_check）；后端用项目自身
+        // 凭据访问（桶级策略隔离的实证路径）——越权/未供给/minoss 未启用均如实报错 ——
+
+        ("GET", "/_api/s3-objects", _) => {
+            let project = qget(&q, "project")?;
+            state::check_name("project", &project)?;
+            user_check(&s.root, &project, &user)?;
+            let prefix = q.get("prefix").cloned().unwrap_or_default();
+            let root = s.root.clone();
+            let (objects, truncated) = blk(move || s3::list_objects(&root, &project, &prefix)).await?;
+            let list: Vec<serde_json::Value> = objects
+                .into_iter()
+                .map(|o| {
+                    json!({
+                        "name": o.name, "key": o.full_key, "size": o.size,
+                        "last_modified": o.last_modified, "is_dir": o.is_dir,
+                    })
+                })
+                .collect();
+            Ok(Json(json!({"objects": list, "truncated": truncated})))
+        }
+
+        ("GET", "/_api/s3-get", _) => {
+            let project = qget(&q, "project")?;
+            state::check_name("project", &project)?;
+            user_check(&s.root, &project, &user)?;
+            let key = qget(&q, "key")?;
+            let root = s.root.clone();
+            let (size, data) = blk({
+                let k = key.clone();
+                move || s3::get_object(&root, &project, &k, s3::PREVIEW_CAP)
+            })
+            .await?;
+            // 文本能预览则给文本（UTF-8 校验），二进制只给大小与标记
+            match String::from_utf8(data) {
+                Ok(text) => Ok(Json(json!({"key": key, "size": size, "is_text": true, "text": text}))),
+                Err(e) => {
+                    let bytes = e.into_bytes();
+                    let head: String = bytes[..8.min(bytes.len())].iter().map(|b| format!("{b:02x}")).collect();
+                    Ok(Json(json!({
+                        "key": key, "size": size, "is_text": false,
+                        "note": "二进制对象（预览不可用，可下载）",
+                        "prefix_hex": head,
+                    })))
+                }
+            }
+        }
+
+        ("GET", "/_api/s3-download", _) => {
+            let project = qget(&q, "project")?;
+            state::check_name("project", &project)?;
+            user_check(&s.root, &project, &user)?;
+            let key = qget(&q, "key")?;
+            let root = s.root.clone();
+            let (size, data) = blk({
+                let k = key.clone();
+                move || s3::get_object(&root, &project, &k, s3::DOWNLOAD_CAP)
+            })
+            .await?;
+            use base64::Engine;
+            Ok(Json(json!({
+                "key": key, "size": size,
+                "content_b64": base64::engine::general_purpose::STANDARD.encode(data),
+            })))
         }
 
         ("GET", "/_api/logs", _) => {
@@ -1767,7 +1833,7 @@ mod tests {
         // 不落盘：字节不变
         assert_eq!(std::fs::read(crate::middleware::host_env_path(&root)).unwrap(), before, "无 confirm 不落盘");
         assert_eq!(v["confirm_required"], true);
-        assert_eq!(v["impact"]["removed_middleware"], serde_json::json!(["redis"]));
+        assert_eq!(v["impact"]["removed_middleware"], serde_json::json!(["minoss", "redis"]));
         let affected = v["impact"]["affected_projects"].as_array().unwrap().clone();
         assert!(affected.iter().any(|x| x == "demo1") && affected.iter().any(|x| x == "demo2"), "{affected:?}");
         // 预演返回 diff 同构 actions（含将写的 host.env）
