@@ -124,16 +124,10 @@ pub fn redis_get_query(db: u8, key: &str) -> String {
     format!("/_api/redis-get?db={db}&key={}", urlencode(key))
 }
 
-/// 查询串百分号编码（对象键含 / 与 . 等，须转义）
+/// 查询串百分号编码（对象键含 / 与 . 等，须转义；form_urlencoded::byte_serialize
+/// 是 RFC3986 application/x-www-form-urlencoded 序列化，仓库先例 B10 同款）。
 fn urlencode(s: &str) -> String {
-    let mut out = String::with_capacity(s.len());
-    for b in s.bytes() {
-        match b {
-            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => out.push(b as char),
-            _ => out.push_str(&format!("%{b:02X}")),
-        }
-    }
-    out
+    form_urlencoded::byte_serialize(s.as_bytes()).collect()
 }
 
 // —— 错误 ——

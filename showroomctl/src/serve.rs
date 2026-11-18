@@ -28,6 +28,8 @@ use crate::state::{self, ApiError, R};
 use crate::{middleware, ops, publish, s3, setup, streams};
 
 pub const MAX_JSON_BODY: usize = 1024 * 1024;
+/// s3-put 的 JSON body 帽（8MB 对象 × base64 4/3 + 转义余量；与下载对称的上限契约）。
+pub const S3_PUT_JSON_CAP: usize = 12 * 1024 * 1024;
 
 pub struct AppState {
     pub root: PathBuf,
@@ -177,7 +179,10 @@ async fn api_inner(s: &S, method: &Method, uri: &OriginalUri, headers: &HeaderMa
     let path = uri.path().to_string();
     let to_file = method == Method::POST
         && matches!(path.as_str(), "/_api/import" | "/_api/import-chunk" | "/_api/db-restore");
-    let (sha, collected) = collect_body(&s.root, body, to_file).await?;
+    // s3-put 单列大 JSON 帽：8MB 二进制 base64(4/3)≈10.7MB + JSON 转义余量（评审 P1：
+    // 全局 1MB 帽曾使 SPEC §10.5 的 8MB 上传契约不可达）
+    let big_json = method == Method::POST && path == "/_api/s3-put";
+    let (sha, collected) = collect_body(&s.root, body, to_file, big_json).await?;
     // _tmp 落盘文件的兜底清理：验签失败/名字校验拒绝等任何提前返回都不留尸体
     //（import/import_chunk 正常路径自删；remove 幂等，二次删除 NotFound 忽略）
     let tmp_file = if let Collected::File(p) = &collected { Some(p.clone()) } else { None };
@@ -215,7 +220,9 @@ async fn dispatch(
     // 一切端点先验签（含未知路径/方法；SPEC §3 零信息暴露）
     let Verified { user, kid } = auth(s, method.as_str(), &uri_str(uri), sha, headers).await?;
     if matches!(collected, Collected::Overflow) {
-        return Err(ApiError::new("E_QUOTA", "body exceeds limit (json 1MB / import IMPORT_MAX_GB)"));
+        // 文案按实际 cap 通道（s3-put 单列 12MB；其余 JSON 1MB / import 落盘 GB 级）
+        let scope = if path == "/_api/s3-put" { "s3-put 12MB" } else { "json 1MB" };
+        return Err(ApiError::new("E_QUOTA", format!("body exceeds limit ({scope} / import IMPORT_MAX_GB)")));
     }
     let q = qmap(uri);
     // —— 工具分发（控制台内下载）：GET /_api/tool/<filename> ——
@@ -801,38 +808,24 @@ async fn dispatch(
             user_check(&s.root, &project, &user)?;
             let key = qget(&q, "key")?;
             let root = s.root.clone();
-            let project2 = project.clone();
-            // 先 stat：超过预览上限的大对象不整读，返回元数据+友好说明（UI 展示提示而非报错）
-            let size = blk({
+            // read_object 内部 stat 单跑：超限 Err(size) 给友好说明（不整读大对象）
+            let r = blk({
                 let k = key.clone();
-                move || s3::stat_object(&root, &project, &k)
+                move || s3::read_object(&root, &project, &k, s3::PREVIEW_CAP)
             })
             .await?;
-            if size > s3::PREVIEW_CAP {
-                Ok(Json(json!({
+            match r {
+                Err(size) => Ok(Json(json!({
                     "key": key, "size": size, "is_text": false,
                     "note": "文件超过预览上限（64 KB）；8 MB 内可下载，更大请在项目容器内用 S3_* 环境变量直取",
-                })))
-            } else {
-                let root = s.root.clone();
-                let (size, data) = blk({
-                    let k = key.clone();
-                    move || s3::get_object(&root, &project2, &k, s3::PREVIEW_CAP)
-                })
-                .await?;
-                // 文本能预览则给文本（UTF-8 校验），二进制只给大小与标记
-                match String::from_utf8(data) {
+                }))),
+                Ok((size, data)) => match String::from_utf8(data) {
                     Ok(text) => Ok(Json(json!({"key": key, "size": size, "is_text": true, "text": text}))),
-                    Err(e) => {
-                        let bytes = e.into_bytes();
-                        let head: String = bytes[..8.min(bytes.len())].iter().map(|b| format!("{b:02x}")).collect();
-                        Ok(Json(json!({
-                            "key": key, "size": size, "is_text": false,
-                            "note": "二进制对象（预览不可用，可下载）",
-                            "prefix_hex": head,
-                        })))
-                    }
-                }
+                    Err(_) => Ok(Json(json!({
+                        "key": key, "size": size, "is_text": false,
+                        "note": "二进制对象（预览不可用，可下载）",
+                    }))),
+                },
             }
         }
 
@@ -842,11 +835,17 @@ async fn dispatch(
             user_check(&s.root, &project, &user)?;
             let key = qget(&q, "key")?;
             let root = s.root.clone();
-            let (size, data) = blk({
+            let r = blk({
                 let k = key.clone();
-                move || s3::get_object(&root, &project, &k, s3::DOWNLOAD_CAP)
+                move || s3::read_object(&root, &project, &k, s3::TRANSFER_CAP)
             })
             .await?;
+            let (size, data) = r.map_err(|size| {
+                ApiError::state(format!(
+                    "对象 {key}（{size} 字节）超过单次响应上限 {} 字节；大文件请在项目容器内用 S3_* 环境变量直取",
+                    s3::TRANSFER_CAP
+                ))
+            })?;
             use base64::Engine;
             Ok(Json(json!({
                 "key": key, "size": size,
@@ -865,13 +864,6 @@ async fn dispatch(
             let data = base64::engine::general_purpose::STANDARD
                 .decode(&req.content_b64)
                 .map_err(|e| ApiError::new("E_NAME", format!("content_b64 非法: {e}")))?;
-            if data.len() as u64 > s3::DOWNLOAD_CAP {
-                return Err(ApiError::state(format!(
-                    "上传内容 {} 字节超过单次上限 {} 字节；大文件请在项目容器内用 S3_* 环境变量直传",
-                    data.len(),
-                    s3::DOWNLOAD_CAP
-                )));
-            }
             let root = s.root.clone();
             let key_echo = req.key.clone();
             let (project, key) = (req.project, req.key);
@@ -960,9 +952,11 @@ enum Collected {
     Overflow,
 }
 
-async fn collect_body(root: &Path, body: Body, to_file: bool) -> R<(String, Collected)> {
+async fn collect_body(root: &Path, body: Body, to_file: bool, big_json: bool) -> R<(String, Collected)> {
     let cap: u64 = if to_file {
         state::Policy::load(root).import_cap_bytes()
+    } else if big_json {
+        S3_PUT_JSON_CAP as u64
     } else {
         MAX_JSON_BODY as u64
     };

@@ -63,14 +63,16 @@ S3_ACCESS_KEY_ID=<访问键>   S3_SECRET_ACCESS_KEY=<密钥>   S3_BUCKET=<桶>
   （`mc ls --json` 非递归一层，目录行下钻）、预览 64KB（UTF-8 校验，二进制给标记）、
   下载 8MB（base64 JSON，超出 E_STATE 提示容器内直取）。
   前缀/对象键白名单 `^[A-Za-z0-9._/-]+$`（脚本拼接与路径歧义双防）。
-- 控制台：Data 页第三 tab「S3 对象」——前缀输入/上一级/目录下钻/文件预览/下载，
-  只读（不做上传删除）；ENV_DESC 增 4 键、S3 密钥与 DB_PASSWORD 同款打码点显、
-  Help「中间件连接」补 S3 行与 SDK 用法（region us-east-1 + path-style）、Admin
-  中间件面板增 minoss 开关。
+- 控制台：Data 页第三 tab「OSS」——前缀输入/上一级/目录下钻/文件预览/下载/上传/删除
+  （2026-11-18 用户裁决补写路径：上传=查询行按钮、删除=行内 ✕+确认弹窗；列表限高滚动
+  h-64）；ENV_DESC 增 4 键、S3 密钥与 DB_PASSWORD 同款打码点显、Help「中间件连接」补
+  S3 行与 SDK 用法（region us-east-1 + path-style）、Admin 中间件面板增 minoss 开关。
+- CLI（与控制台对齐，2026-11-18 用户裁决）：`oss ls/cat/get/put/rm`（put 键=文件路径
+  保留目录结构、rm --yes 守门）+ `redis dbs/keys/get` + `versions`/`rollback --version`。
 
 ## 5. 边界与非目标
 
 - 不映射公网/主机端口；Console 9001 仅内网（运维需主机内上下文时走容器网络）。
-- 上传/删除/桶策略编辑不在控制台范围（应用用 S3_* 凭据直连；CLI 后续按需立项）。
+- 桶策略编辑不在范围（应用用 S3_* 凭据直连）；上传/删除已于 2026-11-18 落地（上文 §4）。
 - 服务间依赖/启动顺序不做（对齐 plan-19 v1 边界：DNS 自愈+应用重连）。
 - 大对象（>8MB）不经控制台下载；mc 镜像版本随 release 钉死。

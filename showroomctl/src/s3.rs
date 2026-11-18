@@ -1,4 +1,4 @@
-//! s3：minoss 中间件（plan-22）——每项目桶/密钥供给、拆除与只读浏览。
+//! s3：minoss 中间件（plan-22）——每项目桶/密钥供给、拆除与浏览读写。
 //! 一切外部交互走 `docker exec -i sr-minoss sh -c <脚本>`（镜像内置 mc）：
 //! 凭据恒走 stdin 行喂入、argv 只含派生名与常量脚本（与 psql SQL 走 stdin 同款纪律，
 //! 宿主 ps 命令行零凭据）；浏览用项目自身凭据（桶级策略隔离的实证路径）。
@@ -16,8 +16,8 @@ const CTR: &str = "sr-minoss";
 
 /// 对象预览上限（文本截断阈值；plan-22 §4）。
 pub const PREVIEW_CAP: u64 = 64 * 1024;
-/// 对象下载上限（base64 JSON 单响应体积边界；超出提示走 CLI/mc）。
-pub const DOWNLOAD_CAP: u64 = 8 * 1024 * 1024;
+/// 对象传输上限（上传/下载对称；base64 JSON 单请求体积边界，超出提示容器内直取）。
+pub const TRANSFER_CAP: u64 = 8 * 1024 * 1024;
 /// 单次列目录上限（mc ls 无 limit 参数，读满后截断并标记）。
 const LIST_CAP: usize = 500;
 
@@ -37,16 +37,22 @@ pub fn policy_json(bucket: &str) -> String {
 /// 路径歧义；空串/控制字符/其它 Unicode 拒绝——平台内对象键按此子集约定）。
 pub fn check_mc_path(kind: &str, s: &str) -> R<()> {
     let ok = !s.is_empty()
-        && s.len() <= 512
         && s.chars().all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '-' | '/'));
     if ok {
         Ok(())
     } else {
-        Err(ApiError::new(
-            "E_NAME",
-            format!("{kind} 仅允许字母数字与 . _ - /（≤512 字符）"),
-        ))
+        Err(ApiError::new("E_NAME", format!("{kind} 仅允许字母数字与 . _ - /")))
     }
+}
+
+/// 对象键校验：白名单 + 不得以 / 结尾（目录由对象隐式构成；读/写/删统一，
+/// SPEC §10.5「键不得以 / 结尾」此前仅写路径强制——读路径尾斜杠应 E_NAME 非 E_NOTFOUND）。
+fn check_object_key(key: &str) -> R<()> {
+    check_mc_path("对象键", key)?;
+    if key.ends_with('/') {
+        return Err(ApiError::new("E_NAME", "对象键不得以 / 结尾（目录由对象隐式构成）"));
+    }
+    Ok(())
 }
 
 /// 列表条目（serve 直接 json!；full_key=桶内完整键，UI 无需拼接）。
@@ -60,27 +66,21 @@ pub struct ObjEntry {
 
 // —— 执行底座（凭据走 stdin）——
 
-/// `docker exec -i sr-minoss sh -c <script>`：script 由调用方以派生名拼好（无秘密），
-/// stdin 为凭据行；失败 E_STATE 附 stderr 尾部。
-fn exec_mc(script: &str, stdin_lines: &str, what: &str) -> R<String> {
-    let (ok, out, err) = dockerops::exec_stdin(CTR, &["sh", "-c", script], stdin_lines.as_bytes())?;
-    if ok {
-        Ok(String::from_utf8_lossy(&out).to_string())
-    } else {
-        let tail = dockerops::tail_lines(&String::from_utf8_lossy(&err), 5);
-        Err(ApiError::state(format!("minoss {what} failed: {tail}")))
-    }
-}
-
-/// 同 exec_mc，但要二进制 stdout（mc cat 原始对象内容）。
-fn exec_mc_bytes(script: &str, stdin_lines: &str, what: &str) -> R<Vec<u8>> {
-    let (ok, out, err) = dockerops::exec_stdin(CTR, &["sh", "-c", script], stdin_lines.as_bytes())?;
+/// 二进制底座（mc cat 原始内容 / mc pipe 数据流）；exec_mc 为其 lossy 文本包装。
+/// script 由调用方以派生名拼好（无秘密），stdin 为凭据行；失败 E_STATE 附 stderr 尾部。
+fn exec_mc_bytes(script: &str, stdin_data: &[u8], what: &str) -> R<Vec<u8>> {
+    let (ok, out, err) = dockerops::exec_stdin(CTR, &["sh", "-c", script], stdin_data)?;
     if ok {
         Ok(out)
     } else {
         let tail = dockerops::tail_lines(&String::from_utf8_lossy(&err), 5);
         Err(ApiError::state(format!("minoss {what} failed: {tail}")))
     }
+}
+
+fn exec_mc(script: &str, stdin_lines: &str, what: &str) -> R<String> {
+    exec_mc_bytes(script, stdin_lines.as_bytes(), what)
+        .map(|b| String::from_utf8_lossy(&b).to_string())
 }
 
 fn minio_creds_or_err(root: &Path) -> R<(String, String)> {
@@ -207,7 +207,7 @@ pub fn list_objects(root: &Path, project: &str, prefix: &str) -> R<(Vec<ObjEntry
 /// 对象元数据（stat）：返回 size。预览超限时 serve 只取元数据做友好提示（不整读大对象）。
 /// mc 的 `mc: <ERROR>` 走 stdout（实测），脚本内 2>&1 合并后统一在 stdout 判不存在 → E_NOTFOUND。
 pub fn stat_object(root: &Path, project: &str, key: &str) -> R<u64> {
-    check_mc_path("对象键", key)?;
+    check_object_key(key)?;
     let (ak, sk, bucket) = project_creds(root, project)?;
     let creds = format!("{ak}\n{sk}\n");
     let script = format!(
@@ -234,36 +234,34 @@ pub fn stat_object(root: &Path, project: &str, key: &str) -> R<u64> {
         .ok_or_else(|| ApiError::new("E_NOTFOUND", format!("对象不存在或不可读: {key}")))
 }
 
-/// 取对象：先 stat 后 cat（超限拒绝，防大对象整读进内存）。
-/// 返回 (size, 内容字节)；cap 由调用方给（预览 64KB / 下载 8MB）。
-pub fn get_object(root: &Path, project: &str, key: &str, cap: u64) -> R<(u64, Vec<u8>)> {
+/// 读对象（预览/下载共用）：先 stat 防大对象整读，超限返回 Err(size)（超限策略的
+/// 呈现归调用方——serve 预览给友好 note、下载报 E_STATE；stat 只跑一次）。
+pub fn read_object(root: &Path, project: &str, key: &str, cap: u64) -> R<Result<(u64, Vec<u8>), u64>> {
     let size = stat_object(root, project, key)?;
     if size > cap {
-        return Err(ApiError::state(format!(
-            "对象 {key}（{} 字节）超过单次响应上限 {} 字节；大文件请在项目容器内用 S3_* 环境变量直取",
-            size, cap
-        )));
+        return Ok(Err(size));
     }
     let (ak, sk, bucket) = project_creds(root, project)?;
     let creds = format!("{ak}\n{sk}\n");
-    let data = exec_mc_bytes(
-        &format!(
-            "read -r AK; read -r SK\n\
-             export MC_HOST_p=\"http://$AK:$SK@127.0.0.1:9000\"\n\
-             mc cat p/{bucket}/{key}\n"
-        ),
-        &creds,
-        "cat",
-    )?;
-    Ok((size, data))
+    let script = format!(
+        "read -r AK; read -r SK\n\
+         export MC_HOST_p=\"http://$AK:$SK@127.0.0.1:9000\"\n\
+         mc cat p/{bucket}/{key}\n"
+    );
+    let data = exec_mc_bytes(&script, creds.as_bytes(), "cat")?;
+    Ok(Ok((size, data)))
 }
 
 /// 上传对象（serve s3-put 调用）：数据走 stdin 喂 mc pipe（凭据 stdin 首两行；argv 零数据零秘密）。
-/// 覆盖语义=S3 PUT 原子替换同 key。返回写入字节数。
+/// 覆盖语义=S3 PUT 原子替换同 key；上限 TRANSFER_CAP 在此收口（serve/CLI 不再各自检查）。
 pub fn put_object(root: &Path, project: &str, key: &str, data: &[u8]) -> R<u64> {
-    check_mc_path("对象键", key)?;
-    if key.ends_with('/') {
-        return Err(ApiError::new("E_NAME", "对象键不得以 / 结尾（目录由对象隐式构成）"));
+    check_object_key(key)?;
+    if data.len() as u64 > TRANSFER_CAP {
+        return Err(ApiError::state(format!(
+            "上传内容 {} 字节超过单次上限 {} 字节；大文件请在项目容器内用 S3_* 环境变量直传",
+            data.len(),
+            TRANSFER_CAP
+        )));
     }
     let (ak, sk, bucket) = project_creds(root, project)?;
     let creds = format!("{ak}\n{sk}\n");
@@ -287,10 +285,7 @@ pub fn put_object(root: &Path, project: &str, key: &str, data: &[u8]) -> R<u64> 
 /// 删除单个对象（serve s3-rm 调用）；不存在时报 E_NOTFOUND（幂等删除由调用方决定语义——
 /// 浏览场景点名删除，删错要可见）。存在性复用 stat_object（同款 E_NOTFOUND 语义）。
 pub fn rm_object(root: &Path, project: &str, key: &str) -> R<()> {
-    check_mc_path("对象键", key)?;
-    if key.ends_with('/') {
-        return Err(ApiError::new("E_NAME", "目录不能直接删除（删除其下全部对象后自动消失）"));
-    }
+    check_object_key(key)?;
     let _size = stat_object(root, project, key)?; // 不存在 → E_NOTFOUND
     let (ak, sk, bucket) = project_creds(root, project)?;
     let creds = format!("{ak}\n{sk}\n");
@@ -328,23 +323,20 @@ mod tests {
         assert!(check_mc_path("k", "a b").is_err(), "空格拒绝（注入面）");
         assert!(check_mc_path("k", "a;rm").is_err(), "分号拒绝");
         assert!(check_mc_path("k", "键值").is_err(), "非 ASCII 拒绝");
-        assert!(check_mc_path("k", &"x".repeat(513)).is_err(), "超长拒绝");
         // 单引号/美元——脚本拼接的第二道防线
         assert!(check_mc_path("k", "it's").is_err());
+        // 对象键尾斜杠统一 E_NAME（读/写/删；前缀可尾 /）
+        assert!(check_object_key("dir/").is_err());
+        assert!(check_object_key("dir/file").is_ok());
         assert!(check_mc_path("k", "$HOME").is_err());
     }
 
     #[test]
-    fn provision_script_carries_no_secrets_in_argv() {
-        // 脚本由派生名拼成：root 凭据与新密钥只出现在 stdin 三行（函数内构造）。
-        // 此处以纯函数方式断言脚本模板不含凭据占位（ru/rp/sk 变量名只出现在 read 行之后）。
-        let script = "set -e\nread -r U; read -r P; read -r SK\nexport MC_HOST_admin=\"http://$U:$P@127.0.0.1:9000\"\nmc admin user add admin srabc123 \"$SK\"\n";
-        assert!(script.contains("read -r U"));
-        assert!(!script.contains("showroom:"), "凭据值不得内联");
-        // 命名派生一致性（与 state.rs 单测互证）
+    fn naming_derivations_consistent() {
         assert_eq!(state::s3_bucket_ident("Demo-9"), "sr-demo-9");
         assert_eq!(state::s3_access_key("demo").len(), 18);
         assert!(state::s3_access_key("demo").starts_with("sr"));
         assert!(state::s3_access_key("demo").chars().all(|c| c.is_ascii_alphanumeric()));
+        assert_ne!(state::s3_access_key("Demo-9"), state::s3_access_key("demo-9"), "大小写不同的项目访问键不撞");
     }
 }

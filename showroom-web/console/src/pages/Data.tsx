@@ -23,6 +23,7 @@ import { cn } from "cn";
 import { toast } from "sonner";
 import { api, apiDo, respErr } from "@/lib/api";
 import { useApp, apiFailToast } from "@/lib/app";
+import { bytesToB64 } from "@/lib/bytes";
 import { checkProj, DUMP_CHUNK, pemReady, platformPem } from "@/lib/state";
 import { openSession, oneTimeRsaPemPair, sealToEnvelope, uploadPayload } from "@/lib/envelope";
 import { parseCsv, splitSql } from "@/lib/sql";
@@ -392,11 +393,8 @@ export function Data({ onOpenSettings }: { onOpenSettings: () => void }) {
     setUpBusy(true);
     try {
       const buf = new Uint8Array(await file.arrayBuffer());
-      let bin = "";
-      const CH = 0x8000;
-      for (let i = 0; i < buf.length; i += CH) bin += String.fromCharCode(...buf.subarray(i, i + CH));
       const key = (s3Prefix ? s3Prefix : "") + file.name;
-      await api("POST", "/_api/s3-put", { project: dbProject, key, content_b64: btoa(bin) });
+      await api("POST", "/_api/s3-put", { project: dbProject, key, content_b64: bytesToB64(buf) });
       toast.success(`已上传 ${key}（${fmtSize(file.size)}）`);
       void queryS3For(s3Prefix);
     } catch (e) {

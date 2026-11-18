@@ -6,6 +6,7 @@ use std::fs;
 use std::io::Write;
 use std::path::{Path, PathBuf};
 
+use base64::Engine as _;
 use clap::Subcommand;
 
 use showroom_common::names::check_project;
@@ -144,7 +145,7 @@ fn get(
     let b64 = v["content_b64"]
         .as_str()
         .ok_or("响应缺少内容（对象超下载上限或不存在）")?;
-    let data = b64_decode(b64)?;
+    let data = base64::engine::general_purpose::STANDARD.decode(b64).map_err(|e| format!("content_b64 非法: {e}"))?;
     let name = key.rsplit('/').next().unwrap_or(key);
     if stdout {
         std::io::stdout().write_all(&data).map_err(|e| format!("写 stdout 失败: {e}"))?;
@@ -158,17 +159,10 @@ fn get(
 }
 
 /// 标准 base64 解码（无外部依赖：字母表查表）
-/// 上传实现：读文件→校验 8MB→base64 编码→POST s3-put
+/// 上传实现：读文件→base64→POST s3-put（8MB 上限由服务端收口，超限 E_STATE 原样透出）
 fn put(cfg: &Config, force: Option<Which>, project: &str, file: &Path) -> Result<(), String> {
     check_project(project)?;
     let data = fs::read(file).map_err(|e| format!("读取 {} 失败: {e}", file.display()))?;
-    if data.len() > 8 * 1024 * 1024 {
-        return Err(format!(
-            "文件 {}（{}）超过上传上限（8 MB），请在项目容器内用 S3_* 环境变量直传",
-            file.display(),
-            fmt_size(data.len() as u64)
-        ));
-    }
     // 对象键=去首段 ./ 与绝对路径，保留目录结构（与控制台上传语义一致：文件路径即键）
     let key = file
         .components()
@@ -182,7 +176,7 @@ fn put(cfg: &Config, force: Option<Which>, project: &str, file: &Path) -> Result
     let api = Api::connect(cfg, force)?;
     let v = api.signed_post_json(
         "/_api/s3-put",
-        &serde_json::json!({ "project": project, "key": key, "content_b64": b64_encode(&data) }),
+        &serde_json::json!({ "project": project, "key": key, "content_b64": base64::engine::general_purpose::STANDARD.encode(&data) }),
     )?;
     println!(
         "已上传 {} → {}（{}）",
@@ -205,96 +199,10 @@ fn rm(cfg: &Config, force: Option<Which>, project: &str, key: &str, yes: bool) -
     Ok(())
 }
 
-/// 标准 base64 编码（无外部依赖）
-fn b64_encode(data: &[u8]) -> String {
-    const TBL: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
-    let mut out = String::with_capacity(data.len().div_ceil(3) * 4);
-    for chunk in data.chunks(3) {
-        let b = [chunk[0], *chunk.get(1).unwrap_or(&0), *chunk.get(2).unwrap_or(&0)];
-        let n = ((b[0] as u32) << 16) | ((b[1] as u32) << 8) | b[2] as u32;
-        let group = [(n >> 18) & 63, (n >> 12) & 63, (n >> 6) & 63, n & 63];
-        let full: String = group.iter().map(|&i| TBL[i as usize] as char).collect();
-        match chunk.len() {
-            1 => out.push_str(&full[..2]),
-            2 => out.push_str(&full[..3]),
-            _ => out.push_str(&full),
-        }
-    }
-    match data.len() % 3 {
-        1 => out.push_str("=="),
-        2 => out.push('='),
-        _ => {}
-    }
-    out
-}
-
-fn b64_decode(s: &str) -> Result<Vec<u8>, String> {
-    const TBL: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
-    let mut rev = [255u8; 256];
-    for (i, &c) in TBL.iter().enumerate() {
-        rev[c as usize] = i as u8;
-    }
-    let bytes: Vec<u8> = s.bytes().filter(|&b| b != b'=' && b != b'\n' && b != b'\r').collect();
-    if bytes.len() % 4 == 1 {
-        return Err("base64 长度非法".into());
-    }
-    let mut out = Vec::with_capacity(bytes.len() / 4 * 3);
-    for chunk in bytes.chunks(4) {
-        let mut n: u32 = 0;
-        for (i, &b) in chunk.iter().enumerate() {
-            let v = rev[b as usize];
-            if v == 255 {
-                return Err(format!("base64 非法字符: {:?}", b as char));
-            }
-            n |= (v as u32) << (18 - i * 6);
-        }
-        out.push((n >> 16) as u8);
-        if chunk.len() > 2 {
-            out.push((n >> 8) as u8);
-        }
-        if chunk.len() > 3 {
-            out.push(n as u8);
-        }
-    }
-    Ok(out)
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    #[test]
-    fn b64_roundtrip_known_vectors() {
-        assert_eq!(b64_decode("").unwrap(), b"");
-        assert_eq!(b64_decode("YQ==").unwrap(), b"a");
-        assert_eq!(b64_decode("YWI=").unwrap(), b"ab");
-        assert_eq!(b64_decode("YWJj").unwrap(), b"abc");
-        assert_eq!(b64_decode("YWJjZA==").unwrap(), b"abcd");
-        // 二进制全字节域
-        let all: Vec<u8> = (0u16..=255).map(|i| i as u8).collect();
-        let enc = {
-            // 就地编码（RFC 4648 标准字母表）
-            const TBL: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
-            all.chunks(3).map(|c| {
-                let b = [c[0], *c.get(1).unwrap_or(&0), *c.get(2).unwrap_or(&0)];
-                let n = ((b[0] as u32) << 16) | ((b[1] as u32) << 8) | b[2] as u32;
-                let s: String = [n >> 18 & 63, n >> 12 & 63, n >> 6 & 63, n & 63]
-                    .iter().map(|&i| TBL[i as usize] as char).collect();
-                match c.len() { 1 => s[..2].to_string() + "==", 2 => s[..3].to_string() + "=", _ => s }
-            }).collect::<String>()
-        };
-        assert_eq!(b64_decode(&enc).unwrap(), all);
-        assert!(b64_decode("!!!").is_err());
-    }
-
-    #[test]
-    fn b64_encode_matches_decode_roundtrip() {
-        for data in [&b""[..], &b"a"[..], &b"ab"[..], &b"abc"[..], &b"abcd"[..]] {
-            assert_eq!(b64_decode(&b64_encode(data)).unwrap(), data.to_vec());
-        }
-        let all: Vec<u8> = (0u16..=255).map(|i| i as u8).collect();
-        assert_eq!(b64_decode(&b64_encode(&all)).unwrap(), all);
-    }
 
     #[test]
     fn mtime_shorten() {

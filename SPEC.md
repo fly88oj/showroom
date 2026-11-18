@@ -235,11 +235,11 @@ UI 与信息架构由 §17 定义（五标签：我的项目/发布/镜像库/�
 ### 10.5 OSS 浏览与读写（plan-22；读=browse，写=put/rm）
 - 端点（全部 `[签名+user_check 项目归属]`；后端用**项目自身凭据**访问——桶级策略隔离的实证路径）：
   - `GET /_api/s3-objects ?project=&prefix=` → `{objects:[{name,key,size,last_modified,is_dir}],truncated}`（`mc ls --json` 非递归一层；文件夹行 key 带 `/` 结尾供下钻；单次 500 条截断）
-  - `GET /_api/s3-get ?project=&key=` → `{key,size,is_text,text?|note}`（文本预览 ≤64KB，UTF-8 校验；二进制给 note+prefix_hex）
+  - `GET /_api/s3-get ?project=&key=` → `{key,size,is_text,text?|note}`（文本预览 ≤64KB，UTF-8 校验；二进制/超限给 note）
   - `GET /_api/s3-download ?project=&key=` → `{key,size,content_b64}`（≤8MB；超出 E_STATE 提示容器内直取）
-  - `POST /_api/s3-put {project,key,content_b64}` → `{key,size}`（覆盖式 PUT，≤8MB 与下载对称；文件名即键落到当前前缀下）
+  - `POST /_api/s3-put {project,key,content_b64}` → `{key,size}`（覆盖式 PUT，≤8MB 与下载对称——8MB 在 s3::put_object 收口、JSON body 单列 12MB 帽；文件名即键落到当前前缀下）
   - `POST /_api/s3-rm {project,key}` → `{ok,key}`（单对象点名删除；不存在 E_NOTFOUND；目录不可直接删——其下全部对象删除后自动消失）
-- 前缀/对象键白名单 `^[A-Za-z0-9._/-]+$`（≤512 字符，E_NAME 越界拒绝——脚本拼接与路径歧义双防；键不得以 / 结尾）。
+- 前缀/对象键白名单 `^[A-Za-z0-9._/-]+$`（E_NAME 越界拒绝——脚本拼接与路径歧义双防；对象键读/写/删统一不得以 / 结尾，前缀可尾 /）。
 - minoss 禁用或项目未注入 S3_*（禁用期发布）→ E_STATE 如实报错；控制台「数据 → OSS」浏览/预览/下载/上传/删除（删除=按钮+确认），CLI `oss ls/cat/get/put/rm` 对齐（put 的对象键取文件路径，rm 需 --yes）。
 
 ## 11. 无槽位（slot）模型
