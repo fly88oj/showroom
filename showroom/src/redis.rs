@@ -44,7 +44,7 @@ fn dbs(cfg: &Config, force: Option<Which>) -> Result<(), String> {
         if named.is_empty() {
             println!("（您名下暂无可浏览的项目——发布项目后自动出现）");
         } else {
-            println!("{:<5} {}", "DB", "PROJECT");
+            println!("{:<5} PROJECT", "DB");
             for e in named {
                 println!("{:<5} {}", e["db"].as_u64().unwrap_or(0), e["project"].as_str().unwrap_or("?"));
             }

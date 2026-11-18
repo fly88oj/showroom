@@ -69,7 +69,7 @@ fn ls(cfg: &Config, force: Option<Which>, project: &str, prefix: Option<&str>) -
             println!("（无对象）");
         } else {
             // 对齐 ps 风格的定宽表头；mtime 取 ISO 串的日期+时分（秒截断降噪）
-            println!("{:<40} {:>10}  {}", "KEY", "SIZE", "MODIFIED");
+            println!("{:<40} {:>10}  MODIFIED", "KEY", "SIZE");
             for o in list {
                 let name = o["name"].as_str().unwrap_or("?");
                 let is_dir = o["is_dir"].as_bool().unwrap_or(false);
