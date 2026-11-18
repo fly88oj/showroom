@@ -150,9 +150,16 @@ enum Cmd {
     Env {
         project: String,
     },
-    /// 回滚到上一个 tag
+    /// 列出发布版本历史（版本/时间/镜像是否在库/配置快照摘要；配合 rollback --version）
+    Versions {
+        project: String,
+    },
+    /// 回滚（缺省上一版本；--version 指定任意历史版本，可用 versions 查看）
     Rollback {
         project: String,
+        /// 目标版本（如 v3；缺省回滚上一版本）
+        #[arg(long)]
+        version: Option<String>,
     },
     /// 停止展项
     Stop {
@@ -370,8 +377,21 @@ showroom db reset <项目> --confirm                    # 清库重建（破坏�
             logs_cmd(&cfg, cli.server, project, svc.as_deref(), *tail, *follow)
         }
         Cmd::Env { project } => env_cmd(&cfg, cli.server, project),
-        Cmd::Rollback { project } => {
-            project_action(&cfg, cli.server, "/_api/rollback", project)
+        Cmd::Versions { project } => versions_cmd(&cfg, cli.server, project),
+        Cmd::Rollback { project, version } => {
+            check_project(project.as_str())?;
+            let api = Api::connect(&cfg, cli.server)?;
+            let v = api.signed_post_json(
+                "/_api/rollback",
+                &json!({ "project": project, "version": version }),
+            )?;
+            println!("ok");
+            for key in ["msg", "url"] {
+                if let Some(s) = v[key].as_str().filter(|s| !s.is_empty()) {
+                    println!("{key}: {s}");
+                }
+            }
+            Ok(())
         }
         Cmd::Stop { project } => project_action(&cfg, cli.server, "/_api/stop", project),
         Cmd::Start { project } => project_action(&cfg, cli.server, "/_api/start", project),
@@ -966,6 +986,74 @@ fn project_action(
     Ok(())
 }
 
+// ———— versions（与控制台回滚弹窗同端点：版本/时间/镜像在库/配置快照摘要）————
+
+fn versions_cmd(cfg: &Config, force: Option<Which>, project: &str) -> Result<(), String> {
+    check_project(project)?;
+    let api = Api::connect(cfg, force)?;
+    let v = api.signed_get(&format!("/_api/versions?project={project}"))?;
+    if let Some(cur) = v["current"].as_str() {
+        println!("当前版本: {cur}");
+    }
+    if let Some(list) = v["versions"].as_array() {
+        if list.is_empty() {
+            println!("（无发布历史——升版前老项目）");
+        } else {
+            println!("{:<8} {:<16} {:<6} SNAPSHOT", "VERSION", "TIME", "IMAGE");
+            for r in list {
+                let ver = r["version"].as_str().unwrap_or("?");
+                let time = r["time"].as_u64().unwrap_or(0);
+                let time_s = if time > 0 {
+                    // unix → UTC 日期时间（不引依赖：展示用途）
+                    chrono_like(time)
+                } else {
+                    "-".to_string()
+                };
+                let img = match r["imagePresent"].as_bool() {
+                    Some(true) => "yes",
+                    Some(false) => "no",
+                    None => "?",
+                };
+                let snap = match r["hasSnapshot"].as_bool() {
+                    Some(true) => {
+                        let svcs = r["services"].as_array().map(|a| a.len()).unwrap_or(0);
+                        let env = r["envCount"].as_u64().unwrap_or(0);
+                        format!("{} 服务 · {} 变量", svcs, env)
+                    }
+                    _ => "按当前配置".to_string(),
+                };
+                println!("{:<8} {:<16} {:<6} {}", ver, time_s, img, snap);
+            }
+        }
+    }
+    Ok(())
+}
+
+/// unix 秒 → "YYYY-MM-DD HH:MM"（UTC；零依赖手写，展示用途）
+fn chrono_like(t: u64) -> String {
+    // 简化儒略日换算（Howard Hinnant 算法）：天数 → 年月日
+    let days = (t / 86400) as i64;
+    let secs = (t % 86400) as u32;
+    let z = days + 719468;
+    let era = z.div_euclid(146097);
+    let doe = z.rem_euclid(146097);
+    let yoe = (doe - doe / 1460 + doe / 36524 - doe / 146096) / 365;
+    let y = yoe + era * 400;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    let mp = (5 * doy + 2) / 153;
+    let d = doy - (153 * mp + 2) / 5 + 1;
+    let m = if mp < 10 { mp + 3 } else { mp - 9 };
+    let y = if m <= 2 { y + 1 } else { y };
+    format!(
+        "{:04}-{:02}-{:02} {:02}:{:02}",
+        y,
+        m,
+        d,
+        secs / 3600,
+        (secs % 3600) / 60
+    )
+}
+
 // ———— doctor ————
 
 fn doctor(cfg: &Config) -> Result<(), String> {
@@ -1074,6 +1162,16 @@ fn doctor(cfg: &Config) -> Result<(), String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // versions 表的日期换算：unix 秒 → UTC "YYYY-MM-DD HH:MM"（已知锚点，python 参考核对）
+    #[test]
+    fn chrono_like_known_anchors() {
+        assert_eq!(chrono_like(0), "1970-01-01 00:00");
+        assert_eq!(chrono_like(1_700_000_000), "2023-11-14 22:13");
+        assert_eq!(chrono_like(1_760_000_000), "2025-10-09 08:53");
+        // 闰日边界
+        assert_eq!(chrono_like(1_709_164_800), "2024-02-29 00:00");
+    }
 
     // A1 回归：--cpu 解析为 f64（正有限），且 JSON 值可被服务端 PubReq.cpu: Option<f64> 反序列化
     #[test]

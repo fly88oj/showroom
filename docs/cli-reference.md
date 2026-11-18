@@ -135,7 +135,8 @@ deploy: 第 1 步(push) 失败：docker push 失败
 | `showroom url <PROJECT>` | 打印项目 URL（`http://<server>/<PROJECT>/`），不开浏览器 |
 | `showroom logs <PROJECT> [--tail 100] [-f]` | 查看容器日志；`-f` 跟随（2s 轮询追加式打印） |
 | `showroom env <PROJECT>` | 打印注入容器的环境变量（DB/Redis 连接信息一目了然） |
-| `showroom rollback <PROJECT>` | 回滚到上一 tag（`last2` 记录），旧 tag 写回 `last2` |
+| `showroom rollback <PROJECT> [--version V]` | 回滚（缺省上一版本；`--version` 指定任意历史版本，配置随版本快照整体恢复） |
+| `showroom versions <PROJECT>` | 列出版本历史（当前版本/时间/镜像在库/快照摘要） |
 | `showroom stop <PROJECT>` | 停止（标记 stopped，autoheal 跳过） |
 | `showroom start <PROJECT>` | 启动（容器缺失则按 conf 重建） |
 | `showroom rm <PROJECT> --yes` | 彻底删除（容器/路由/DB/凭据/登记全清）；必须 `--yes` |
