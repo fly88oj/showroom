@@ -163,7 +163,42 @@ showroom db dump demo -o demo-$(date +%F).bin.zst
 showroom db restore demo demo-2026-10-10.bin.zst --confirm
 ```
 
-## 5. Agent Skill
+## 5. OSS 与 Redis 浏览（与控制台「数据」页对齐）
+
+### showroom oss（对象存储，plan-22）
+
+项目须已注入 `S3_*` 凭据（minoss 启用后发布即有；存量项目重发布一次）。全部签名、公网可用。
+
+| 命令 | 说明 |
+|---|---|
+| `showroom oss ls <PROJECT> [PREFIX]` | 列出对象（非递归一层；缺省桶根；目录以 `/` 结尾，大小可读化；>500 条截断提示到 stderr） |
+| `showroom oss cat <PROJECT> <KEY>` | 预览文本（64 KB 上限；二进制/超限给出说明与大小，非零退出） |
+| `showroom oss get <PROJECT> <KEY> [-o FILE \| --stdout]` | 下载对象（8 MB 内；缺省用对象文件名落当前目录；`--stdout` 可重定向） |
+
+```sh
+showroom oss ls demo
+showroom oss ls demo data/
+showroom oss cat demo data/config.yaml
+showroom oss get demo backup.tar.gz -o /tmp/backup.tar.gz
+```
+
+### showroom redis（键空间浏览，SPEC §10.3）
+
+浏览隔离同控制台：db 须 ∈ 名下项目的 redisdb 集合（管理员全池；越权与未登记钥匙同形 404）。
+
+| 命令 | 说明 |
+|---|---|
+| `showroom redis dbs` | 列出可浏览的逻辑库（db → 项目映射） |
+| `showroom redis keys <DB> [--q PREFIX]` | 列出键（`--q` 支持 glob 模式，缺省 `*`；单次上限 200，截断提示） |
+| `showroom redis get <DB> <KEY>` | 查看键值：type / ttl / 内容（数组逐行、对象 JSON 缩进、长值 4KB 截断，同控制台） |
+
+```sh
+showroom redis dbs
+showroom redis keys 3 --q 'sr_demo_*'
+showroom redis get 3 sr_demo_session
+```
+
+## 6. Agent Skill
 
 ### showroom skill
 

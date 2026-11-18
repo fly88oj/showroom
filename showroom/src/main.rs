@@ -7,6 +7,8 @@ mod srtp_transport;
 mod auth;
 mod config;
 mod db;
+mod oss;
+mod redis;
 
 use std::fs;
 use std::io::Write as _;
@@ -170,6 +172,16 @@ enum Cmd {
     Db {
         #[command(subcommand)]
         cmd: db::DbCmd,
+    },
+    /// OSS 对象存储浏览（plan-22，与控制台数据页 OSS tab 对齐）：ls/cat/get
+    Oss {
+        #[command(subcommand)]
+        cmd: oss::OssCmd,
+    },
+    /// Redis 浏览（SPEC §10.3，与控制台数据页 Redis tab 对齐）：dbs/keys/get
+    Redis {
+        #[command(subcommand)]
+        cmd: redis::RedisCmd,
     },
     /// 登录（plan-16 §4：账号+密码一次，密码经 OPAQUE 盲化永不上线）——绑定本机新钥匙、
     /// 自动配好 registry 凭据，此后全部子命令免密码（gh/ssh 模型）
@@ -370,6 +382,8 @@ showroom db reset <项目> --confirm                    # 清库重建（破坏�
             project_action(&cfg, cli.server, "/_api/rm", project)
         }
         Cmd::Db { cmd } => db::run(&cfg, cli.server, cmd),
+        Cmd::Oss { cmd } => oss::run(&cfg, cli.server, cmd),
+        Cmd::Redis { cmd } => redis::run(&cfg, cli.server, cmd),
         Cmd::Login { account, server_lan, ephemeral } => {
             auth::login(&cfg, account.as_deref(), server_lan.clone(), *ephemeral)
         }

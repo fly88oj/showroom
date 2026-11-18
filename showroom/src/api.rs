@@ -100,6 +100,42 @@ pub fn db_restore_query(project: &str, confirm: bool) -> String {
     format!("/_api/db-restore?project={project}&confirm={confirm}")
 }
 
+// —— OSS 浏览（plan-22 §4，与控制台 OSS tab 同端点）——
+
+pub fn s3_objects_query(project: &str, prefix: &str) -> String {
+    format!("/_api/s3-objects?project={project}&prefix={}", urlencode(prefix))
+}
+
+pub fn s3_get_query(project: &str, key: &str) -> String {
+    format!("/_api/s3-get?project={project}&key={}", urlencode(key))
+}
+
+pub fn s3_download_query(project: &str, key: &str) -> String {
+    format!("/_api/s3-download?project={project}&key={}", urlencode(key))
+}
+
+// —— Redis 浏览（SPEC §10.3，与控制台 Redis tab 同端点）——
+
+pub fn redis_keys_query(db: u8, q: &str) -> String {
+    format!("/_api/redis-keys?db={db}&q={}&limit=200", urlencode(q))
+}
+
+pub fn redis_get_query(db: u8, key: &str) -> String {
+    format!("/_api/redis-get?db={db}&key={}", urlencode(key))
+}
+
+/// 查询串百分号编码（对象键含 / 与 . 等，须转义）
+fn urlencode(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    for b in s.bytes() {
+        match b {
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => out.push(b as char),
+            _ => out.push_str(&format!("%{b:02X}")),
+        }
+    }
+    out
+}
+
 // —— 错误 ——
 
 pub struct ApiError {
