@@ -205,21 +205,30 @@ pub fn list_objects(root: &Path, project: &str, prefix: &str) -> R<(Vec<ObjEntry
 }
 
 /// 对象元数据（stat）：返回 size。预览超限时 serve 只取元数据做友好提示（不整读大对象）。
+/// mc 的 `mc: <ERROR>` 走 stdout（实测），脚本内 2>&1 合并后统一在 stdout 判不存在 → E_NOTFOUND。
 pub fn stat_object(root: &Path, project: &str, key: &str) -> R<u64> {
     check_mc_path("对象键", key)?;
     let (ak, sk, bucket) = project_creds(root, project)?;
     let creds = format!("{ak}\n{sk}\n");
-    let stat = exec_mc(
-        &format!(
-            "read -r AK; read -r SK\n\
-             export MC_HOST_p=\"http://$AK:$SK@127.0.0.1:9000\"\n\
-             mc stat --json p/{bucket}/{key}\n"
-        ),
-        &creds,
-        "stat",
-    )?;
+    let script = format!(
+        "read -r AK; read -r SK\n\
+         export MC_HOST_p=\"http://$AK:$SK@127.0.0.1:9000\"\n\
+         mc stat --json p/{bucket}/{key} 2>&1\n"
+    );
+    let (ok, out, _err) = dockerops::exec_stdin(CTR, &["sh", "-c", &script], creds.as_bytes())?;
+    let text = String::from_utf8_lossy(&out).to_string();
+    if !ok {
+        let low = text.to_lowercase();
+        if low.contains("does not exist") || low.contains("not found") {
+            return Err(ApiError::new("E_NOTFOUND", format!("对象不存在: {key}")));
+        }
+        return Err(ApiError::state(format!(
+            "minoss stat failed: {}",
+            dockerops::tail_lines(&text, 3)
+        )));
+    }
     // mc stat --json：一行对象元数据（size 字段）
-    stat.lines()
+    text.lines()
         .find_map(|l| serde_json::from_str::<Value>(l).ok())
         .and_then(|v| v["size"].as_u64())
         .ok_or_else(|| ApiError::new("E_NOTFOUND", format!("对象不存在或不可读: {key}")))
@@ -247,6 +256,50 @@ pub fn get_object(root: &Path, project: &str, key: &str, cap: u64) -> R<(u64, Ve
         "cat",
     )?;
     Ok((size, data))
+}
+
+/// 上传对象（serve s3-put 调用）：数据走 stdin 喂 mc pipe（凭据 stdin 首两行；argv 零数据零秘密）。
+/// 覆盖语义=S3 PUT 原子替换同 key。返回写入字节数。
+pub fn put_object(root: &Path, project: &str, key: &str, data: &[u8]) -> R<u64> {
+    check_mc_path("对象键", key)?;
+    if key.ends_with('/') {
+        return Err(ApiError::new("E_NAME", "对象键不得以 / 结尾（目录由对象隐式构成）"));
+    }
+    let (ak, sk, bucket) = project_creds(root, project)?;
+    let creds = format!("{ak}\n{sk}\n");
+    let script = format!(
+        "read -r AK; read -r SK\n\
+         export MC_HOST_p=\"http://$AK:$SK@127.0.0.1:9000\"\n\
+         mc pipe p/{bucket}/{key}\n"
+    );
+    // stdin = 凭据两行 + 原始数据（mc pipe 读到 EOF）
+    let mut stdin = creds.into_bytes();
+    stdin.extend_from_slice(data);
+    let (ok, _out, err) = dockerops::exec_stdin(CTR, &["sh", "-c", &script], &stdin)?;
+    if ok {
+        Ok(data.len() as u64)
+    } else {
+        let tail = dockerops::tail_lines(&String::from_utf8_lossy(&err), 5);
+        Err(ApiError::state(format!("minoss put failed: {tail}")))
+    }
+}
+
+/// 删除单个对象（serve s3-rm 调用）；不存在时报 E_NOTFOUND（幂等删除由调用方决定语义——
+/// 浏览场景点名删除，删错要可见）。存在性复用 stat_object（同款 E_NOTFOUND 语义）。
+pub fn rm_object(root: &Path, project: &str, key: &str) -> R<()> {
+    check_mc_path("对象键", key)?;
+    if key.ends_with('/') {
+        return Err(ApiError::new("E_NAME", "目录不能直接删除（删除其下全部对象后自动消失）"));
+    }
+    let _size = stat_object(root, project, key)?; // 不存在 → E_NOTFOUND
+    let (ak, sk, bucket) = project_creds(root, project)?;
+    let creds = format!("{ak}\n{sk}\n");
+    let script = format!(
+        "read -r AK; read -r SK\n\
+         export MC_HOST_p=\"http://$AK:$SK@127.0.0.1:9000\"\n\
+         mc rm p/{bucket}/{key}\n"
+    );
+    exec_mc(&script, &creds, "rm").map(|_| ())
 }
 
 #[cfg(test)]

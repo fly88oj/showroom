@@ -232,13 +232,15 @@ UI 与信息架构由 §17 定义（五标签：我的项目/发布/镜像库/�
 - CLI `showroom db dump` 同步三段式：begin → 1s 轮询 status 至 ready（1h 上限，failed 即时报错）→ 4MB chunk 循环落本地临时信封（每片≤4MB，内存恒定）→ 一次性私钥解密流式写目标文件/stdout。
 - 陈旧清理：`_tmp` 下 `.status` 并入 gc-images 的 24h 清理（原有 .bin/.meta 不变）。
 
-### 10.5 S3 对象浏览（plan-22，只读）
+### 10.5 OSS 浏览与读写（plan-22；读=browse，写=put/rm）
 - 端点（全部 `[签名+user_check 项目归属]`；后端用**项目自身凭据**访问——桶级策略隔离的实证路径）：
   - `GET /_api/s3-objects ?project=&prefix=` → `{objects:[{name,key,size,last_modified,is_dir}],truncated}`（`mc ls --json` 非递归一层；文件夹行 key 带 `/` 结尾供下钻；单次 500 条截断）
   - `GET /_api/s3-get ?project=&key=` → `{key,size,is_text,text?|note}`（文本预览 ≤64KB，UTF-8 校验；二进制给 note+prefix_hex）
   - `GET /_api/s3-download ?project=&key=` → `{key,size,content_b64}`（≤8MB；超出 E_STATE 提示容器内直取）
-- 前缀/对象键白名单 `^[A-Za-z0-9._/-]+$`（≤512 字符，E_NAME 越界拒绝——脚本拼接与路径歧义双防）。
-- minoss 禁用或项目未注入 S3_*（禁用期发布）→ E_STATE 如实报错；控制台「数据 → S3 对象」只读浏览（目录下钻/文本预览/下载），不做上传删除。
+  - `POST /_api/s3-put {project,key,content_b64}` → `{key,size}`（覆盖式 PUT，≤8MB 与下载对称；文件名即键落到当前前缀下）
+  - `POST /_api/s3-rm {project,key}` → `{ok,key}`（单对象点名删除；不存在 E_NOTFOUND；目录不可直接删——其下全部对象删除后自动消失）
+- 前缀/对象键白名单 `^[A-Za-z0-9._/-]+$`（≤512 字符，E_NAME 越界拒绝——脚本拼接与路径歧义双防；键不得以 / 结尾）。
+- minoss 禁用或项目未注入 S3_*（禁用期发布）→ E_STATE 如实报错；控制台「数据 → OSS」浏览/预览/下载/上传/删除（删除=按钮+确认），CLI `oss ls/cat/get/put/rm` 对齐（put 的对象键取文件路径，rm 需 --yes）。
 
 ## 11. 无槽位（slot）模型
 **动机**：简化概念（Demo 定向展示）；多版本并存=发布者自建多个相近名称项目；项目名默认随机提升被字典遍历发现的门槛。

@@ -36,6 +36,19 @@ pub enum OssCmd {
         #[arg(long, conflicts_with = "out")]
         stdout: bool,
     },
+    /// 上传文件为对象（8 MB 内；对象键=FILE 拆出的"前缀/键"，覆盖式）
+    Put {
+        project: String,
+        /// 本地文件（对象键取自路径：uploads/a.png → uploads/a.png）
+        file: PathBuf,
+    },
+    /// 删除单个对象（需 --yes；不存在时报错）
+    Rm {
+        project: String,
+        key: String,
+        #[arg(long)]
+        yes: bool,
+    },
 }
 
 pub fn run(cfg: &Config, force: Option<Which>, cmd: &OssCmd) -> Result<(), String> {
@@ -43,6 +56,8 @@ pub fn run(cfg: &Config, force: Option<Which>, cmd: &OssCmd) -> Result<(), Strin
         OssCmd::Ls { project, prefix } => ls(cfg, force, project, prefix.as_deref()),
         OssCmd::Cat { project, key } => cat(cfg, force, project, key),
         OssCmd::Get { project, key, out, stdout } => get(cfg, force, project, key, out.as_deref(), *stdout),
+        OssCmd::Put { project, file } => put(cfg, force, project, file),
+        OssCmd::Rm { project, key, yes } => rm(cfg, force, project, key, *yes),
     }
 }
 
@@ -143,6 +158,76 @@ fn get(
 }
 
 /// 标准 base64 解码（无外部依赖：字母表查表）
+/// 上传实现：读文件→校验 8MB→base64 编码→POST s3-put
+fn put(cfg: &Config, force: Option<Which>, project: &str, file: &Path) -> Result<(), String> {
+    check_project(project)?;
+    let data = fs::read(file).map_err(|e| format!("读取 {} 失败: {e}", file.display()))?;
+    if data.len() > 8 * 1024 * 1024 {
+        return Err(format!(
+            "文件 {}（{}）超过上传上限（8 MB），请在项目容器内用 S3_* 环境变量直传",
+            file.display(),
+            fmt_size(data.len() as u64)
+        ));
+    }
+    // 对象键=去首段 ./ 与绝对路径，保留目录结构（与控制台上传语义一致：文件路径即键）
+    let key = file
+        .components()
+        .filter(|c| !matches!(c, std::path::Component::RootDir | std::path::Component::CurDir))
+        .map(|c| c.as_os_str().to_string_lossy().to_string())
+        .collect::<Vec<_>>()
+        .join("/");
+    if key.is_empty() {
+        return Err("无法从文件路径推导对象键".into());
+    }
+    let api = Api::connect(cfg, force)?;
+    let v = api.signed_post_json(
+        "/_api/s3-put",
+        &serde_json::json!({ "project": project, "key": key, "content_b64": b64_encode(&data) }),
+    )?;
+    println!(
+        "已上传 {} → {}（{}）",
+        file.display(),
+        v["key"].as_str().unwrap_or(&key),
+        fmt_size(v["size"].as_u64().unwrap_or(data.len() as u64))
+    );
+    Ok(())
+}
+
+/// 删除实现：--yes 守门（与 rm 展项同款）
+fn rm(cfg: &Config, force: Option<Which>, project: &str, key: &str, yes: bool) -> Result<(), String> {
+    check_project(project)?;
+    if !yes {
+        return Err(format!("删除对象 {key} 需 --yes（不可恢复；目录随最后一个对象消失）"));
+    }
+    let api = Api::connect(cfg, force)?;
+    api.signed_post_json("/_api/s3-rm", &serde_json::json!({ "project": project, "key": key }))?;
+    println!("已删除 {key}");
+    Ok(())
+}
+
+/// 标准 base64 编码（无外部依赖）
+fn b64_encode(data: &[u8]) -> String {
+    const TBL: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    let mut out = String::with_capacity(data.len().div_ceil(3) * 4);
+    for chunk in data.chunks(3) {
+        let b = [chunk[0], *chunk.get(1).unwrap_or(&0), *chunk.get(2).unwrap_or(&0)];
+        let n = ((b[0] as u32) << 16) | ((b[1] as u32) << 8) | b[2] as u32;
+        let group = [(n >> 18) & 63, (n >> 12) & 63, (n >> 6) & 63, n & 63];
+        let full: String = group.iter().map(|&i| TBL[i as usize] as char).collect();
+        match chunk.len() {
+            1 => out.push_str(&full[..2]),
+            2 => out.push_str(&full[..3]),
+            _ => out.push_str(&full),
+        }
+    }
+    match data.len() % 3 {
+        1 => out.push_str("=="),
+        2 => out.push('='),
+        _ => {}
+    }
+    out
+}
+
 fn b64_decode(s: &str) -> Result<Vec<u8>, String> {
     const TBL: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
     let mut rev = [255u8; 256];
@@ -200,6 +285,15 @@ mod tests {
         };
         assert_eq!(b64_decode(&enc).unwrap(), all);
         assert!(b64_decode("!!!").is_err());
+    }
+
+    #[test]
+    fn b64_encode_matches_decode_roundtrip() {
+        for data in [&b""[..], &b"a"[..], &b"ab"[..], &b"abc"[..], &b"abcd"[..]] {
+            assert_eq!(b64_decode(&b64_encode(data)).unwrap(), data.to_vec());
+        }
+        let all: Vec<u8> = (0u16..=255).map(|i| i as u8).collect();
+        assert_eq!(b64_decode(&b64_encode(&all)).unwrap(), all);
     }
 
     #[test]

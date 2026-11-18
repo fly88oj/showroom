@@ -378,6 +378,48 @@ export function Data({ onOpenSettings }: { onOpenSettings: () => void }) {
     }
   }
 
+  // —— 上传/删除（写路径，与读同款项目凭据；上传=覆盖式，删除=单对象点名+确认）——
+  const [upBusy, setUpBusy] = useState(false);
+  const [rmConfirm, setRmConfirm] = useState<string | null>(null); // 待删对象 full_key
+
+  async function uploadS3(file: File) {
+    const bad = checkProj(dbProject);
+    if (bad) { setProjErr(bad); return; }
+    if (file.size > 8 * 1024 * 1024) {
+      toast.error(`文件 ${fmtSize(file.size)} 超过上传上限（8 MB），请在项目容器内用 S3_* 环境变量直传`);
+      return;
+    }
+    setUpBusy(true);
+    try {
+      const buf = new Uint8Array(await file.arrayBuffer());
+      let bin = "";
+      const CH = 0x8000;
+      for (let i = 0; i < buf.length; i += CH) bin += String.fromCharCode(...buf.subarray(i, i + CH));
+      const key = (s3Prefix ? s3Prefix : "") + file.name;
+      await api("POST", "/_api/s3-put", { project: dbProject, key, content_b64: btoa(bin) });
+      toast.success(`已上传 ${key}（${fmtSize(file.size)}）`);
+      void queryS3For(s3Prefix);
+    } catch (e) {
+      apiFailToast(e, "上传");
+    } finally {
+      setUpBusy(false);
+    }
+  }
+
+  async function removeS3() {
+    if (!rmConfirm) return;
+    try {
+      await api("POST", "/_api/s3-rm", { project: dbProject, key: rmConfirm });
+      toast.success(`已删除 ${rmConfirm}`);
+      if (s3Sel?.key === rmConfirm) setS3Sel(null);
+      void queryS3For(s3Prefix);
+    } catch (e) {
+      apiFailToast(e, "删除");
+    } finally {
+      setRmConfirm(null);
+    }
+  }
+
   async function downloadS3() {
     if (!s3Sel) return;
     try {
@@ -674,6 +716,20 @@ export function Data({ onOpenSettings }: { onOpenSettings: () => void }) {
             </div>
             <Button variant="outline" disabled={!dbProject} onClick={queryS3}>查询</Button>
             <Button variant="outline" disabled={!s3Prefix} onClick={s3Up}>上一级</Button>
+            {/* 上传：文件名即对象键（落到当前前缀下）；覆盖式 PUT */}
+            <label htmlFor="s3-upload-file">
+              <Button variant="outline" asChild disabled={!dbProject || upBusy}>
+                <span>{upBusy ? "上传中…" : "上传"}</span>
+              </Button>
+            </label>
+            <input
+              id="s3-upload-file" type="file" className="hidden"
+              onChange={(e) => {
+                const f = e.target.files?.[0];
+                if (f) void uploadS3(f);
+                e.target.value = ""; // 同名文件可重复选
+              }}
+            />
             <span className="pb-1.5 text-xs text-muted-foreground" aria-live="polite">
               {s3Count}{s3Trunc ? "（列表上限 500 已截断，可用前缀缩小范围）" : ""}
             </span>
@@ -689,13 +745,14 @@ export function Data({ onOpenSettings }: { onOpenSettings: () => void }) {
                       <TableHead className="font-mono">对象</TableHead>
                       <TableHead className="w-20 font-mono">大小</TableHead>
                       <TableHead className="w-36 font-mono">修改时间</TableHead>
+                      <TableHead className="w-10" />
                     </TableRow>
                   </TableHeader>
                   <TableBody>
                     {s3Objects === null ? (
-                      <TableRow><TableCell colSpan={3} className="py-4 text-center text-xs text-muted-foreground">（点击「查询」载入对象列表）</TableCell></TableRow>
+                      <TableRow><TableCell colSpan={4} className="py-4 text-center text-xs text-muted-foreground">（点击「查询」载入对象列表）</TableCell></TableRow>
                     ) : s3Objects.length === 0 ? (
-                      <TableRow><TableCell colSpan={3} className="py-4 text-center text-xs text-muted-foreground">（无对象）</TableCell></TableRow>
+                      <TableRow><TableCell colSpan={4} className="py-4 text-center text-xs text-muted-foreground">（无对象）</TableCell></TableRow>
                     ) : s3Objects.map((o) => (
                       <TableRow
                         key={o.key}
@@ -705,6 +762,18 @@ export function Data({ onOpenSettings }: { onOpenSettings: () => void }) {
                         <TableCell className="max-w-0 truncate font-mono text-xs">{o.name}</TableCell>
                         <TableCell className="font-mono text-xs">{o.is_dir ? "—" : fmtSize(o.size)}</TableCell>
                         <TableCell className="font-mono text-xs">{o.last_modified || "—"}</TableCell>
+                        {/* 删除=风险操作：按钮+确认弹窗；目录行不提供（删除其下全部对象后自动消失） */}
+                        <TableCell className="px-1">
+                          {!o.is_dir && (
+                            <Button
+                              variant="ghost" size="icon-xs" aria-label={`删除 ${o.name}`}
+                              className="text-muted-foreground hover:text-destructive"
+                              onClick={(e) => { e.stopPropagation(); setRmConfirm(o.key); }}
+                            >
+                              ✕
+                            </Button>
+                          )}
+                        </TableCell>
                       </TableRow>
                     ))}
                   </TableBody>
@@ -733,7 +802,7 @@ export function Data({ onOpenSettings }: { onOpenSettings: () => void }) {
             </Field>
           </div>
           <p className="text-xs text-muted-foreground">
-            每个项目一个独立的桶（权限仅限本桶，桶外不可见）；管理员可浏览任意项目的桶。对象键支持字母数字与 . _ - /；列表单次 500 条、预览 64KB、下载 8MB 上限，更大对象请在项目容器内用 S3_* 环境变量直取。
+            每个项目一个独立的桶（权限仅限本桶，桶外不可见）；管理员可浏览任意项目的桶。对象键支持字母数字与 . _ - /；上传/下载单次 8MB、预览 64KB、列表单次 500 条，更大对象请在项目容器内用 S3_* 环境变量直取；上传同名对象即覆盖。
           </p>
         </TabsContent>
       </Tabs>
@@ -756,6 +825,12 @@ export function Data({ onOpenSettings }: { onOpenSettings: () => void }) {
         title={`重置 ${dbProject} 的数据库？`} confirmText="重置" busy={dangerBusy} onConfirm={reset}
       >
         全部表与数据将被删除并重建（连接凭据不变），不可恢复。此操作不可撤销，如需保留请先「备份下载」。
+      </Confirm>
+      <Confirm
+        open={!!rmConfirm} onOpenChange={(v) => !v && setRmConfirm(null)}
+        title={`删除对象 ${rmConfirm}？`} confirmText="删除" onConfirm={removeS3}
+      >
+        该对象将从 OSS 桶中永久删除，不可恢复；目录会随其下最后一个对象一起消失。
       </Confirm>
     </div>
   );

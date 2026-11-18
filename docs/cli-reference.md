@@ -174,6 +174,8 @@ showroom db restore demo demo-2026-10-10.bin.zst --confirm
 | `showroom oss ls <PROJECT> [PREFIX]` | 列出对象（非递归一层；缺省桶根；目录以 `/` 结尾，大小可读化；>500 条截断提示到 stderr） |
 | `showroom oss cat <PROJECT> <KEY>` | 预览文本（64 KB 上限；二进制/超限给出说明与大小，非零退出） |
 | `showroom oss get <PROJECT> <KEY> [-o FILE \| --stdout]` | 下载对象（8 MB 内；缺省用对象文件名落当前目录；`--stdout` 可重定向） |
+| `showroom oss put <PROJECT> <FILE>` | 上传文件为对象（8 MB 内；对象键=文件路径保留目录结构，覆盖式） |
+| `showroom oss rm <PROJECT> <KEY> --yes` | 删除单个对象（不可恢复；`--yes` 守门；目录随最后一个对象消失） |
 
 ```sh
 showroom oss ls demo

@@ -854,6 +854,41 @@ async fn dispatch(
             })))
         }
 
+        // —— OSS 写入（plan-22 §4 增补）：上传=覆盖式 PUT（8MB 内与下载对称）；删除=单对象点名删 ——
+        // 仍用项目自身凭据执行（隔离模型与浏览一致）；大文件走容器内 SDK。
+
+        ("POST", "/_api/s3-put", Collected::Mem(b)) => {
+            let req: S3PutReq = jbody(b)?;
+            state::check_name("project", &req.project)?;
+            user_check(&s.root, &req.project, &user)?;
+            use base64::Engine;
+            let data = base64::engine::general_purpose::STANDARD
+                .decode(&req.content_b64)
+                .map_err(|e| ApiError::new("E_NAME", format!("content_b64 非法: {e}")))?;
+            if data.len() as u64 > s3::DOWNLOAD_CAP {
+                return Err(ApiError::state(format!(
+                    "上传内容 {} 字节超过单次上限 {} 字节；大文件请在项目容器内用 S3_* 环境变量直传",
+                    data.len(),
+                    s3::DOWNLOAD_CAP
+                )));
+            }
+            let root = s.root.clone();
+            let key_echo = req.key.clone();
+            let (project, key) = (req.project, req.key);
+            let written = blk(move || s3::put_object(&root, &project, &key, &data)).await?;
+            Ok(Json(json!({"key": key_echo, "size": written})))
+        }
+
+        ("POST", "/_api/s3-rm", Collected::Mem(b)) => {
+            let req: S3KeyReq = jbody(b)?;
+            state::check_name("project", &req.project)?;
+            user_check(&s.root, &req.project, &user)?;
+            let key_echo = req.key.clone();
+            let root = s.root.clone();
+            blk(move || s3::rm_object(&root, &req.project, &req.key)).await?;
+            Ok(Json(json!({"ok": true, "key": key_echo})))
+        }
+
         ("GET", "/_api/logs", _) => {
             let project = qget(&q, "project")?;
             user_check(&s.root, &project, &user)?;
@@ -1453,6 +1488,21 @@ struct DbSqlReq {
     project: String,
     sql: String,
     confirm: Option<bool>,
+}
+
+/// POST /_api/s3-put body：`{project, key, content_b64}`（≤8MB，覆盖式 PUT）。
+#[derive(Deserialize)]
+struct S3PutReq {
+    project: String,
+    key: String,
+    content_b64: String,
+}
+
+/// POST /_api/s3-rm body：`{project, key}`（单对象点名删除）。
+#[derive(Deserialize)]
+struct S3KeyReq {
+    project: String,
+    key: String,
 }
 
 #[derive(Deserialize)]
